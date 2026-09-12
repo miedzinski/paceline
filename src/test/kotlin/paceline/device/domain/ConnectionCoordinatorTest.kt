@@ -1,0 +1,370 @@
+package paceline.device.domain
+
+import paceline.device.ports.DeviceCommunicationException
+import paceline.device.ports.DeviceDiscoveryResult
+import paceline.testsupport.FakeBluetoothDiscovery
+import paceline.testsupport.FakeDeviceCommunication
+import paceline.testsupport.FakeWifiDiscovery
+import paceline.testsupport.kickrCore2Candidate
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+
+class ConnectionCoordinatorTest {
+    private val candidate = kickrCore2Candidate()
+    private val device = candidate.toDeviceAdvertisement()
+
+    private fun coordinator(
+        communication: FakeDeviceCommunication = FakeDeviceCommunication(),
+        wifiResult: DeviceDiscoveryResult = DeviceDiscoveryResult.Found(listOf(candidate)),
+        bluetoothResult: DeviceDiscoveryResult = DeviceDiscoveryResult.NotFound,
+    ): ConnectionCoordinator =
+        ConnectionCoordinator(
+            wifiDiscovery = FakeWifiDiscovery(wifiResult),
+            bluetoothDiscovery = FakeBluetoothDiscovery(bluetoothResult),
+            communication = communication,
+        )
+
+    @Test
+    fun `does not discover or connect until requested`() {
+        // given a coordinator with a discoverable device advertisement:
+        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound)
+        val communication = FakeDeviceCommunication()
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery = wifiDiscovery,
+                bluetoothDiscovery = bluetoothDiscovery,
+                communication = communication,
+            )
+
+        // when the application has started but no user action has happened:
+        // then discovery and communication remain untouched:
+        assertEquals(0, wifiDiscovery.calls)
+        assertEquals(0, bluetoothDiscovery.calls)
+        assertEquals(emptyList(), communication.connectedDevices)
+        assertEquals(ConnectionPhase.READY, coordinator.current().phase)
+    }
+
+    @Test
+    fun `discovery lists device advertisements without connecting`() {
+        // given a discoverable device advertisement and a fake communication port:
+        val communication = FakeDeviceCommunication()
+        val coordinator = coordinator(communication = communication)
+
+        // when the user requests available devices:
+        val result = coordinator.discover()
+
+        // then discovery reports the advertisement while no connection is opened:
+        assertEquals(ConnectionPhase.DISCOVERED, result.state.phase)
+        assertEquals(device, result.devices.single().device)
+        assertEquals(emptyList(), communication.connectedDevices)
+        assertEquals(ConnectionPhase.DISCOVERED, coordinator.current().phase)
+    }
+
+    @Test
+    fun `discovery combines wifi and Bluetooth source candidates`() {
+        // given both discovery sources have candidates:
+        val bluetoothCandidate =
+            kickrCore2Candidate(name = "KICKR CORE BLE").copy(
+                endpoint =
+                    DeviceEndpoint.Bluetooth(
+                        "AA:BB:CC:DD:EE:FF",
+                        "11:22:33:44:55:66",
+                    ),
+            )
+        val communication = FakeDeviceCommunication()
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate))),
+                bluetoothDiscovery =
+                    FakeBluetoothDiscovery(DeviceDiscoveryResult.Found(listOf(bluetoothCandidate))),
+                communication = communication,
+            )
+
+        // when the user requests available devices:
+        val result = coordinator.discover()
+
+        // then both transport candidates are returned without opening communication:
+        assertEquals(
+            listOf(device, bluetoothCandidate.toDeviceAdvertisement()),
+            result.devices.map { it.device },
+        )
+        assertEquals(emptyList(), communication.connectedDevices)
+    }
+
+    @Test
+    fun `discovery keeps Bluetooth candidates when wifi discovery fails`() {
+        // given a Wi-Fi discovery failure and a successful Bluetooth discovery:
+        val bluetoothCandidate =
+            kickrCore2Candidate(name = "KICKR CORE BLE").copy(
+                endpoint =
+                    DeviceEndpoint.Bluetooth(
+                        "AA:BB:CC:DD:EE:FF",
+                        "11:22:33:44:55:66",
+                    ),
+            )
+        val communication = FakeDeviceCommunication()
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery =
+                    FakeWifiDiscovery(
+                        DeviceDiscoveryResult.Failed(
+                            ConnectionFailureCode.DISCOVERY_ERROR,
+                            "multicast unavailable",
+                        ),
+                    ),
+                bluetoothDiscovery =
+                    FakeBluetoothDiscovery(DeviceDiscoveryResult.Found(listOf(bluetoothCandidate))),
+                communication = communication,
+            )
+
+        // when the user requests available devices:
+        val result = coordinator.discover()
+
+        // then the available Bluetooth candidate is returned:
+        assertEquals(ConnectionPhase.DISCOVERED, result.state.phase)
+        assertEquals(listOf(bluetoothCandidate.toDeviceAdvertisement()), result.devices.map { it.device })
+        assertEquals(emptyList(), communication.connectedDevices)
+    }
+
+    @Test
+    fun `connecting opens the selected device and reaches connected`() {
+        // given a discovered device advertisement:
+        val communication = FakeDeviceCommunication()
+        val coordinator = coordinator(communication = communication)
+        val discovery = coordinator.discover()
+
+        // when the user opens the selected device connection:
+        val result = coordinator.connect(discovery.devices.single().id)
+
+        // then the selected device reaches the connected state:
+        assertEquals(ConnectionPhase.CONNECTED, result.phase)
+        assertEquals(device, result.device)
+        assertEquals(listOf(device), communication.connectedDevices)
+        assertEquals(ConnectionPhase.CONNECTED, coordinator.current().phase)
+
+        coordinator.close()
+        assertEquals(
+            false,
+            communication.connections
+                .single()
+                .connection
+                .isOpen(),
+        )
+    }
+
+    @Test
+    fun `connecting to the same open device is idempotent`() {
+        // given a discovered device with an open connection:
+        val communication = FakeDeviceCommunication()
+        val coordinator = coordinator(communication = communication)
+        val deviceId =
+            coordinator
+                .discover()
+                .devices
+                .single()
+                .id
+        val firstResult = coordinator.connect(deviceId)
+
+        // when the same device is connected again:
+        val secondResult = coordinator.connect(deviceId)
+
+        // then the existing connection is returned without opening another connection:
+        assertEquals(firstResult, secondResult)
+        assertEquals(listOf(device), communication.connectedDevices)
+    }
+
+    @Test
+    fun `refreshes discovery while preserving an active connection`() {
+        // given a device with an active connection and discovery sources that can be queried again:
+        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound)
+        val communication = FakeDeviceCommunication()
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery = wifiDiscovery,
+                bluetoothDiscovery = bluetoothDiscovery,
+                communication = communication,
+            )
+        val deviceId =
+            coordinator
+                .discover()
+                .devices
+                .single()
+                .id
+        coordinator.connect(deviceId)
+
+        // when available devices are requested again:
+        val refreshed = coordinator.discover()
+
+        // then discovery runs again without replacing the active connection:
+        assertEquals(2, wifiDiscovery.calls)
+        assertEquals(ConnectionPhase.CONNECTED, refreshed.state.phase)
+        assertEquals(device, refreshed.devices.single().device)
+        assertEquals(ConnectionPhase.CONNECTED, coordinator.current().phase)
+        assertEquals(listOf(device), communication.connectedDevices)
+    }
+
+    @Test
+    fun `reports a failed refresh without losing the active connection state`() {
+        // given a device with an active connection and a failed next discovery:
+        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound)
+        val communication = FakeDeviceCommunication()
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery = wifiDiscovery,
+                bluetoothDiscovery = bluetoothDiscovery,
+                communication = communication,
+            )
+        val deviceId =
+            coordinator
+                .discover()
+                .devices
+                .single()
+                .id
+        coordinator.connect(deviceId)
+        wifiDiscovery.result = DeviceDiscoveryResult.NotFound
+
+        // when discovery is refreshed:
+        val refreshed = coordinator.discover()
+
+        // then the discovery failure is visible without changing the live connection state:
+        assertEquals(ConnectionPhase.CONNECTED, refreshed.state.phase)
+        assertEquals(ConnectionFailureCode.NO_DEVICE_FOUND, refreshed.failure?.code)
+        assertEquals(ConnectionPhase.CONNECTED, coordinator.current().phase)
+        assertEquals(listOf(device), communication.connectedDevices)
+    }
+
+    @Test
+    fun `opening a second device connection is rejected while one is active`() {
+        // given two discovered devices and one active connection:
+        val secondCandidate =
+            kickrCore2Candidate(
+                name = "KICKR CORE 88CD",
+                host = "192.168.1.46",
+            )
+        val communication = FakeDeviceCommunication()
+        val coordinator =
+            coordinator(
+                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
+                communication = communication,
+            )
+        val devices = coordinator.discover().devices
+        coordinator.connect(devices.first().id)
+
+        // when the second device is selected:
+        // then the existing connection is preserved and no second connection is opened:
+        assertFailsWith<AlreadyConnectedException> {
+            coordinator.connect(devices[1].id)
+        }
+        assertEquals(listOf(device), communication.connectedDevices)
+    }
+
+    @Test
+    fun `discovery exposes every matching service advertisement`() {
+        // given a discovery result containing an unknown device advertisement:
+        val communication =
+            FakeDeviceCommunication {
+                error("connection should not be attempted")
+            }
+        val coordinator =
+            coordinator(
+                wifiResult =
+                    DeviceDiscoveryResult.Found(
+                        listOf(
+                            DeviceDiscoveryCandidate(
+                                name = "Kitchen speaker",
+                                endpoint = DeviceEndpoint.Wifi("192.168.1.20", 80),
+                            ),
+                        ),
+                    ),
+                communication = communication,
+            )
+
+        // when available devices are requested:
+        val result = coordinator.discover()
+
+        // then the advertisement is returned without model filtering or connecting:
+        assertEquals(ConnectionPhase.DISCOVERED, result.state.phase)
+        assertEquals(
+            "Kitchen speaker",
+            result.devices
+                .single()
+                .device.name,
+        )
+        assertEquals(emptyList(), communication.connectedDevices)
+    }
+
+    @Test
+    fun `connecting passes an unknown service advertisement to communication`() {
+        // given an unknown device advertisement that the user selected:
+        val candidate =
+            DeviceDiscoveryCandidate(
+                name = "Unknown device",
+                endpoint = DeviceEndpoint.Wifi("192.168.1.20", 80),
+            )
+        val communication = FakeDeviceCommunication()
+        val coordinator =
+            coordinator(
+                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate)),
+                communication = communication,
+            )
+        val deviceId =
+            coordinator
+                .discover()
+                .devices
+                .single()
+                .id
+
+        // when the user opens the selected device connection:
+        val result = coordinator.connect(deviceId)
+
+        // then the endpoint is attempted without a model allowlist:
+        assertEquals(ConnectionPhase.CONNECTED, result.phase)
+        assertEquals("Unknown device", result.device?.name)
+        assertEquals("Unknown device", communication.connectedDevices.single().name)
+    }
+
+    @Test
+    fun `discovery reports no device without attempting a connection`() {
+        // given an empty discovery result:
+        val communication =
+            FakeDeviceCommunication {
+                error("connection should not be attempted")
+            }
+        val coordinator = coordinator(wifiResult = DeviceDiscoveryResult.NotFound, communication = communication)
+
+        // when available devices are requested:
+        val result = coordinator.discover()
+
+        // then the device is unavailable and communication is untouched:
+        assertEquals(ConnectionPhase.UNAVAILABLE, result.state.phase)
+        assertEquals(ConnectionFailureCode.NO_DEVICE_FOUND, result.state.failure?.code)
+        assertEquals(
+            "No device was found on the configured network or Bluetooth transports",
+            result.state.failure?.message,
+        )
+        assertEquals(emptyList(), communication.connectedDevices)
+    }
+
+    @Test
+    fun `opening a device connection reports communication failures`() {
+        // given a discoverable device advertisement and a communication failure:
+        val communication =
+            FakeDeviceCommunication {
+                throw DeviceCommunicationException("Connection refused")
+            }
+        val coordinator = coordinator(communication = communication)
+        val deviceOption = coordinator.discover().devices.single()
+
+        // when the selected device connection is opened:
+        val result = coordinator.connect(deviceOption.id)
+
+        // then the connection failure is exposed with its diagnostic message:
+        assertEquals(ConnectionPhase.FAILED, result.phase)
+        assertEquals(ConnectionFailureCode.CONNECTION_FAILED, result.failure?.code)
+        assertEquals("Connection refused", result.failure?.message)
+    }
+}

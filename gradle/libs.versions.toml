@@ -1,0 +1,31 @@
+[versions]
+kotlin = "2.3.21"
+spring-boot = "4.1.1"
+spring-dependency-management = "1.1.7"
+ktlint-gradle = "14.2.0"
+ktlint-engine = "1.8.0"
+integration-test = "2.2.5"
+jmdns = "3.6.3"
+mockk = "1.14.11"
+bluez-dbus = "0.3.5"
+dbus-java = "5.2.0"
+
+[libraries]
+spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" }
+spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web" }
+kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+kotlin-test-junit5 = { module = "org.jetbrains.kotlin:kotlin-test-junit5" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+jmdns = { module = "org.jmdns:jmdns", version.ref = "jmdns" }
+mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
+bluez-dbus = { module = "com.github.hypfvieh:bluez-dbus", version.ref = "bluez-dbus" }
+dbus-java-transport-native-unixsocket = { module = "com.github.hypfvieh:dbus-java-transport-native-unixsocket", version.ref = "dbus-java" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-spring = { id = "org.jetbrains.kotlin.plugin.spring", version.ref = "kotlin" }
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "spring-dependency-management" }
+ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-gradle" }
+integration-test = { id = "com.coditory.integration-test", version.ref = "integration-test" }
