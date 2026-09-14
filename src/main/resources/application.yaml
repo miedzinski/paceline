@@ -8,3 +8,5 @@ paceline:
     discovery-timeout: 5s
     connect-timeout: 3s
     protocol-timeout: 3s
+  intervals:
+    base-url: https://intervals.icu
