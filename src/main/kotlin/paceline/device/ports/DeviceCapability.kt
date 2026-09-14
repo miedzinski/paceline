@@ -13,3 +13,13 @@ interface IndoorBikeTelemetrySource : DeviceCapability {
 
     fun latestTelemetry(): IndoorBikeTelemetry? = null
 }
+
+interface IndoorBikePowerControl :
+    DeviceCapability,
+    AutoCloseable {
+    fun requestControl()
+
+    fun setTargetPower(powerWatts: Int)
+
+    override fun close() = Unit
+}

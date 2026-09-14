@@ -6,6 +6,7 @@ import paceline.device.ports.BluetoothDiscovery
 import paceline.device.ports.DeviceCommunication
 import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
+import paceline.device.ports.IndoorBikePowerControl
 import paceline.device.ports.IndoorBikeTelemetrySource
 import paceline.device.ports.WifiDiscovery
 import java.util.UUID
@@ -38,6 +39,12 @@ class ConnectionCoordinator(
             ?.takeIf { it.connection.isOpen() && current().phase == ConnectionPhase.CONNECTED }
             ?.capability<IndoorBikeTelemetrySource>()
             ?.latestTelemetry()
+
+    @Synchronized
+    fun currentPowerControl(): IndoorBikePowerControl? =
+        connection
+            ?.takeIf { it.connection.isOpen() && current().phase == ConnectionPhase.CONNECTED }
+            ?.capability<IndoorBikePowerControl>()
 
     @Synchronized
     fun discover(): DiscoverySnapshot {

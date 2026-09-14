@@ -10,6 +10,7 @@ import org.springframework.boot.test.web.server.LocalServerPort
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
+import org.springframework.http.MediaType
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
 import paceline.device.adapters.bluetooth.BluetoothAccess
@@ -28,6 +29,7 @@ import java.net.InetSocketAddress
 import java.time.Duration
 import javax.jmdns.JmDNS
 import javax.jmdns.ServiceInfo
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -113,6 +115,63 @@ class DeviceConnectionIntegrationTest {
         assertTrue(response.contains("\"cadenceRpm\":90.0"))
         assertTrue(response.contains("\"speedKph\":25.0"))
         assertEquals(1, deviceServer.acceptedConnections)
+    }
+
+    @Test
+    fun `active training session acquires control and updates the ERG target`() {
+        // given a connected WFTNP trainer with an FTMS control point:
+        val deviceId = deviceId(discoverResponse())
+        openConnectionResponse(deviceId)
+
+        // when a training session is started and its target is changed:
+        val sessionResponse =
+            restClient
+                .post()
+                .uri("/training-sessions")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val sessionId =
+            Regex("\"sessionId\":\"([^\"]+)\"")
+                .find(sessionResponse)
+                ?.groupValues
+                ?.get(1)
+                ?: error("No session id in response: $sessionResponse")
+        val targetResponse =
+            restClient
+                .put()
+                .uri("/training-sessions/$sessionId/erg-target")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("{\"powerWatts\":300}")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val stopResponse =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/stop")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+
+        // then the FTMS control procedures, including the zero-watt stop target, are sent through the WFTNP bridge:
+        assertTrue(sessionResponse.contains("\"state\":\"ACTIVE\""))
+        assertTrue(targetResponse.contains("\"ergTargetPowerWatts\":300"))
+        assertTrue(stopResponse.contains("\"state\":\"STOPPED\""))
+        assertTrue(stopResponse.contains("\"ergTargetPowerWatts\":0"))
+        assertEquals(3, deviceServer.writes.size)
+        assertContentEquals(byteArrayOf(0x00), deviceServer.writes[0].second)
+        assertContentEquals(byteArrayOf(0x05, 0x2c, 0x01), deviceServer.writes[1].second)
+        assertContentEquals(byteArrayOf(0x05, 0x00, 0x00), deviceServer.writes[2].second)
     }
 
     @Test

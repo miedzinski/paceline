@@ -8,6 +8,7 @@ import paceline.device.adapters.GattService
 import paceline.device.domain.DeviceAdvertisement
 import paceline.device.domain.IndoorBikeTelemetry
 import paceline.device.ports.DeviceConnection
+import paceline.device.ports.IndoorBikePowerControl
 import paceline.device.ports.IndoorBikeTelemetryListener
 import paceline.device.ports.IndoorBikeTelemetrySource
 import java.time.Clock
@@ -29,17 +30,32 @@ class FtmsDeviceConnection(
     private val decoder = FtmsIndoorBikeDataDecoder()
     private val telemetryCharacteristic: UUID
     private val notificationRegistration: AutoCloseable
+    val powerControl: IndoorBikePowerControl?
 
     init {
         try {
-            telemetryCharacteristic = findTelemetryCharacteristic(gattClient.discoverServices())
-            notificationRegistration = gattClient.addNotificationListener(::handleNotification)
+            val services = gattClient.discoverServices()
+            telemetryCharacteristic = findTelemetryCharacteristic(services)
+            val telemetryRegistration = gattClient.addNotificationListener(::handleNotification)
             try {
                 gattClient.enableNotifications(telemetryCharacteristic)
             } catch (exception: Exception) {
-                notificationRegistration.close()
+                telemetryRegistration.close()
                 throw exception
             }
+            notificationRegistration = telemetryRegistration
+            powerControl =
+                findPowerControlCharacteristic(services)?.let { characteristic ->
+                    try {
+                        FtmsErgControl(
+                            gattClient = gattClient,
+                            controlPointCharacteristic = characteristic,
+                        )
+                    } catch (exception: Exception) {
+                        telemetryRegistration.close()
+                        throw exception
+                    }
+                }
         } catch (exception: Exception) {
             gattClient.close()
             throw exception
@@ -58,6 +74,7 @@ class FtmsDeviceConnection(
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
+            powerControl?.close()
             notificationRegistration.close()
             gattClient.close()
         }
@@ -98,6 +115,19 @@ class FtmsDeviceConnection(
             ?: throw FtmsProtocolException(
                 "Device does not expose a notifiable FTMS Indoor Bike Data characteristic",
             )
+    }
+
+    private fun findPowerControlCharacteristic(services: List<GattService>): UUID? {
+        val ftmsService = services.firstOrNull { it.uuid == FtmsUuid.FITNESS_MACHINE_SERVICE } ?: return null
+        return ftmsService.characteristics
+            .firstOrNull {
+                it.uuid == FtmsUuid.FITNESS_MACHINE_CONTROL_POINT &&
+                    it.supports(GattCharacteristicProperty.WRITE) &&
+                    (
+                        it.supports(GattCharacteristicProperty.NOTIFY) ||
+                            it.supports(GattCharacteristicProperty.INDICATE)
+                    )
+            }?.uuid
     }
 }
 

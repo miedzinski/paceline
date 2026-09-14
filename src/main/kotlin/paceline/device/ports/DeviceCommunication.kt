@@ -7,7 +7,7 @@ fun interface DeviceCommunication {
     fun connect(device: DeviceAdvertisement): DeviceConnectionSession
 }
 
-class DeviceCommunicationException(
+open class DeviceCommunicationException(
     message: String,
     cause: Throwable? = null,
 ) : RuntimeException(message, cause)

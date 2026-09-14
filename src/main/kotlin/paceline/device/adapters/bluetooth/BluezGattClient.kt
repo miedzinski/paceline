@@ -76,6 +76,9 @@ class BluezGattClient(
                             val flags = characteristic.flags.orEmpty()
                             if ("notify" in flags) add(GattCharacteristicProperty.NOTIFY)
                             if ("indicate" in flags) add(GattCharacteristicProperty.INDICATE)
+                            if ("write" in flags || "write-without-response" in flags) {
+                                add(GattCharacteristicProperty.WRITE)
+                            }
                         }
                     characteristics[characteristicUuid] = characteristic
                     GattCharacteristic(characteristicUuid, properties)
@@ -97,6 +100,17 @@ class BluezGattClient(
                 ?: throw IllegalArgumentException("Bluetooth GATT characteristic $characteristic was not discovered")
         wrapper.startNotify()
         enabledCharacteristics += wrapper
+    }
+
+    override fun writeCharacteristic(
+        characteristic: UUID,
+        value: ByteArray,
+    ) {
+        checkOpen()
+        val wrapper =
+            characteristics[characteristic]
+                ?: throw IllegalArgumentException("Bluetooth GATT characteristic $characteristic was not discovered")
+        wrapper.writeValue(value, emptyMap())
     }
 
     override fun isOpen(): Boolean = !closed.get() && device.isConnected == true

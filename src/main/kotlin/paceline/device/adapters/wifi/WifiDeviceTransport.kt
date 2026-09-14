@@ -50,7 +50,7 @@ class WifiDeviceTransport(
                 )
             return DeviceConnectionSession(
                 connection = connection,
-                capabilities = listOf(connection),
+                capabilities = listOfNotNull(connection, connection.powerControl),
             ).also {
                 logger.info(
                     "Opened device protocol session to {} at {}:{} via Wi-Fi",

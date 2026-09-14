@@ -12,6 +12,7 @@ import org.springframework.boot.test.web.server.LocalServerPort
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
+import org.springframework.http.MediaType
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
 import paceline.device.adapters.GattCharacteristic
@@ -26,6 +27,7 @@ import paceline.testsupport.SyntheticBluetoothAccess
 import paceline.testsupport.SyntheticGattClient
 import java.time.Duration
 import javax.jmdns.JmDNS
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -98,7 +100,10 @@ class BluetoothDeviceConnectionIntegrationTest {
             DeviceEndpoint.Bluetooth("AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"),
             bluetooth.connectedEndpoint,
         )
-        assertEquals(listOf(FtmsUuid.INDOOR_BIKE_DATA), bluetooth.gattClient.enabledNotifications)
+        assertEquals(
+            listOf(FtmsUuid.INDOOR_BIKE_DATA, FtmsUuid.FITNESS_MACHINE_CONTROL_POINT),
+            bluetooth.gattClient.enabledNotifications,
+        )
 
         // and an Indoor Bike Data notification is decoded by the connected session:
         bluetooth.gattClient.emit(FtmsUuid.INDOOR_BIKE_DATA, telemetryNotification())
@@ -108,6 +113,72 @@ class BluetoothDeviceConnectionIntegrationTest {
         assertTrue(response.contains("\"powerWatts\":200"))
         assertTrue(response.contains("\"cadenceRpm\":90.0"))
         assertTrue(response.contains("\"speedKph\":25.0"))
+    }
+
+    @Test
+    fun `active training session acquires control and updates the ERG target`() {
+        // given a connected Bluetooth trainer with an FTMS control point:
+        val deviceId = deviceId(discoverResponse())
+        openConnectionResponse(deviceId)
+
+        // when a training session is started and its target is changed:
+        val sessionResponse =
+            restClient
+                .post()
+                .uri("/training-sessions")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val sessionId =
+            Regex("\"sessionId\":\"([^\"]+)\"")
+                .find(sessionResponse)
+                ?.groupValues
+                ?.get(1)
+                ?: error("No session id in response: $sessionResponse")
+        val targetResponse =
+            restClient
+                .put()
+                .uri("/training-sessions/$sessionId/erg-target")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("{\"powerWatts\":300}")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val stopResponse =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/stop")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+
+        // then both control requests and the zero-watt stop target reach the device:
+        assertTrue(sessionResponse.contains("\"state\":\"ACTIVE\""))
+        assertTrue(targetResponse.contains("\"ergTargetPowerWatts\":300"))
+        assertTrue(stopResponse.contains("\"state\":\"STOPPED\""))
+        assertTrue(stopResponse.contains("\"ergTargetPowerWatts\":0"))
+        assertEquals(3, bluetooth.gattClient.writes.size)
+        assertContentEquals(
+            byteArrayOf(0x00),
+            bluetooth.gattClient.writes[0].second,
+        )
+        assertContentEquals(
+            byteArrayOf(0x05, 0x2c, 0x01),
+            bluetooth.gattClient.writes[1].second,
+        )
+        assertContentEquals(
+            byteArrayOf(0x05, 0x00, 0x00),
+            bluetooth.gattClient.writes[2].second,
+        )
     }
 
     @Test
@@ -247,8 +318,22 @@ class BluetoothDeviceConnectionIntegrationTestConfiguration {
                             FtmsUuid.INDOOR_BIKE_DATA,
                             setOf(GattCharacteristicProperty.NOTIFY),
                         ),
+                        GattCharacteristic(
+                            FtmsUuid.FITNESS_MACHINE_CONTROL_POINT,
+                            setOf(
+                                GattCharacteristicProperty.WRITE,
+                                GattCharacteristicProperty.INDICATE,
+                            ),
+                        ),
                     ),
                 ),
             ),
-        )
+        ).also { gattClient ->
+            gattClient.onWrite = { characteristic, value ->
+                gattClient.emit(
+                    characteristic,
+                    byteArrayOf(0x80.toByte(), value.first(), 0x01),
+                )
+            }
+        }
 }

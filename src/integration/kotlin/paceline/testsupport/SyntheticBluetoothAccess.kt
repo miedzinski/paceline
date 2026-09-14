@@ -59,6 +59,8 @@ class SyntheticGattClient(
     private val listeners = CopyOnWriteArrayList<(GattNotification) -> Unit>()
 
     val enabledNotifications = CopyOnWriteArrayList<UUID>()
+    val writes = CopyOnWriteArrayList<Pair<UUID, ByteArray>>()
+    var onWrite: ((UUID, ByteArray) -> Unit)? = null
 
     override fun discoverServices(): List<GattService> {
         check(open.get()) { "Synthetic GATT client is closed" }
@@ -74,6 +76,15 @@ class SyntheticGattClient(
     override fun enableNotifications(characteristic: UUID) {
         check(open.get()) { "Synthetic GATT client is closed" }
         enabledNotifications += characteristic
+    }
+
+    override fun writeCharacteristic(
+        characteristic: UUID,
+        value: ByteArray,
+    ) {
+        check(open.get()) { "Synthetic GATT client is closed" }
+        writes += characteristic to value.copyOf()
+        onWrite?.invoke(characteristic, value.copyOf())
     }
 
     override fun isOpen(): Boolean = open.get()

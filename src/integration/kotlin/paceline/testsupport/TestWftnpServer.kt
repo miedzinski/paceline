@@ -5,9 +5,12 @@ import paceline.device.adapters.wifi.WftnpFrame
 import paceline.device.adapters.wifi.WftnpFrameCodec
 import paceline.device.adapters.wifi.WftnpMessageType
 import paceline.device.adapters.wifi.toWftnpBytes
+import paceline.device.adapters.wifi.uuidFromWftnpBytes
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
@@ -33,6 +36,8 @@ class TestWftnpServer(
     val acceptedConnections: Int
         get() = acceptedConnectionCount.get()
 
+    val writes = CopyOnWriteArrayList<Pair<UUID, ByteArray>>()
+
     override fun close() {
         if (closed.compareAndSet(false, true)) {
             serverSocket.close()
@@ -53,6 +58,11 @@ class TestWftnpServer(
                     val output = socket.getOutputStream()
                     while (!closed.get()) {
                         val request = WftnpFrameCodec.read(input) ?: return
+                        if (request.messageType == WftnpMessageType.WRITE_CHARACTERISTIC) {
+                            writes +=
+                                uuidFromWftnpBytes(request.data) to
+                                request.data.copyOfRange(16, request.data.size)
+                        }
                         val responseData =
                             when (request.messageType) {
                                 WftnpMessageType.DISCOVER_SERVICES -> {
@@ -62,11 +72,17 @@ class TestWftnpServer(
                                 WftnpMessageType.DISCOVER_CHARACTERISTICS -> {
                                     FtmsUuid.FITNESS_MACHINE_SERVICE.toWftnpBytes() +
                                         FtmsUuid.INDOOR_BIKE_DATA.toWftnpBytes() +
-                                        byteArrayOf(0x04)
+                                        byteArrayOf(0x04) +
+                                        FtmsUuid.FITNESS_MACHINE_CONTROL_POINT.toWftnpBytes() +
+                                        byteArrayOf(0x06)
                                 }
 
                                 WftnpMessageType.ENABLE_NOTIFICATIONS -> {
-                                    FtmsUuid.INDOOR_BIKE_DATA.toWftnpBytes()
+                                    request.data.copyOfRange(0, 16)
+                                }
+
+                                WftnpMessageType.WRITE_CHARACTERISTIC -> {
+                                    request.data.copyOfRange(0, 16)
                                 }
 
                                 else -> {
@@ -86,30 +102,43 @@ class TestWftnpServer(
                         )
                         output.flush()
 
-                        if (request.messageType == WftnpMessageType.ENABLE_NOTIFICATIONS) {
-                            output.write(
-                                WftnpFrameCodec.encode(
-                                    WftnpFrame(
-                                        version = 1,
-                                        messageType = WftnpMessageType.CHARACTERISTIC_NOTIFICATION,
-                                        sequence = 0,
-                                        responseCode = 0,
-                                        data =
-                                            FtmsUuid.INDOOR_BIKE_DATA.toWftnpBytes() +
-                                                byteArrayOf(
-                                                    0x44,
-                                                    0x00,
-                                                    0xC4.toByte(),
-                                                    0x09,
-                                                    0xB4.toByte(),
-                                                    0x00,
-                                                    0xC8.toByte(),
-                                                    0x00,
-                                                ),
-                                    ),
-                                ),
-                            )
-                            output.flush()
+                        when (request.messageType) {
+                            WftnpMessageType.ENABLE_NOTIFICATIONS -> {
+                                if (uuidFromWftnpBytes(request.data) == FtmsUuid.INDOOR_BIKE_DATA) {
+                                    writeNotification(
+                                        output,
+                                        FtmsUuid.INDOOR_BIKE_DATA.toWftnpBytes() +
+                                            byteArrayOf(
+                                                0x44,
+                                                0x00,
+                                                0xC4.toByte(),
+                                                0x09,
+                                                0xB4.toByte(),
+                                                0x00,
+                                                0xC8.toByte(),
+                                                0x00,
+                                            ),
+                                    )
+                                }
+                            }
+
+                            WftnpMessageType.WRITE_CHARACTERISTIC -> {
+                                if (uuidFromWftnpBytes(request.data) == FtmsUuid.FITNESS_MACHINE_CONTROL_POINT) {
+                                    writeNotification(
+                                        output,
+                                        FtmsUuid.FITNESS_MACHINE_CONTROL_POINT.toWftnpBytes() +
+                                            byteArrayOf(
+                                                0x80.toByte(),
+                                                request.data[16],
+                                                0x01,
+                                            ),
+                                    )
+                                }
+                            }
+
+                            else -> {
+                                Unit
+                            }
                         }
                     }
                 }
@@ -120,5 +149,23 @@ class TestWftnpServer(
         } finally {
             acceptedSocket = null
         }
+    }
+
+    private fun writeNotification(
+        output: java.io.OutputStream,
+        data: ByteArray,
+    ) {
+        output.write(
+            WftnpFrameCodec.encode(
+                WftnpFrame(
+                    version = 1,
+                    messageType = WftnpMessageType.CHARACTERISTIC_NOTIFICATION,
+                    sequence = 0,
+                    responseCode = 0,
+                    data = data,
+                ),
+            ),
+        )
+        output.flush()
     }
 }

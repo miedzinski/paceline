@@ -5,6 +5,7 @@ import java.util.UUID
 enum class GattCharacteristicProperty {
     NOTIFY,
     INDICATE,
+    WRITE,
 }
 
 data class GattCharacteristic(
@@ -30,6 +31,11 @@ interface GattClient : AutoCloseable {
     fun addNotificationListener(listener: (GattNotification) -> Unit): AutoCloseable
 
     fun enableNotifications(characteristic: UUID)
+
+    fun writeCharacteristic(
+        characteristic: UUID,
+        value: ByteArray,
+    )
 
     fun isOpen(): Boolean
 

@@ -310,6 +310,9 @@ class WftnpGattClient(
                                     if (characteristic.supports(WftnpCharacteristicProperty.NOTIFY)) {
                                         add(GattCharacteristicProperty.NOTIFY)
                                     }
+                                    if (characteristic.supports(WftnpCharacteristicProperty.WRITE)) {
+                                        add(GattCharacteristicProperty.WRITE)
+                                    }
                                 },
                         )
                     },
@@ -323,6 +326,13 @@ class WftnpGattClient(
 
     override fun enableNotifications(characteristic: UUID) {
         client.enableNotifications(characteristic)
+    }
+
+    override fun writeCharacteristic(
+        characteristic: UUID,
+        value: ByteArray,
+    ) {
+        client.writeCharacteristic(characteristic, value)
     }
 
     override fun isOpen(): Boolean = client.isOpen()

@@ -13,6 +13,8 @@ class FakeGattClient(
     private val open = AtomicBoolean(true)
     private val listeners = CopyOnWriteArrayList<(GattNotification) -> Unit>()
     val enabledNotifications = mutableListOf<UUID>()
+    val writes = mutableListOf<Pair<UUID, ByteArray>>()
+    var onWrite: ((UUID, ByteArray) -> Unit)? = null
 
     override fun discoverServices(): List<GattService> = services
 
@@ -25,6 +27,15 @@ class FakeGattClient(
     override fun enableNotifications(characteristic: UUID) {
         check(open.get()) { "Fake GATT client is closed" }
         enabledNotifications += characteristic
+    }
+
+    override fun writeCharacteristic(
+        characteristic: UUID,
+        value: ByteArray,
+    ) {
+        check(open.get()) { "Fake GATT client is closed" }
+        writes += characteristic to value.copyOf()
+        onWrite?.invoke(characteristic, value.copyOf())
     }
 
     override fun isOpen(): Boolean = open.get()
