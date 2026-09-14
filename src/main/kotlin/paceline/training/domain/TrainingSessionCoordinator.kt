@@ -1,6 +1,8 @@
 package paceline.training.domain
 
 import org.springframework.stereotype.Component
+import paceline.device.domain.HeartRateSourceDescriptor
+import paceline.device.domain.HeartRateTelemetry
 import paceline.device.domain.IndoorBikeTelemetry
 import paceline.device.ports.IndoorBikePowerControl
 import paceline.training.ports.ActivityUploadException
@@ -29,17 +31,27 @@ class TrainingSessionCoordinator(
     private var activeWorkout: ExecutableWorkout? = null
     private var stepDistanceStartMeters: Double? = null
     private var telemetryRegistration: AutoCloseable? = null
+    private var activeHeartRateSourceId: String? = null
+    private var heartRateRegistration: AutoCloseable? = null
     private val activityRecorder = InMemoryTrainingActivityRecorder()
     private var completedActivity: RecordedTrainingActivity? = null
 
     @Synchronized
-    fun current(): TrainingSessionState = state
+    fun current(): TrainingSessionState {
+        refreshHeartRate()
+        return state
+    }
 
     @Synchronized
-    fun start(workout: ExecutableWorkout? = null): TrainingSessionState {
+    fun start(
+        workout: ExecutableWorkout? = null,
+        heartRateSourceId: String? = null,
+    ): TrainingSessionState {
         if (state.phase == TrainingSessionPhase.ACTIVE) {
             throw TrainingSessionAlreadyActiveException()
         }
+
+        val selectedHeartRateSourceId = resolveHeartRateSource(heartRateSourceId)
 
         val powerControl =
             trainingDevice.currentPowerControl()
@@ -82,7 +94,11 @@ class TrainingSessionCoordinator(
                     sessionId = sessionId,
                     now = now,
                     workout = progress,
-                ).copy(ergTargetPowerWatts = initialTarget)
+                ).copy(
+                    ergTargetPowerWatts = initialTarget,
+                    heartRateSourceId = selectedHeartRateSourceId,
+                    heartRate = selectedHeartRateSourceId?.let(trainingDevice::currentHeartRate),
+                )
         activityRecorder.start(
             sessionId = sessionId,
             startedAt = now,
@@ -103,7 +119,41 @@ class TrainingSessionCoordinator(
             trainingDevice.addTelemetryListener { telemetry ->
                 activityRecorder.record(sessionId, telemetry)
             }
+        activeHeartRateSourceId = selectedHeartRateSourceId
+        heartRateRegistration =
+            selectedHeartRateSourceId?.let { sourceId ->
+                trainingDevice.addHeartRateListener(sourceId) { telemetry ->
+                    onHeartRate(sessionId, sourceId, telemetry)
+                }
+            }
         completedActivity = null
+        return state
+    }
+
+    @Synchronized
+    fun selectHeartRateSource(
+        sessionId: UUID,
+        sourceId: String,
+    ): TrainingSessionState {
+        val activeState = requireActiveSession(sessionId)
+        requireConnectedHeartRateSource(sourceId)
+        if (activeHeartRateSourceId == sourceId) {
+            refreshHeartRate()
+            return state
+        }
+
+        heartRateRegistration?.close()
+        activeHeartRateSourceId = sourceId
+        heartRateRegistration =
+            trainingDevice.addHeartRateListener(sourceId) { telemetry ->
+                onHeartRate(sessionId, sourceId, telemetry)
+            }
+        state =
+            activeState.copy(
+                changedAt = clock.instant(),
+                heartRateSourceId = sourceId,
+                heartRate = trainingDevice.currentHeartRate(sourceId),
+            )
         return state
     }
 
@@ -198,6 +248,8 @@ class TrainingSessionCoordinator(
 
         telemetryRegistration?.close()
         telemetryRegistration = null
+        heartRateRegistration?.close()
+        heartRateRegistration = null
         completedActivity = activityRecorder.finish(sessionId, stoppedAt)
 
         state =
@@ -423,11 +475,67 @@ class TrainingSessionCoordinator(
 
     private fun clearActiveExecution() {
         activePowerControl = null
+        activeHeartRateSourceId = null
         clearActiveWorkout()
     }
 
     private fun clearActiveWorkout() {
         activeWorkout = null
         stepDistanceStartMeters = null
+    }
+
+    private fun resolveHeartRateSource(sourceId: String?): String? {
+        val sources = connectedHeartRateSources()
+        if (sourceId != null) {
+            requireConnectedHeartRateSource(sourceId, sources)
+            return sourceId
+        }
+        if (sources.size > 1) {
+            throw HeartRateSourceSelectionRequiredException()
+        }
+        return sources.singleOrNull()?.id
+    }
+
+    private fun connectedHeartRateSources(): List<HeartRateSourceDescriptor> =
+        trainingDevice
+            .heartRateSources()
+            .filter { source -> source.state == paceline.device.domain.ConnectionPhase.CONNECTED }
+
+    private fun requireConnectedHeartRateSource(
+        sourceId: String,
+        sources: List<HeartRateSourceDescriptor> = connectedHeartRateSources(),
+    ) {
+        if (sources.none { source -> source.id == sourceId }) {
+            throw HeartRateSourceNotFoundException(sourceId)
+        }
+    }
+
+    private fun onHeartRate(
+        sessionId: UUID,
+        sourceId: String,
+        telemetry: HeartRateTelemetry,
+    ) {
+        synchronized(this) {
+            if (
+                state.phase != TrainingSessionPhase.ACTIVE ||
+                state.sessionId != sessionId ||
+                activeHeartRateSourceId != sourceId
+            ) {
+                return
+            }
+            activityRecorder.recordHeartRate(sessionId, sourceId, telemetry)
+            state = state.copy(changedAt = clock.instant(), heartRate = telemetry)
+        }
+    }
+
+    private fun refreshHeartRate() {
+        val sourceId = activeHeartRateSourceId ?: return
+        if (state.phase != TrainingSessionPhase.ACTIVE) {
+            return
+        }
+        val latest = trainingDevice.currentHeartRate(sourceId)
+        if (latest != state.heartRate) {
+            state = state.copy(heartRate = latest)
+        }
     }
 }

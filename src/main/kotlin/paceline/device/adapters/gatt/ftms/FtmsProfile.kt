@@ -1,4 +1,4 @@
-package paceline.device.adapters.profiles.ftms
+package paceline.device.adapters.gatt.ftms
 
 import paceline.device.domain.IndoorBikeTelemetry
 import java.time.Instant

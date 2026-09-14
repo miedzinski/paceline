@@ -7,8 +7,7 @@ import com.github.hypfvieh.bluetooth.wrapper.BluetoothAdapter
 import com.github.hypfvieh.bluetooth.wrapper.BluetoothDevice
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import paceline.device.adapters.GattClient
-import paceline.device.adapters.profiles.ftms.FtmsUuid
+import paceline.device.adapters.gatt.GattClient
 import paceline.device.config.DeviceProperties
 import paceline.device.domain.DeviceEndpoint
 import java.util.Locale
@@ -47,7 +46,15 @@ class BluezBluetoothAccess(
         return manager
             .scanForBluetoothDevices(adapter.address, timeoutMillis)
             .asSequence()
-            .filter { device -> advertisesAny(device, serviceUuids) }
+            .onEach { device ->
+                logger.info(
+                    "Bluetooth advertisement {} at {} reports service UUIDs={} service-data UUIDs={}",
+                    device.name ?: device.address,
+                    device.address,
+                    device.uuids.orEmpty(),
+                    device.serviceData?.keys.orEmpty(),
+                )
+            }.filter { device -> advertisesAny(device, serviceUuids) }
             .mapNotNull(::toCandidate)
             .toList()
             .also { candidates ->
@@ -77,7 +84,7 @@ class BluezBluetoothAccess(
             BluezGattClient(
                 manager = manager,
                 device = device,
-                closeTimeout = properties.connectTimeout,
+                serviceDiscoveryTimeout = properties.bluetooth.gattServiceDiscoveryTimeout,
             )
         } catch (exception: Exception) {
             try {

@@ -1,11 +1,18 @@
 package paceline.device.domain
 
+import paceline.device.domain.HeartRateTelemetry
+import paceline.device.ports.DeviceCapability
 import paceline.device.ports.DeviceCommunicationException
+import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
 import paceline.testsupport.FakeBluetoothDiscovery
 import paceline.testsupport.FakeDeviceCommunication
+import paceline.testsupport.FakeDeviceConnection
+import paceline.testsupport.FakeHeartRateTelemetrySource
+import paceline.testsupport.FakeIndoorBikePowerControl
 import paceline.testsupport.FakeWifiDiscovery
 import paceline.testsupport.kickrCore2Candidate
+import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -238,7 +245,7 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun `opening a second device connection is rejected while one is active`() {
+    fun `opening a second device connection keeps the first one active`() {
         // given two discovered devices and one active connection:
         val secondCandidate =
             kickrCore2Candidate(
@@ -255,11 +262,61 @@ class ConnectionCoordinatorTest {
         coordinator.connect(devices.first().id)
 
         // when the second device is selected:
-        // then the existing connection is preserved and no second connection is opened:
-        assertFailsWith<AlreadyConnectedException> {
-            coordinator.connect(devices[1].id)
-        }
-        assertEquals(listOf(device), communication.connectedDevices)
+        val secondResult = coordinator.connect(devices[1].id)
+
+        // then both connections are open and the first connection remains available:
+        assertEquals(ConnectionPhase.CONNECTED, secondResult.phase)
+        assertEquals(listOf(device, secondCandidate.toDeviceAdvertisement()), communication.connectedDevices)
+        assertEquals(2, coordinator.connectedDevices().size)
+    }
+
+    @Test
+    fun `exposes heart-rate capabilities from the trainer and a separate device connection`() {
+        // given a trainer bridge and a separate heart-rate device:
+        val secondCandidate =
+            kickrCore2Candidate(
+                name = "Heart Rate Strap",
+                host = "192.168.1.47",
+            )
+        val trainerHeartRate = FakeHeartRateTelemetrySource()
+        val strapHeartRate = FakeHeartRateTelemetrySource()
+        val powerControl = FakeIndoorBikePowerControl()
+        val communication =
+            FakeDeviceCommunication { advertisement ->
+                if (advertisement.name == device.name) {
+                    DeviceConnectionSession(
+                        connection = FakeDeviceConnection(advertisement),
+                        capabilities = listOf<DeviceCapability>(powerControl, trainerHeartRate),
+                    )
+                } else {
+                    DeviceConnectionSession(
+                        connection = FakeDeviceConnection(advertisement),
+                        capabilities = listOf(strapHeartRate),
+                    )
+                }
+            }
+        val coordinator =
+            coordinator(
+                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
+                communication = communication,
+            )
+        val deviceOptions = coordinator.discover().devices
+
+        // when both physical connections are opened:
+        coordinator.connect(deviceOptions[0].id)
+        coordinator.connect(deviceOptions[1].id)
+        val sources = coordinator.heartRateSources()
+        val trainerSourceId = sources.single { it.device.name == device.name }.id
+        val strapSourceId = sources.single { it.device.name == secondCandidate.name }.id
+        trainerHeartRate.emit(HeartRateTelemetry(148, Instant.parse("2026-09-14T12:00:00Z")))
+        strapHeartRate.emit(HeartRateTelemetry(152, Instant.parse("2026-09-14T12:00:01Z")))
+
+        // then each source remains addressable without replacing the trainer control connection:
+        assertEquals(2, sources.size)
+        assertEquals(148, coordinator.currentHeartRate(trainerSourceId)?.heartRateBpm)
+        assertEquals(152, coordinator.currentHeartRate(strapSourceId)?.heartRateBpm)
+        assertEquals(powerControl, coordinator.currentPowerControl())
+        assertEquals(2, coordinator.connectedDevices().size)
     }
 
     @Test

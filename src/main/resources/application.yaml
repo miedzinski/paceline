@@ -7,6 +7,9 @@ paceline:
     mdns-service-type: _wahoo-fitness-tnp._tcp.local.
     discovery-timeout: 5s
     connect-timeout: 3s
-    protocol-timeout: 3s
+    bluetooth:
+      gatt-service-discovery-timeout: 10s
+    wifi:
+      protocol-timeout: 3s
   intervals:
     base-url: https://intervals.icu

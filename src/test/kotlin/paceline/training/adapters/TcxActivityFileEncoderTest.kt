@@ -26,7 +26,7 @@ class TcxActivityFileEncoderTest {
                 workoutCompleted = false,
                 samples =
                     listOf(
-                        sample("2026-09-14T12:00:00Z", 1_000.0, 200),
+                        sample("2026-09-14T12:00:00Z", 1_000.0, 200).copy(heartRateBpm = 144),
                         sample("2026-09-14T12:00:00.100Z", 1_001.5, 210),
                     ),
             )
@@ -50,6 +50,7 @@ class TcxActivityFileEncoderTest {
         assertContains(xml, "<ns3:Watts>200</ns3:Watts>")
         assertContains(xml, "<ns3:Watts>210</ns3:Watts>")
         assertContains(xml, "<Cadence>90</Cadence>")
+        assertContains(xml, "<HeartRateBpm><Value>144</Value></HeartRateBpm>")
         assertContains(xml, "<ns3:Speed>6.944</ns3:Speed>")
         assertEquals(2, Regex("<Trackpoint>").findAll(xml).count())
     }

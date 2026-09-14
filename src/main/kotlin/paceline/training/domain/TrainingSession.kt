@@ -1,5 +1,6 @@
 package paceline.training.domain
 
+import paceline.device.domain.HeartRateTelemetry
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutSourceReference
@@ -70,6 +71,8 @@ data class TrainingSessionState(
     val startedAt: Instant? = null,
     val changedAt: Instant,
     val ergTargetPowerWatts: Int? = null,
+    val heartRateSourceId: String? = null,
+    val heartRate: HeartRateTelemetry? = null,
     val workout: TrainingWorkoutProgress? = null,
     val activityUpload: TrainingActivityUploadState = TrainingActivityUploadState.unavailable(),
 ) {
@@ -103,6 +106,15 @@ class TrainingSessionUnavailableException(
     message: String,
     cause: Throwable? = null,
 ) : IllegalStateException(message, cause)
+
+class HeartRateSourceSelectionRequiredException :
+    IllegalStateException(
+        "More than one heart-rate source is connected; select the source to use for this session",
+    )
+
+class HeartRateSourceNotFoundException(
+    val sourceId: String,
+) : IllegalArgumentException("Heart-rate source $sourceId is not connected")
 
 class TrainingActivityUploadUnavailableException(
     message: String,

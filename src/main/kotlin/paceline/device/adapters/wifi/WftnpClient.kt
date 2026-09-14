@@ -1,10 +1,10 @@
 package paceline.device.adapters.wifi
 
-import paceline.device.adapters.GattCharacteristic
-import paceline.device.adapters.GattCharacteristicProperty
-import paceline.device.adapters.GattClient
-import paceline.device.adapters.GattNotification
-import paceline.device.adapters.GattService
+import paceline.device.adapters.gatt.GattCharacteristic
+import paceline.device.adapters.gatt.GattCharacteristicProperty
+import paceline.device.adapters.gatt.GattClient
+import paceline.device.adapters.gatt.GattNotification
+import paceline.device.adapters.gatt.GattService
 import java.io.InputStream
 import java.io.OutputStream
 import java.time.Duration

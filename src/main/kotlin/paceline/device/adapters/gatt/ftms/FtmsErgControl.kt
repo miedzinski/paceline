@@ -1,7 +1,7 @@
-package paceline.device.adapters.profiles.ftms
+package paceline.device.adapters.gatt.ftms
 
-import paceline.device.adapters.GattClient
-import paceline.device.adapters.GattNotification
+import paceline.device.adapters.gatt.GattClient
+import paceline.device.adapters.gatt.GattNotification
 import paceline.device.ports.DeviceCommunicationException
 import paceline.device.ports.IndoorBikePowerControl
 import java.nio.ByteBuffer

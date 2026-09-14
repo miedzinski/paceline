@@ -15,11 +15,12 @@ import org.springframework.context.annotation.Primary
 import org.springframework.http.MediaType
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
-import paceline.device.adapters.GattCharacteristic
-import paceline.device.adapters.GattCharacteristicProperty
-import paceline.device.adapters.GattService
 import paceline.device.adapters.bluetooth.BluetoothDeviceCandidate
-import paceline.device.adapters.profiles.ftms.FtmsUuid
+import paceline.device.adapters.gatt.GattCharacteristic
+import paceline.device.adapters.gatt.GattCharacteristicProperty
+import paceline.device.adapters.gatt.GattService
+import paceline.device.adapters.gatt.ftms.FtmsUuid
+import paceline.device.adapters.gatt.heartrate.HeartRateUuid
 import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionPhase
 import paceline.device.domain.DeviceEndpoint
@@ -38,7 +39,7 @@ import kotlin.test.assertTrue
         "paceline.device.mdns-service-type=_paceline-integration._tcp.local.",
         "paceline.device.discovery-timeout=1s",
         "paceline.device.connect-timeout=1s",
-        "paceline.device.protocol-timeout=1s",
+        "paceline.device.wifi.protocol-timeout=1s",
     ],
 )
 @Import(BluetoothDeviceConnectionIntegrationTestConfiguration::class)
@@ -79,7 +80,7 @@ class BluetoothDeviceConnectionIntegrationTest {
         assertTrue(response.contains("\"address\":\"AA:BB:CC:DD:EE:FF\""))
         assertTrue(response.contains("\"host\":null"))
         assertEquals(
-            setOf(FtmsUuid.FITNESS_MACHINE_SERVICE),
+            setOf(FtmsUuid.FITNESS_MACHINE_SERVICE, HeartRateUuid.HEART_RATE_SERVICE),
             bluetooth.requestedServiceUuids,
         )
         assertEquals(0, bluetooth.connectCalls)

@@ -2,7 +2,8 @@ package paceline.device.adapters.wifi
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import paceline.device.adapters.profiles.ftms.FtmsDeviceConnection
+import paceline.device.adapters.gatt.GattDeviceConnection
+import paceline.device.adapters.gatt.SupportedGattCapabilityFactories
 import paceline.device.config.DeviceProperties
 import paceline.device.domain.DeviceAdvertisement
 import paceline.device.domain.DeviceEndpoint
@@ -40,17 +41,18 @@ class WifiDeviceTransport(
                 WftnpClient(
                     input = socket.getInputStream(),
                     output = socket.getOutputStream(),
-                    requestTimeout = properties.protocolTimeout,
+                    requestTimeout = properties.wifi.protocolTimeout,
                 ).also(WftnpClient::start)
 
             val connection =
-                FtmsDeviceConnection(
+                GattDeviceConnection(
                     device = device,
                     gattClient = WftnpGattClient(protocolClient) { socket.close() },
+                    capabilityFactories = SupportedGattCapabilityFactories.all,
                 )
             return DeviceConnectionSession(
                 connection = connection,
-                capabilities = listOfNotNull(connection, connection.powerControl),
+                capabilities = connection.capabilities(),
             ).also {
                 logger.info(
                     "Opened device protocol session to {} at {}:{} via Wi-Fi",

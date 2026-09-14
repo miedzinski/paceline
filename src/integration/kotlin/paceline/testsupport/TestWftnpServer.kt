@@ -1,11 +1,13 @@
 package paceline.testsupport
 
-import paceline.device.adapters.profiles.ftms.FtmsUuid
+import paceline.device.adapters.gatt.ftms.FtmsUuid
+import paceline.device.adapters.gatt.heartrate.HeartRateUuid
 import paceline.device.adapters.wifi.WftnpFrame
 import paceline.device.adapters.wifi.WftnpFrameCodec
 import paceline.device.adapters.wifi.WftnpMessageType
 import paceline.device.adapters.wifi.toWftnpBytes
 import paceline.device.adapters.wifi.uuidFromWftnpBytes
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -66,15 +68,30 @@ class TestWftnpServer(
                         val responseData =
                             when (request.messageType) {
                                 WftnpMessageType.DISCOVER_SERVICES -> {
-                                    FtmsUuid.FITNESS_MACHINE_SERVICE.toWftnpBytes()
+                                    FtmsUuid.FITNESS_MACHINE_SERVICE.toWftnpBytes() +
+                                        HeartRateUuid.HEART_RATE_SERVICE.toWftnpBytes()
                                 }
 
                                 WftnpMessageType.DISCOVER_CHARACTERISTICS -> {
-                                    FtmsUuid.FITNESS_MACHINE_SERVICE.toWftnpBytes() +
-                                        FtmsUuid.INDOOR_BIKE_DATA.toWftnpBytes() +
-                                        byteArrayOf(0x04) +
-                                        FtmsUuid.FITNESS_MACHINE_CONTROL_POINT.toWftnpBytes() +
-                                        byteArrayOf(0x06)
+                                    when (uuidFromWftnpBytes(request.data)) {
+                                        FtmsUuid.FITNESS_MACHINE_SERVICE -> {
+                                            FtmsUuid.FITNESS_MACHINE_SERVICE.toWftnpBytes() +
+                                                FtmsUuid.INDOOR_BIKE_DATA.toWftnpBytes() +
+                                                byteArrayOf(0x04) +
+                                                FtmsUuid.FITNESS_MACHINE_CONTROL_POINT.toWftnpBytes() +
+                                                byteArrayOf(0x06)
+                                        }
+
+                                        HeartRateUuid.HEART_RATE_SERVICE -> {
+                                            HeartRateUuid.HEART_RATE_SERVICE.toWftnpBytes() +
+                                                HeartRateUuid.HEART_RATE_MEASUREMENT.toWftnpBytes() +
+                                                byteArrayOf(0x04)
+                                        }
+
+                                        else -> {
+                                            error("Unexpected WFTNP service ${uuidFromWftnpBytes(request.data)}")
+                                        }
+                                    }
                                 }
 
                                 WftnpMessageType.ENABLE_NOTIFICATIONS -> {
@@ -120,6 +137,13 @@ class TestWftnpServer(
                                             ),
                                     )
                                 }
+                                if (uuidFromWftnpBytes(request.data) == HeartRateUuid.HEART_RATE_MEASUREMENT) {
+                                    writeNotification(
+                                        output,
+                                        HeartRateUuid.HEART_RATE_MEASUREMENT.toWftnpBytes() +
+                                            byteArrayOf(0x00, 0x78),
+                                    )
+                                }
                             }
 
                             WftnpMessageType.WRITE_CHARACTERISTIC -> {
@@ -152,7 +176,7 @@ class TestWftnpServer(
     }
 
     private fun writeNotification(
-        output: java.io.OutputStream,
+        output: OutputStream,
         data: ByteArray,
     ) {
         output.write(

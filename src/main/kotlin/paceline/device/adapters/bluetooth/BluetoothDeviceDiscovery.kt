@@ -2,7 +2,8 @@ package paceline.device.adapters.bluetooth
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import paceline.device.adapters.profiles.ftms.FtmsUuid
+import paceline.device.adapters.gatt.ftms.FtmsUuid
+import paceline.device.adapters.gatt.heartrate.HeartRateUuid
 import paceline.device.domain.ConnectionFailureCode
 import paceline.device.domain.DeviceDiscoveryCandidate
 import paceline.device.domain.DeviceEndpoint
@@ -19,8 +20,12 @@ class BluetoothDeviceDiscovery(
         try {
             val candidates =
                 bluetooth
-                    .discover(setOf(FtmsUuid.FITNESS_MACHINE_SERVICE))
-                    .map { candidate ->
+                    .discover(
+                        setOf(
+                            FtmsUuid.FITNESS_MACHINE_SERVICE,
+                            HeartRateUuid.HEART_RATE_SERVICE,
+                        ),
+                    ).map { candidate ->
                         DeviceDiscoveryCandidate(
                             name = candidate.name,
                             endpoint =

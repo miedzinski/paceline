@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
+import paceline.training.domain.HeartRateSourceNotFoundException
+import paceline.training.domain.HeartRateSourceSelectionRequiredException
 import paceline.training.domain.TrainingActivityUploadUnavailableException
 import paceline.training.domain.TrainingSessionAlreadyActiveException
 import paceline.training.domain.TrainingSessionCoordinator
@@ -45,9 +47,17 @@ class TrainingSessionController(
     ): TrainingSessionResponse =
         try {
             val workout = request?.workout?.let { selection -> catalog.executable(selection.toDomain()) }
-            coordinator.start(workout).toResponse()
+            coordinator
+                .start(
+                    workout = workout,
+                    heartRateSourceId = request?.heartRateSourceId,
+                ).toResponse()
         } catch (exception: TrainingSessionAlreadyActiveException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: HeartRateSourceSelectionRequiredException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: HeartRateSourceNotFoundException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
         } catch (exception: WorkoutNotFoundException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
         } catch (exception: WorkoutNotExecutableException) {
@@ -60,6 +70,25 @@ class TrainingSessionController(
 
     @GetMapping("/current", produces = [MediaType.APPLICATION_JSON_VALUE])
     fun getCurrentTrainingSession(): TrainingSessionResponse = coordinator.current().toResponse()
+
+    @PutMapping(
+        "/{sessionId}/heart-rate-source",
+        consumes = [MediaType.APPLICATION_JSON_VALUE],
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun selectHeartRateSource(
+        @PathVariable sessionId: UUID,
+        @RequestBody request: SelectHeartRateSourceRequest,
+    ): TrainingSessionResponse =
+        try {
+            coordinator.selectHeartRateSource(sessionId, request.sourceId).toResponse()
+        } catch (exception: TrainingSessionNotActiveException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionMismatchException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: HeartRateSourceNotFoundException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        }
 
     @PutMapping(
         "/{sessionId}/erg-target",
@@ -140,6 +169,11 @@ class TrainingSessionController(
 
 data class StartTrainingSessionRequest(
     val workout: WorkoutSelectionRequest? = null,
+    val heartRateSourceId: String? = null,
+)
+
+data class SelectHeartRateSourceRequest(
+    val sourceId: String,
 )
 
 data class WorkoutSelectionRequest(
@@ -158,8 +192,15 @@ data class TrainingSessionResponse(
     val startedAt: Instant?,
     val changedAt: Instant,
     val ergTargetPowerWatts: Int?,
+    val heartRateSourceId: String?,
+    val heartRate: HeartRateResponse?,
     val workout: TrainingWorkoutResponse?,
     val activityUpload: TrainingActivityUploadResponse,
+)
+
+data class HeartRateResponse(
+    val heartRateBpm: Int,
+    val receivedAt: Instant,
 )
 
 data class TrainingActivityUploadResponse(
@@ -205,6 +246,14 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
         startedAt = startedAt,
         changedAt = changedAt,
         ergTargetPowerWatts = ergTargetPowerWatts,
+        heartRateSourceId = heartRateSourceId,
+        heartRate =
+            heartRate?.let { telemetry ->
+                HeartRateResponse(
+                    heartRateBpm = telemetry.heartRateBpm,
+                    receivedAt = telemetry.receivedAt,
+                )
+            },
         workout = workout?.toResponse(),
         activityUpload =
             TrainingActivityUploadResponse(

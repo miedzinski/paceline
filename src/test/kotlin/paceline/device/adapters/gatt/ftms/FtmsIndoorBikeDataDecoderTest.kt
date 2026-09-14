@@ -1,4 +1,4 @@
-package paceline.device.adapters.profiles.ftms
+package paceline.device.adapters.gatt.ftms
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

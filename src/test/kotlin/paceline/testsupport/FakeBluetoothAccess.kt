@@ -1,8 +1,8 @@
 package paceline.testsupport
 
-import paceline.device.adapters.GattClient
 import paceline.device.adapters.bluetooth.BluetoothAccess
 import paceline.device.adapters.bluetooth.BluetoothDeviceCandidate
+import paceline.device.adapters.gatt.GattClient
 import paceline.device.domain.DeviceEndpoint
 import java.util.UUID
 

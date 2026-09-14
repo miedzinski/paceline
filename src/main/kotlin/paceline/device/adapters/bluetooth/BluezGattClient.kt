@@ -3,14 +3,15 @@ package paceline.device.adapters.bluetooth
 import com.github.hypfvieh.bluetooth.DeviceManager
 import com.github.hypfvieh.bluetooth.wrapper.BluetoothDevice
 import com.github.hypfvieh.bluetooth.wrapper.BluetoothGattCharacteristic
+import com.github.hypfvieh.bluetooth.wrapper.BluetoothGattService
 import org.freedesktop.dbus.handlers.AbstractPropertiesChangedHandler
 import org.freedesktop.dbus.interfaces.Properties.PropertiesChanged
 import org.slf4j.LoggerFactory
-import paceline.device.adapters.GattCharacteristic
-import paceline.device.adapters.GattCharacteristicProperty
-import paceline.device.adapters.GattClient
-import paceline.device.adapters.GattNotification
-import paceline.device.adapters.GattService
+import paceline.device.adapters.gatt.GattCharacteristic
+import paceline.device.adapters.gatt.GattCharacteristicProperty
+import paceline.device.adapters.gatt.GattClient
+import paceline.device.adapters.gatt.GattNotification
+import paceline.device.adapters.gatt.GattService
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -19,7 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class BluezGattClient(
     private val manager: DeviceManager,
     private val device: BluetoothDevice,
-    private val closeTimeout: Duration,
+    private val serviceDiscoveryTimeout: Duration,
 ) : GattClient {
     private val logger = LoggerFactory.getLogger(javaClass)
     private val closed = AtomicBoolean(false)
@@ -58,13 +59,20 @@ class BluezGattClient(
 
     override fun discoverServices(): List<GattService> {
         checkOpen()
-        val deadline = System.nanoTime() + closeTimeout.toNanos().coerceAtLeast(1L)
+        val deadline = System.nanoTime() + serviceDiscoveryTimeout.toNanos().coerceAtLeast(1L)
         var services = device.gattServices
         while (services.isEmpty() && System.nanoTime() < deadline) {
             sleepForServiceDiscovery()
             services = device.gattServices
         }
 
+        logger.info(
+            "BlueZ GATT discovery for {} returned {} service(s), servicesResolved={}: {}",
+            device.address,
+            services.size,
+            device.isServicesResolved,
+            describeServices(services),
+        )
         characteristics.clear()
         return services.mapNotNull { service ->
             val serviceUuid = parseUuid(service.uuid) ?: return@mapNotNull null
@@ -171,6 +179,16 @@ class BluezGattClient(
             else -> runCatching { UUID.fromString(normalized) }.getOrNull()
         }
     }
+
+    private fun describeServices(services: List<BluetoothGattService>): String =
+        services.ifEmpty { return "none" }.joinToString(separator = "; ") { service ->
+            val characteristics =
+                service.gattCharacteristics
+                    .joinToString(separator = ", ") { characteristic ->
+                        "${characteristic.uuid}${characteristic.flags.orEmpty()}"
+                    }.ifEmpty { "no characteristics" }
+            "${service.uuid}[$characteristics]"
+        }
 
     private companion object {
         const val VALUE_PROPERTY = "Value"

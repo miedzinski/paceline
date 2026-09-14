@@ -1,9 +1,9 @@
 package paceline.device.adapters.bluetooth
 
-import paceline.device.adapters.GattCharacteristic
-import paceline.device.adapters.GattCharacteristicProperty
-import paceline.device.adapters.GattService
-import paceline.device.adapters.profiles.ftms.FtmsUuid
+import paceline.device.adapters.gatt.GattCharacteristic
+import paceline.device.adapters.gatt.GattCharacteristicProperty
+import paceline.device.adapters.gatt.GattService
+import paceline.device.adapters.gatt.ftms.FtmsUuid
 import paceline.device.domain.DeviceEndpoint
 import paceline.device.ports.IndoorBikeTelemetrySource
 import paceline.testsupport.FakeBluetoothAccess

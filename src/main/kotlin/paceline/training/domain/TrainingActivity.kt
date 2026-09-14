@@ -1,5 +1,6 @@
 package paceline.training.domain
 
+import paceline.device.domain.HeartRateTelemetry
 import paceline.device.domain.IndoorBikeTelemetry
 import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutSourceType
@@ -12,6 +13,8 @@ data class TrainingTelemetrySample(
     val cadenceRpm: Double?,
     val speedKph: Double?,
     val distanceMeters: Double?,
+    val heartRateBpm: Int? = null,
+    val heartRateSourceId: String? = null,
 ) {
     companion object {
         fun from(telemetry: IndoorBikeTelemetry): TrainingTelemetrySample =
@@ -21,6 +24,20 @@ data class TrainingTelemetrySample(
                 cadenceRpm = telemetry.cadenceRpm,
                 speedKph = telemetry.speedKph,
                 distanceMeters = telemetry.distanceMeters,
+            )
+
+        fun fromHeartRate(
+            telemetry: HeartRateTelemetry,
+            sourceId: String,
+        ): TrainingTelemetrySample =
+            TrainingTelemetrySample(
+                receivedAt = telemetry.receivedAt,
+                powerWatts = null,
+                cadenceRpm = null,
+                speedKph = null,
+                distanceMeters = null,
+                heartRateBpm = telemetry.heartRateBpm,
+                heartRateSourceId = sourceId,
             )
     }
 }
@@ -82,13 +99,17 @@ class InMemoryTrainingActivityRecorder {
         telemetry: IndoorBikeTelemetry,
     ) {
         val recording = active?.takeIf { it.sessionId == sessionId } ?: return
-        val previousReceivedAt = recording.lastReceivedAt
-        if (previousReceivedAt == null || telemetry.receivedAt.isAfter(previousReceivedAt)) {
-            val sample = TrainingTelemetrySample.from(telemetry)
-            recording.samples += sample
-            recording.currentSegment.samples += sample
-            recording.lastReceivedAt = telemetry.receivedAt
-        }
+        recording.record(TrainingTelemetrySample.from(telemetry))
+    }
+
+    @Synchronized
+    fun recordHeartRate(
+        sessionId: UUID,
+        sourceId: String,
+        telemetry: HeartRateTelemetry,
+    ) {
+        val recording = active?.takeIf { it.sessionId == sessionId } ?: return
+        recording.record(TrainingTelemetrySample.fromHeartRate(telemetry, sourceId))
     }
 
     @Synchronized
@@ -144,7 +165,6 @@ class InMemoryTrainingActivityRecorder {
         initialTargetPowerWatts: Int?,
         val samples: MutableList<TrainingTelemetrySample> = mutableListOf(),
         val segments: MutableList<MutableSegment> = mutableListOf(),
-        var lastReceivedAt: Instant? = null,
         var workoutCompleted: Boolean = false,
     ) {
         var currentSegment: MutableSegment =
@@ -157,6 +177,17 @@ class InMemoryTrainingActivityRecorder {
         init {
             segments += currentSegment
         }
+
+        fun record(sample: TrainingTelemetrySample) {
+            mergeSample(samples, sample)
+            mergeSample(segmentFor(sample.receivedAt).samples, sample)
+        }
+
+        private fun segmentFor(receivedAt: Instant): MutableSegment =
+            segments.lastOrNull { segment ->
+                !receivedAt.isBefore(segment.startedAt) &&
+                    (segment.stoppedAt == null || receivedAt.isBefore(requireNotNull(segment.stoppedAt)))
+            } ?: currentSegment
 
         fun startSegment(
             startedAt: Instant,
@@ -188,6 +219,32 @@ class InMemoryTrainingActivityRecorder {
                     segments = segments.map { it.toRecorded() },
                 )
             }
+    }
+
+    private companion object {
+        fun mergeSample(
+            samples: MutableList<TrainingTelemetrySample>,
+            sample: TrainingTelemetrySample,
+        ) {
+            val index = samples.indexOfFirst { it.receivedAt >= sample.receivedAt }
+            if (index >= 0 && samples[index].receivedAt == sample.receivedAt) {
+                samples[index] = samples[index].merge(sample)
+            } else if (index >= 0) {
+                samples.add(index, sample)
+            } else {
+                samples += sample
+            }
+        }
+
+        fun TrainingTelemetrySample.merge(other: TrainingTelemetrySample): TrainingTelemetrySample =
+            copy(
+                powerWatts = other.powerWatts ?: powerWatts,
+                cadenceRpm = other.cadenceRpm ?: cadenceRpm,
+                speedKph = other.speedKph ?: speedKph,
+                distanceMeters = other.distanceMeters ?: distanceMeters,
+                heartRateBpm = other.heartRateBpm ?: heartRateBpm,
+                heartRateSourceId = other.heartRateSourceId ?: heartRateSourceId,
+            )
     }
 
     private class MutableSegment(

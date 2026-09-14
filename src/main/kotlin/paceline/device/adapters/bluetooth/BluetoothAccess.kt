@@ -1,6 +1,6 @@
 package paceline.device.adapters.bluetooth
 
-import paceline.device.adapters.GattClient
+import paceline.device.adapters.gatt.GattClient
 import paceline.device.domain.DeviceEndpoint
 import java.util.UUID
 

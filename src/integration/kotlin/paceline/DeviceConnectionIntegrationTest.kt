@@ -14,7 +14,7 @@ import org.springframework.http.MediaType
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
 import paceline.device.adapters.bluetooth.BluetoothAccess
-import paceline.device.adapters.profiles.ftms.FtmsUuid
+import paceline.device.adapters.gatt.ftms.FtmsUuid
 import paceline.device.adapters.wifi.WftnpFrame
 import paceline.device.adapters.wifi.WftnpFrameCodec
 import paceline.device.adapters.wifi.WftnpMessageType
@@ -39,7 +39,7 @@ import kotlin.test.assertTrue
         "paceline.device.mdns-service-type=_paceline-integration._tcp.local.",
         "paceline.device.discovery-timeout=5s",
         "paceline.device.connect-timeout=1s",
-        "paceline.device.protocol-timeout=1s",
+        "paceline.device.wifi.protocol-timeout=1s",
     ],
 )
 @Import(DeviceConnectionIntegrationTestConfiguration::class)
@@ -114,6 +114,7 @@ class DeviceConnectionIntegrationTest {
         assertTrue(response.contains("\"powerWatts\":200"))
         assertTrue(response.contains("\"cadenceRpm\":90.0"))
         assertTrue(response.contains("\"speedKph\":25.0"))
+        assertTrue(response.contains("\"heartRateBpm\":120"))
         assertEquals(1, deviceServer.acceptedConnections)
     }
 

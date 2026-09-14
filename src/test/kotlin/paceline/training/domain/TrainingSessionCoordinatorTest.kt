@@ -1,5 +1,10 @@
 package paceline.training.domain
 
+import paceline.device.domain.ConnectionPhase
+import paceline.device.domain.DeviceAdvertisement
+import paceline.device.domain.DeviceEndpoint
+import paceline.device.domain.HeartRateSourceDescriptor
+import paceline.device.domain.HeartRateTelemetry
 import paceline.device.domain.IndoorBikeTelemetry
 import paceline.testsupport.FakeActivityUploader
 import paceline.testsupport.FakeIndoorBikePowerControl
@@ -49,6 +54,104 @@ class TrainingSessionCoordinatorTest {
         assertEquals(1, powerControl.requestControlCalls)
         assertEquals(listOf(300), powerControl.targetPowers)
         assertEquals(300, updated.ergTargetPowerWatts)
+    }
+
+    @Test
+    fun `requires an explicit source when multiple heart-rate devices are connected`() {
+        // given a trainer and two connected heart-rate sources:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice =
+            FakeTrainingDevice(
+                powerControl = powerControl,
+                availableHeartRateSources = listOf(heartRateSource("bridge"), heartRateSource("strap")),
+            )
+        val session = TrainingSessionCoordinator(trainingDevice, clock)
+
+        // when a session is started without selecting one source:
+        // then session creation is rejected before trainer control is requested:
+        assertFailsWith<HeartRateSourceSelectionRequiredException> { session.start() }
+        assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
+        assertEquals(0, powerControl.requestControlCalls)
+    }
+
+    @Test
+    fun `records only the explicitly selected heart-rate source and supports switching`() {
+        // given a trainer and two connected heart-rate sources:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice =
+            FakeTrainingDevice(
+                powerControl = powerControl,
+                availableHeartRateSources = listOf(heartRateSource("bridge"), heartRateSource("strap")),
+            )
+        val uploader = FakeActivityUploader()
+        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+
+        // when a session selects bridge HR, then switches to the strap:
+        val started = session.start(heartRateSourceId = "bridge")
+        val sessionId = requireNotNull(started.sessionId)
+        trainingDevice.emitHeartRate("bridge", heartRate(140))
+        session.selectHeartRateSource(sessionId, "strap")
+        trainingDevice.emitHeartRate("bridge", heartRate(145))
+        trainingDevice.emitHeartRate("strap", heartRate(155))
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then the session state and raw activity preserve the selected-source sequence:
+        assertEquals("strap", session.current().heartRateSourceId)
+        assertEquals(155, session.current().heartRate?.heartRateBpm)
+        assertEquals(
+            listOf(140, 155),
+            uploader.uploads
+                .single()
+                .samples
+                .map { it.heartRateBpm },
+        )
+        assertEquals(
+            listOf("bridge", "strap"),
+            uploader.uploads
+                .single()
+                .samples
+                .map { it.heartRateSourceId },
+        )
+    }
+
+    @Test
+    fun `merges an independently received selected heart-rate sample with trainer telemetry`() {
+        // given a session with one selected heart-rate source:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice =
+            FakeTrainingDevice(
+                powerControl = powerControl,
+                availableHeartRateSources = listOf(heartRateSource("strap")),
+            )
+        val uploader = FakeActivityUploader()
+        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val started = session.start(heartRateSourceId = "strap")
+        val sessionId = requireNotNull(started.sessionId)
+        val receivedAt = now.plusSeconds(1)
+
+        // when trainer and heart-rate notifications arrive independently for the same timestamp:
+        trainingDevice.emitTelemetry(telemetry(receivedAt = receivedAt, distanceMeters = 1_000.0))
+        trainingDevice.emitHeartRate(
+            "strap",
+            HeartRateTelemetry(
+                heartRateBpm = 151,
+                receivedAt = receivedAt,
+            ),
+        )
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then one raw observation retains both capability measurements and the source identity:
+        val sample =
+            uploader.uploads
+                .single()
+                .samples
+                .single()
+        assertEquals(receivedAt, sample.receivedAt)
+        assertEquals(200, sample.powerWatts)
+        assertEquals(151, sample.heartRateBpm)
+        assertEquals("strap", sample.heartRateSourceId)
     }
 
     @Test
@@ -376,5 +479,22 @@ class TrainingSessionCoordinatorTest {
             speedKph = 25.0,
             distanceMeters = distanceMeters,
             receivedAt = receivedAt,
+        )
+
+    private fun heartRateSource(id: String): HeartRateSourceDescriptor =
+        HeartRateSourceDescriptor(
+            id = id,
+            device =
+                DeviceAdvertisement(
+                    name = id,
+                    endpoint = DeviceEndpoint.Bluetooth("AA:BB:CC:DD:EE:${if (id == "bridge") "01" else "02"}", "11:22:33:44:55:66"),
+                ),
+            state = ConnectionPhase.CONNECTED,
+        )
+
+    private fun heartRate(bpm: Int): HeartRateTelemetry =
+        HeartRateTelemetry(
+            heartRateBpm = bpm,
+            receivedAt = now.plusSeconds(bpm.toLong()),
         )
 }

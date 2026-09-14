@@ -96,6 +96,11 @@ class TcxActivityFileEncoder : ActivityFileEncoder {
         sample.cadenceRpm?.takeIf(Double::isFinite)?.let { cadence ->
             writeTcxElement("Cadence", cadence.roundToInt().toString())
         }
+        sample.heartRateBpm?.let { heartRateBpm ->
+            writeTcxStart("HeartRateBpm")
+            writeTcxElement("Value", heartRateBpm.toString())
+            writeEndElement()
+        }
         if (sample.speedKph?.isFinite() == true || sample.powerWatts != null) {
             writeTcxStart("Extensions")
             writeExtensionStart("TPX")

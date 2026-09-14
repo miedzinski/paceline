@@ -2,7 +2,8 @@ package paceline.device.adapters.bluetooth
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import paceline.device.adapters.profiles.ftms.FtmsDeviceConnection
+import paceline.device.adapters.gatt.GattDeviceConnection
+import paceline.device.adapters.gatt.SupportedGattCapabilityFactories
 import paceline.device.domain.DeviceAdvertisement
 import paceline.device.domain.DeviceEndpoint
 import paceline.device.ports.DeviceCommunicationException
@@ -22,13 +23,14 @@ class BluetoothDeviceTransport(
                 )
         return try {
             val connection =
-                FtmsDeviceConnection(
+                GattDeviceConnection(
                     device = device,
                     gattClient = bluetooth.connect(endpoint),
+                    capabilityFactories = SupportedGattCapabilityFactories.all,
                 )
             DeviceConnectionSession(
                 connection = connection,
-                capabilities = listOfNotNull(connection, connection.powerControl),
+                capabilities = connection.capabilities(),
             ).also {
                 logger.info(
                     "Opened device protocol session to {} at {} via Bluetooth LE",

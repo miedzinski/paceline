@@ -1,4 +1,4 @@
-package paceline.device.adapters
+package paceline.device.adapters.gatt
 
 import java.util.UUID
 

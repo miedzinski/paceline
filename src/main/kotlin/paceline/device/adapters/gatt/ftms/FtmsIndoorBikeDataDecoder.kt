@@ -1,4 +1,4 @@
-package paceline.device.adapters.profiles.ftms
+package paceline.device.adapters.gatt.ftms
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
