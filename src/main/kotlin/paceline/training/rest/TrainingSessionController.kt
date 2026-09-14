@@ -16,6 +16,18 @@ import paceline.training.domain.TrainingSessionMismatchException
 import paceline.training.domain.TrainingSessionNotActiveException
 import paceline.training.domain.TrainingSessionState
 import paceline.training.domain.TrainingSessionUnavailableException
+import paceline.training.domain.TrainingWorkoutProgress
+import paceline.training.domain.WorkoutStepAdvanceNotAllowedException
+import paceline.training.domain.WorkoutTargetManagedException
+import paceline.workout.domain.WorkoutCatalog
+import paceline.workout.domain.WorkoutNotExecutableException
+import paceline.workout.domain.WorkoutNotFoundException
+import paceline.workout.domain.WorkoutSelection
+import paceline.workout.domain.WorkoutSourceReference
+import paceline.workout.domain.WorkoutSourceType
+import paceline.workout.domain.WorkoutStepCompletion
+import paceline.workout.domain.WorkoutStepTarget
+import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.Instant
 import java.util.UUID
 
@@ -23,13 +35,23 @@ import java.util.UUID
 @RequestMapping("/training-sessions")
 class TrainingSessionController(
     private val coordinator: TrainingSessionCoordinator,
+    private val catalog: WorkoutCatalog,
 ) {
     @PostMapping(produces = [MediaType.APPLICATION_JSON_VALUE])
-    fun startTrainingSession(): TrainingSessionResponse =
+    fun startTrainingSession(
+        @RequestBody(required = false) request: StartTrainingSessionRequest?,
+    ): TrainingSessionResponse =
         try {
-            coordinator.start().toResponse()
+            val workout = request?.workout?.let { selection -> catalog.executable(selection.toDomain()) }
+            coordinator.start(workout).toResponse()
         } catch (exception: TrainingSessionAlreadyActiveException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: WorkoutNotFoundException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: WorkoutNotExecutableException) {
+            throw ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, exception.message, exception)
+        } catch (exception: WorkoutProviderUnavailableException) {
+            throw ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, exception.message, exception)
         } catch (exception: TrainingSessionUnavailableException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         }
@@ -52,10 +74,31 @@ class TrainingSessionController(
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         } catch (exception: TrainingSessionMismatchException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: WorkoutTargetManagedException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         } catch (exception: TrainingSessionUnavailableException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         } catch (exception: IllegalArgumentException) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, exception.message, exception)
+        }
+
+    @PostMapping(
+        "/{sessionId}/advance",
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun advanceWorkoutStep(
+        @PathVariable sessionId: UUID,
+    ): TrainingSessionResponse =
+        try {
+            coordinator.advance(sessionId).toResponse()
+        } catch (exception: TrainingSessionNotActiveException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionMismatchException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: WorkoutStepAdvanceNotAllowedException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         }
 
     @PostMapping(
@@ -76,6 +119,16 @@ class TrainingSessionController(
         }
 }
 
+data class StartTrainingSessionRequest(
+    val workout: WorkoutSelectionRequest? = null,
+)
+
+data class WorkoutSelectionRequest(
+    val provider: String,
+    val sourceType: WorkoutSourceType,
+    val sourceId: String,
+)
+
 data class SetErgTargetRequest(
     val powerWatts: Int,
 )
@@ -86,7 +139,37 @@ data class TrainingSessionResponse(
     val startedAt: Instant?,
     val changedAt: Instant,
     val ergTargetPowerWatts: Int?,
+    val workout: TrainingWorkoutResponse?,
 )
+
+data class TrainingWorkoutResponse(
+    val provider: String,
+    val sourceId: String,
+    val name: String,
+    val currentStep: Int,
+    val totalSteps: Int,
+    val stepText: String?,
+    val stepStartedAt: Instant,
+    val completion: TrainingStepCompletionResponse,
+    val target: TrainingStepTargetResponse,
+)
+
+data class TrainingStepCompletionResponse(
+    val kind: String,
+    val value: Double?,
+)
+
+data class TrainingStepTargetResponse(
+    val kind: String,
+    val lowWatts: Int?,
+    val highWatts: Int?,
+)
+
+private fun WorkoutSelectionRequest.toDomain(): WorkoutSelection =
+    WorkoutSelection(
+        sourceType = sourceType,
+        reference = WorkoutSourceReference(provider = provider, id = sourceId),
+    )
 
 private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
     TrainingSessionResponse(
@@ -95,4 +178,48 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
         startedAt = startedAt,
         changedAt = changedAt,
         ergTargetPowerWatts = ergTargetPowerWatts,
+        workout = workout?.toResponse(),
     )
+
+private fun TrainingWorkoutProgress.toResponse(): TrainingWorkoutResponse =
+    TrainingWorkoutResponse(
+        provider = source.provider,
+        sourceId = source.id,
+        name = name,
+        currentStep = currentStepNumber,
+        totalSteps = totalSteps,
+        stepText = step.text,
+        stepStartedAt = stepStartedAt,
+        completion = step.completion.toResponse(),
+        target = step.target.toResponse(),
+    )
+
+private fun WorkoutStepCompletion.toResponse(): TrainingStepCompletionResponse =
+    when (this) {
+        is WorkoutStepCompletion.Time -> {
+            TrainingStepCompletionResponse(kind = "TIME", value = seconds.toDouble())
+        }
+
+        is WorkoutStepCompletion.Distance -> {
+            TrainingStepCompletionResponse(kind = "DISTANCE", value = meters)
+        }
+
+        WorkoutStepCompletion.Manual -> {
+            TrainingStepCompletionResponse(kind = "MANUAL", value = null)
+        }
+    }
+
+private fun WorkoutStepTarget.toResponse(): TrainingStepTargetResponse =
+    when (this) {
+        is WorkoutStepTarget.Power -> {
+            TrainingStepTargetResponse(
+                kind = "POWER",
+                lowWatts = lowWatts,
+                highWatts = highWatts,
+            )
+        }
+
+        WorkoutStepTarget.Open -> {
+            TrainingStepTargetResponse(kind = "OPEN", lowWatts = null, highWatts = null)
+        }
+    }

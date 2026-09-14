@@ -1,5 +1,8 @@
 package paceline.training.domain
 
+import paceline.workout.domain.ExecutableWorkout
+import paceline.workout.domain.ExecutableWorkoutStep
+import paceline.workout.domain.WorkoutSourceReference
 import java.time.Instant
 import java.util.UUID
 
@@ -7,6 +10,37 @@ enum class TrainingSessionPhase {
     NOT_STARTED,
     ACTIVE,
     STOPPED,
+    COMPLETED,
+}
+
+data class TrainingWorkoutProgress(
+    val source: WorkoutSourceReference,
+    val name: String,
+    val currentStepNumber: Int,
+    val totalSteps: Int,
+    val step: ExecutableWorkoutStep,
+    val stepStartedAt: Instant,
+) {
+    init {
+        require(currentStepNumber in 1..totalSteps) {
+            "The current workout step must be within the executable workout"
+        }
+    }
+
+    companion object {
+        fun firstStep(
+            workout: ExecutableWorkout,
+            now: Instant,
+        ): TrainingWorkoutProgress =
+            TrainingWorkoutProgress(
+                source = workout.source,
+                name = workout.name,
+                currentStepNumber = 1,
+                totalSteps = workout.steps.size,
+                step = workout.steps.first(),
+                stepStartedAt = now,
+            )
+    }
 }
 
 data class TrainingSessionState(
@@ -15,6 +49,7 @@ data class TrainingSessionState(
     val startedAt: Instant? = null,
     val changedAt: Instant,
     val ergTargetPowerWatts: Int? = null,
+    val workout: TrainingWorkoutProgress? = null,
 ) {
     companion object {
         fun notStarted(now: Instant): TrainingSessionState =
@@ -26,12 +61,14 @@ data class TrainingSessionState(
         fun active(
             sessionId: UUID,
             now: Instant,
+            workout: TrainingWorkoutProgress? = null,
         ): TrainingSessionState =
             TrainingSessionState(
                 phase = TrainingSessionPhase.ACTIVE,
                 sessionId = sessionId,
                 startedAt = now,
                 changedAt = now,
+                workout = workout,
             )
     }
 }
@@ -48,3 +85,9 @@ class TrainingSessionUnavailableException(
 class TrainingSessionMismatchException(
     sessionId: UUID,
 ) : IllegalArgumentException("Training session $sessionId is not the active session")
+
+class WorkoutTargetManagedException : IllegalStateException("The active workout controls the ERG target")
+
+class WorkoutStepAdvanceNotAllowedException(
+    message: String,
+) : IllegalStateException(message)

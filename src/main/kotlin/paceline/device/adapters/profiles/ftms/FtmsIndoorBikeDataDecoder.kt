@@ -8,6 +8,7 @@ data class FtmsIndoorBikeData(
     val averageSpeedKph: Double? = null,
     val instantaneousCadenceRpm: Double? = null,
     val averageCadenceRpm: Double? = null,
+    val totalDistanceMeters: Double? = null,
     val instantaneousPowerWatts: Int? = null,
     val averagePowerWatts: Int? = null,
 )
@@ -46,9 +47,12 @@ class FtmsIndoorBikeDataDecoder {
                 null
             }
 
-        if (flags has FLAG_TOTAL_DISTANCE) {
-            reader.skip(3, "total distance")
-        }
+        val totalDistanceMeters =
+            if (flags has FLAG_TOTAL_DISTANCE) {
+                reader.readUnsignedInt24("total distance").toDouble()
+            } else {
+                null
+            }
         if (flags has FLAG_RESISTANCE_LEVEL) {
             reader.skip(2, "resistance level")
         }
@@ -70,6 +74,7 @@ class FtmsIndoorBikeDataDecoder {
             averageSpeedKph = averageSpeedKph,
             instantaneousCadenceRpm = instantaneousCadenceRpm,
             averageCadenceRpm = averageCadenceRpm,
+            totalDistanceMeters = totalDistanceMeters,
             instantaneousPowerWatts = instantaneousPowerWatts,
             averagePowerWatts = averagePowerWatts,
         )
@@ -101,6 +106,16 @@ class FtmsIndoorBikeDataDecoder {
                     .short
                     .toInt()
             offset += 2
+            return result
+        }
+
+        fun readUnsignedInt24(field: String): Int {
+            requireAvailable(3, field)
+            val result =
+                (value[offset].toInt() and 0xff) or
+                    ((value[offset + 1].toInt() and 0xff) shl 8) or
+                    ((value[offset + 2].toInt() and 0xff) shl 16)
+            offset += 3
             return result
         }
 

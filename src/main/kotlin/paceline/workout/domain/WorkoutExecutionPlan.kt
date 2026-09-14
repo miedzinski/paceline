@@ -193,7 +193,7 @@ object ExecutableWorkoutFactory {
     }
 
     private fun Double.toWatts(): Int {
-        if (!isFinite() || this < 0.0 || this > Int.MAX_VALUE) {
+        if (!isFinite() || this < 0.0 || this > Short.MAX_VALUE) {
             throw WorkoutNotExecutableException("Power target is outside the supported range")
         }
         return roundToInt()

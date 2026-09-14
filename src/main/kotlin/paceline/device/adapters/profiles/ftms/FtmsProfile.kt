@@ -17,5 +17,6 @@ fun FtmsIndoorBikeData.toIndoorBikeTelemetry(receivedAt: Instant): IndoorBikeTel
         powerWatts = instantaneousPowerWatts,
         cadenceRpm = instantaneousCadenceRpm,
         speedKph = instantaneousSpeedKph,
+        distanceMeters = totalDistanceMeters,
         receivedAt = receivedAt,
     )

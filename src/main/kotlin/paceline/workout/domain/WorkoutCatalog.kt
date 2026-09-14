@@ -29,4 +29,22 @@ class WorkoutCatalog(
         )
 
     fun libraryWorkout(workoutId: String): LibraryWorkout = workoutLibrary.find(workoutId) ?: throw WorkoutNotFoundException(workoutId)
+
+    fun executable(selection: WorkoutSelection): ExecutableWorkout =
+        when (selection.sourceType) {
+            WorkoutSourceType.SCHEDULED -> {
+                today()
+                    .scheduledWorkouts
+                    .firstOrNull { it.reference == selection.reference }
+                    ?.let(ExecutableWorkoutFactory::from)
+                    ?: throw WorkoutNotFoundException(selection.reference.id)
+            }
+
+            WorkoutSourceType.LIBRARY -> {
+                libraryWorkout(selection.reference.id)
+                    .takeIf { it.reference == selection.reference }
+                    ?.let(ExecutableWorkoutFactory::from)
+                    ?: throw WorkoutNotFoundException(selection.reference.id)
+            }
+        }
 }

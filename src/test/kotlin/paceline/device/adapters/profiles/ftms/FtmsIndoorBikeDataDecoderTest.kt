@@ -61,6 +61,7 @@ class FtmsIndoorBikeDataDecoderTest {
         // then the fields after the optional values are read at the correct offsets:
         assertEquals(25.0, data.instantaneousSpeedKph)
         assertEquals(20.0, data.averageSpeedKph)
+        assertEquals(10_000.0, data.totalDistanceMeters)
         assertEquals(300, data.instantaneousPowerWatts)
     }
 

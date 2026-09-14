@@ -1,7 +1,14 @@
 package paceline.training.domain
 
+import paceline.device.domain.IndoorBikeTelemetry
 import paceline.testsupport.FakeIndoorBikePowerControl
 import paceline.testsupport.FakeTrainingDevice
+import paceline.workout.domain.ExecutableSport
+import paceline.workout.domain.ExecutableWorkout
+import paceline.workout.domain.ExecutableWorkoutStep
+import paceline.workout.domain.WorkoutSourceReference
+import paceline.workout.domain.WorkoutStepCompletion
+import paceline.workout.domain.WorkoutStepTarget
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -145,4 +152,139 @@ class TrainingSessionCoordinatorTest {
         assertEquals(TrainingSessionPhase.ACTIVE, session.current().phase)
         assertEquals(emptyList(), powerControl.targetPowers)
     }
+
+    @Test
+    fun `timed workout steps apply midpoint targets and complete at zero watts`() {
+        // given a two-step workout whose power ranges resolve to different midpoint targets:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val workout =
+            workout(
+                timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
+                timedStep("Recovery", seconds = 20, lowWatts = 100, highWatts = 100),
+            )
+
+        // when the workout reaches the first boundary and then its final boundary:
+        val started = session.start(workout)
+        val firstTransition = session.tick(now.plusSeconds(10))
+        val completed = session.tick(now.plusSeconds(30))
+
+        // then each step receives its midpoint and completion sends the safe zero target:
+        assertEquals(listOf(250, 100, 0), powerControl.targetPowers)
+        assertEquals(2, firstTransition.workout?.currentStepNumber)
+        assertEquals(TrainingSessionPhase.COMPLETED, completed.phase)
+        assertEquals(0, completed.ergTargetPowerWatts)
+        assertEquals(started.sessionId, completed.sessionId)
+    }
+
+    @Test
+    fun `distance workout steps use the trainer distance counter`() {
+        // given a distance step starting from the trainer's current total distance:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice =
+            FakeTrainingDevice(
+                powerControl = powerControl,
+                telemetry = telemetry(distanceMeters = 1_000.0),
+            )
+        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val workout =
+            workout(
+                distanceStep("Block", meters = 100.0, lowWatts = 200, highWatts = 200),
+                timedStep("Finish", seconds = 1, lowWatts = 150, highWatts = 150),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+
+        // when the trainer reports less than and then exactly the requested distance:
+        trainingDevice.telemetry = telemetry(distanceMeters = 1_099.0)
+        val beforeBoundary = session.tick(now.plusSeconds(1))
+        trainingDevice.telemetry = telemetry(distanceMeters = 1_100.0)
+        val afterBoundary = session.tick(now.plusSeconds(2))
+
+        // then the step does not advance early and advances once the distance delta is met:
+        assertEquals(1, beforeBoundary.workout?.currentStepNumber)
+        assertEquals(2, afterBoundary.workout?.currentStepNumber)
+        assertEquals(sessionId, afterBoundary.sessionId)
+        assertEquals(listOf(200, 150), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `manual workout steps advance only through the explicit advance action`() {
+        // given a workout beginning with a manual step:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val workout =
+            workout(
+                ExecutableWorkoutStep(
+                    text = "Lap press",
+                    completion = WorkoutStepCompletion.Manual,
+                    target = WorkoutStepTarget.Open,
+                ),
+                timedStep("Finish", seconds = 1, lowWatts = 180, highWatts = 180),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+
+        // when the explicit advance action is used:
+        val advanced = session.advance(sessionId)
+
+        // then the open step starts at zero watts and the next target is applied:
+        assertEquals(2, advanced.workout?.currentStepNumber)
+        assertEquals(180, advanced.ergTargetPowerWatts)
+        assertEquals(listOf(0, 180), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `manual ERG target changes are rejected while a workout owns the target`() {
+        // given an active executable workout:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
+
+        // when a manual target is submitted during workout execution:
+        // then the current step remains the only owner of the ERG target:
+        assertFailsWith<WorkoutTargetManagedException> {
+            session.setTargetPower(sessionId, 300)
+        }
+        assertEquals(listOf(200), powerControl.targetPowers)
+    }
+
+    private fun workout(vararg steps: ExecutableWorkoutStep): ExecutableWorkout =
+        ExecutableWorkout(
+            source = WorkoutSourceReference("intervals.icu", "workout-1"),
+            name = "Test workout",
+            sport = ExecutableSport.CYCLING,
+            steps = steps.toList(),
+        )
+
+    private fun timedStep(
+        text: String,
+        seconds: Int,
+        lowWatts: Int,
+        highWatts: Int,
+    ): ExecutableWorkoutStep =
+        ExecutableWorkoutStep(
+            text = text,
+            completion = WorkoutStepCompletion.Time(seconds),
+            target = WorkoutStepTarget.Power(lowWatts, highWatts),
+        )
+
+    private fun distanceStep(
+        text: String,
+        meters: Double,
+        lowWatts: Int,
+        highWatts: Int,
+    ): ExecutableWorkoutStep =
+        ExecutableWorkoutStep(
+            text = text,
+            completion = WorkoutStepCompletion.Distance(meters),
+            target = WorkoutStepTarget.Power(lowWatts, highWatts),
+        )
+
+    private fun telemetry(distanceMeters: Double): IndoorBikeTelemetry =
+        IndoorBikeTelemetry(
+            powerWatts = 200,
+            cadenceRpm = 90.0,
+            speedKph = 25.0,
+            distanceMeters = distanceMeters,
+            receivedAt = now,
+        )
 }

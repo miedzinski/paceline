@@ -6,5 +6,6 @@ data class IndoorBikeTelemetry(
     val powerWatts: Int? = null,
     val cadenceRpm: Double? = null,
     val speedKph: Double? = null,
+    val distanceMeters: Double? = null,
     val receivedAt: Instant,
 )

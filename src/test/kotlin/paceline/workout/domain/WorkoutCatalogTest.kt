@@ -4,6 +4,7 @@ import paceline.testsupport.FakePlannedWorkoutCalendar
 import paceline.testsupport.FakeWorkoutLibrary
 import java.time.Clock
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -57,5 +58,72 @@ class WorkoutCatalogTest {
         // then the library source is queried without involving today's calendar:
         assertEquals(workout, result)
         assertEquals(listOf("42"), library.requestedWorkoutIds)
+    }
+
+    @Test
+    fun `execution lookup validates a scheduled source and returns a strict plan`() {
+        // given today's calendar contains a selected structured cycling workout:
+        val scheduled =
+            ScheduledWorkout(
+                reference = WorkoutSourceReference("intervals.icu", "event-7"),
+                name = "Threshold",
+                description = null,
+                type = "Ride",
+                startAt = null,
+                endAt = null,
+                indoor = true,
+                durationSeconds = 600,
+                distanceMeters = null,
+                trainingLoad = null,
+                target = "POWER",
+                workout =
+                    WorkoutPlanSummary(
+                        description = null,
+                        durationSeconds = 600,
+                        distanceMeters = null,
+                        ftpWatts = 250,
+                        thresholdHeartRateBpm = null,
+                        target = "POWER",
+                        steps =
+                            listOf(
+                                WorkoutStepSummary(
+                                    text = "Work",
+                                    durationSeconds = 600,
+                                    distanceMeters = null,
+                                    repeats = null,
+                                    warmup = null,
+                                    cooldown = null,
+                                    intensity = null,
+                                    ramp = null,
+                                    power = null,
+                                    resolvedPower = WorkoutTargetSummary(value = 250.0, units = "W"),
+                                    heartRate = null,
+                                    pace = null,
+                                    cadence = null,
+                                    steps = emptyList(),
+                                ),
+                            ),
+                    ),
+            )
+        val catalog =
+            WorkoutCatalog(
+                plannedWorkoutCalendar = FakePlannedWorkoutCalendar(mapOf(LocalDate.of(2026, 9, 14) to listOf(scheduled))),
+                workoutLibrary = FakeWorkoutLibrary(),
+                clock = Clock.fixed(Instant.parse("2026-09-14T10:00:00Z"), ZoneId.of("UTC")),
+            )
+
+        // when the scheduled source is selected for execution:
+        val executable =
+            catalog.executable(
+                WorkoutSelection(
+                    sourceType = WorkoutSourceType.SCHEDULED,
+                    reference = scheduled.reference,
+                ),
+            )
+
+        // then the selection keeps its provider identity and becomes a strict executable plan:
+        assertEquals(scheduled.reference, executable.source)
+        assertEquals(ExecutableSport.CYCLING, executable.sport)
+        assertEquals(250, (executable.steps.single().target as WorkoutStepTarget.Power).lowWatts)
     }
 }
