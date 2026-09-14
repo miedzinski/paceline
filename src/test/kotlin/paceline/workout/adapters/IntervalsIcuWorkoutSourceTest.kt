@@ -1,4 +1,4 @@
-package paceline.workout.adapters.intervals
+package paceline.workout.adapters
 
 import org.springframework.http.HttpMethod
 import org.springframework.http.MediaType

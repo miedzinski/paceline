@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
+import paceline.training.domain.TrainingActivityUploadUnavailableException
 import paceline.training.domain.TrainingSessionAlreadyActiveException
 import paceline.training.domain.TrainingSessionCoordinator
 import paceline.training.domain.TrainingSessionMismatchException
@@ -19,6 +20,7 @@ import paceline.training.domain.TrainingSessionUnavailableException
 import paceline.training.domain.TrainingWorkoutProgress
 import paceline.training.domain.WorkoutStepAdvanceNotAllowedException
 import paceline.training.domain.WorkoutTargetManagedException
+import paceline.training.ports.ActivityUploadException
 import paceline.workout.domain.WorkoutCatalog
 import paceline.workout.domain.WorkoutNotExecutableException
 import paceline.workout.domain.WorkoutNotFoundException
@@ -117,6 +119,23 @@ class TrainingSessionController(
         } catch (exception: TrainingSessionUnavailableException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         }
+
+    @PostMapping(
+        "/{sessionId}/upload",
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun uploadTrainingSession(
+        @PathVariable sessionId: UUID,
+    ): TrainingSessionResponse =
+        try {
+            coordinator.upload(sessionId).toResponse()
+        } catch (exception: TrainingSessionMismatchException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: TrainingActivityUploadUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: ActivityUploadException) {
+            throw ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, exception.message, exception)
+        }
 }
 
 data class StartTrainingSessionRequest(
@@ -140,6 +159,13 @@ data class TrainingSessionResponse(
     val changedAt: Instant,
     val ergTargetPowerWatts: Int?,
     val workout: TrainingWorkoutResponse?,
+    val activityUpload: TrainingActivityUploadResponse,
+)
+
+data class TrainingActivityUploadResponse(
+    val state: String,
+    val remoteActivityId: String?,
+    val error: String?,
 )
 
 data class TrainingWorkoutResponse(
@@ -152,6 +178,7 @@ data class TrainingWorkoutResponse(
     val stepStartedAt: Instant,
     val completion: TrainingStepCompletionResponse,
     val target: TrainingStepTargetResponse,
+    val completed: Boolean,
 )
 
 data class TrainingStepCompletionResponse(
@@ -179,6 +206,12 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
         changedAt = changedAt,
         ergTargetPowerWatts = ergTargetPowerWatts,
         workout = workout?.toResponse(),
+        activityUpload =
+            TrainingActivityUploadResponse(
+                state = activityUpload.phase.name,
+                remoteActivityId = activityUpload.remoteActivityId,
+                error = activityUpload.error,
+            ),
     )
 
 private fun TrainingWorkoutProgress.toResponse(): TrainingWorkoutResponse =
@@ -192,6 +225,7 @@ private fun TrainingWorkoutProgress.toResponse(): TrainingWorkoutResponse =
         stepStartedAt = stepStartedAt,
         completion = step.completion.toResponse(),
         target = step.target.toResponse(),
+        completed = completed,
     )
 
 private fun WorkoutStepCompletion.toResponse(): TrainingStepCompletionResponse =

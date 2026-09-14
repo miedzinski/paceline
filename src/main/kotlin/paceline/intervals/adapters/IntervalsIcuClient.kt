@@ -1,12 +1,18 @@
 package paceline.intervals.adapters
 
+import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.core.ParameterizedTypeReference
+import org.springframework.core.io.ByteArrayResource
+import org.springframework.http.MediaType
+import org.springframework.http.client.MultipartBodyBuilder
 import org.springframework.stereotype.Component
 import org.springframework.web.client.HttpClientErrorException
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientException
+import org.springframework.web.client.RestClientResponseException
 import paceline.intervals.config.IntervalsIcuProperties
+import paceline.training.ports.ActivityUploadException
 import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.LocalDate
 
@@ -15,6 +21,8 @@ class IntervalsIcuClient(
     @Qualifier("intervalsIcuRestClient") private val restClient: RestClient,
     private val properties: IntervalsIcuProperties,
 ) {
+    private val logger = LoggerFactory.getLogger(javaClass)
+
     fun calendarEvents(date: LocalDate): List<IntervalsCalendarEventDto> =
         try {
             restClient
@@ -58,6 +66,114 @@ class IntervalsIcuClient(
                 exception,
             )
         }
+
+    fun uploadActivity(
+        fileName: String,
+        contentType: String,
+        content: ByteArray,
+        name: String,
+        description: String,
+        externalId: String,
+        pairedEventId: Long? = null,
+    ): IntervalsActivityUploadDto? {
+        logger.info(
+            "Uploading activity to Intervals.icu: externalId={}, pairedEventId={}, fileName={}, contentBytes={}",
+            externalId,
+            pairedEventId,
+            fileName,
+            content.size,
+        )
+
+        return try {
+            val multipart =
+                MultipartBodyBuilder()
+                    .apply {
+                        part(
+                            "file",
+                            object : ByteArrayResource(content) {
+                                override fun getFilename(): String = fileName
+                            },
+                        ).contentType(MediaType.parseMediaType(contentType))
+                    }.build()
+            val response =
+                restClient
+                    .post()
+                    .uri { builder ->
+                        builder
+                            .path("/api/v1/athlete/{athleteId}/activities")
+                            .queryParam("name", name)
+                            .queryParam("description", description)
+                            .queryParam("external_id", externalId)
+                            .apply {
+                                pairedEventId?.let { queryParam("paired_event_id", it) }
+                            }.build(properties.athleteId)
+                    }.headers { headers -> headers.setBasicAuth("API_KEY", apiKey()) }
+                    .contentType(MediaType.MULTIPART_FORM_DATA)
+                    .body(multipart)
+                    .retrieve()
+                    .body(IntervalsActivityUploadDto::class.java)
+            logger.info(
+                "Intervals.icu activity upload completed: externalId={}, remoteActivityId={}",
+                externalId,
+                response?.id,
+            )
+            response
+        } catch (exception: RestClientException) {
+            logUploadFailure(exception, fileName, externalId)
+            throw ActivityUploadException(
+                "Intervals.icu activity upload failed",
+                exception,
+            )
+        } catch (exception: WorkoutProviderUnavailableException) {
+            logger.warn(
+                "Intervals.icu activity upload could not start: externalId={}, fileName={}, reason={}",
+                externalId,
+                fileName,
+                exception.message,
+            )
+            throw ActivityUploadException(
+                exception.message ?: "Intervals.icu API key is not configured",
+                exception,
+            )
+        } catch (exception: IllegalArgumentException) {
+            logger.warn(
+                "Intervals.icu activity upload could not be prepared: externalId={}, fileName={}, reason={}",
+                externalId,
+                fileName,
+                exception.message,
+                exception,
+            )
+            throw ActivityUploadException(
+                "Intervals.icu activity upload could not be prepared",
+                exception,
+            )
+        }
+    }
+
+    private fun logUploadFailure(
+        exception: RestClientException,
+        fileName: String,
+        externalId: String,
+    ) {
+        if (exception is RestClientResponseException) {
+            logger.warn(
+                "Intervals.icu activity upload failed: externalId={}, fileName={}, status={}, responseBody={}",
+                externalId,
+                fileName,
+                exception.statusCode.value(),
+                exception.responseBodyAsString.take(MAX_LOGGED_RESPONSE_BODY_LENGTH),
+                exception,
+            )
+        } else {
+            logger.warn(
+                "Intervals.icu activity upload failed: externalId={}, fileName={}, reason={}",
+                externalId,
+                fileName,
+                exception.message,
+                exception,
+            )
+        }
+    }
 
     fun libraryWorkouts(): List<IntervalsLibraryWorkoutDto> =
         try {
@@ -107,5 +223,9 @@ class IntervalsIcuClient(
                 )
 
         return apiKey
+    }
+
+    private companion object {
+        const val MAX_LOGGED_RESPONSE_BODY_LENGTH = 500
     }
 }

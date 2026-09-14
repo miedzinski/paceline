@@ -1,4 +1,4 @@
-package paceline.workout.adapters.intervals
+package paceline.workout.adapters
 
 import org.springframework.stereotype.Component
 import paceline.intervals.adapters.IntervalsCalendarEventDto

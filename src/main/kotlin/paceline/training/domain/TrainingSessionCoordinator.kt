@@ -3,6 +3,8 @@ package paceline.training.domain
 import org.springframework.stereotype.Component
 import paceline.device.domain.IndoorBikeTelemetry
 import paceline.device.ports.IndoorBikePowerControl
+import paceline.training.ports.ActivityUploadException
+import paceline.training.ports.ActivityUploader
 import paceline.training.ports.TrainingDevice
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
@@ -17,11 +19,18 @@ import kotlin.math.roundToInt
 class TrainingSessionCoordinator(
     private val trainingDevice: TrainingDevice,
     private val clock: Clock = Clock.systemUTC(),
+    private val activityUploader: ActivityUploader =
+        ActivityUploader {
+            throw ActivityUploadException("An Intervals.icu activity uploader is not configured")
+        },
 ) {
     private var state = TrainingSessionState.notStarted(clock.instant())
     private var activePowerControl: IndoorBikePowerControl? = null
     private var activeWorkout: ExecutableWorkout? = null
     private var stepDistanceStartMeters: Double? = null
+    private var telemetryRegistration: AutoCloseable? = null
+    private val activityRecorder = InMemoryTrainingActivityRecorder()
+    private var completedActivity: RecordedTrainingActivity? = null
 
     @Synchronized
     fun current(): TrainingSessionState = state
@@ -53,6 +62,7 @@ class TrainingSessionCoordinator(
             setTarget(powerControl, initialTarget, "initial workout")
         }
 
+        val sessionId = UUID.randomUUID()
         activePowerControl = powerControl
         activeWorkout = workout
         stepDistanceStartMeters =
@@ -69,10 +79,31 @@ class TrainingSessionCoordinator(
         state =
             TrainingSessionState
                 .active(
-                    sessionId = UUID.randomUUID(),
+                    sessionId = sessionId,
                     now = now,
                     workout = progress,
                 ).copy(ergTargetPowerWatts = initialTarget)
+        activityRecorder.start(
+            sessionId = sessionId,
+            startedAt = now,
+            name = workout?.name ?: "Paceline ride",
+            workoutSource = workout?.source,
+            workoutSourceType = workout?.sourceType,
+            initialSegmentName =
+                workout?.let {
+                    activitySegmentName(
+                        stepNumber = 1,
+                        totalSteps = it.steps.size,
+                        step = it.steps.first(),
+                    )
+                } ?: "Manual ERG",
+            initialTargetPowerWatts = initialTarget,
+        )
+        telemetryRegistration =
+            trainingDevice.addTelemetryListener { telemetry ->
+                activityRecorder.record(sessionId, telemetry)
+            }
+        completedActivity = null
         return state
     }
 
@@ -82,7 +113,7 @@ class TrainingSessionCoordinator(
         powerWatts: Int,
     ): TrainingSessionState {
         val activeState = requireActiveSession(sessionId)
-        if (activeState.workout != null) {
+        if (activeWorkout != null) {
             throw WorkoutTargetManagedException()
         }
 
@@ -109,6 +140,11 @@ class TrainingSessionCoordinator(
                 ?: throw WorkoutStepAdvanceNotAllowedException(
                     "The active session has no executable workout",
                 )
+        if (progress.completed || activeWorkout == null) {
+            throw WorkoutStepAdvanceNotAllowedException(
+                "The workout has already completed",
+            )
+        }
         if (progress.step.completion !is WorkoutStepCompletion.Manual) {
             throw WorkoutStepAdvanceNotAllowedException(
                 "The current workout step advances automatically",
@@ -128,7 +164,7 @@ class TrainingSessionCoordinator(
         }
 
         return try {
-            while (state.phase == TrainingSessionPhase.ACTIVE) {
+            while (state.phase == TrainingSessionPhase.ACTIVE && activeWorkout != null) {
                 val progress = state.workout ?: break
                 if (!isComplete(progress, now, telemetry)) {
                     break
@@ -157,16 +193,83 @@ class TrainingSessionCoordinator(
     fun stop(sessionId: UUID): TrainingSessionState {
         val activeState = requireActiveSession(sessionId)
         val powerControl = requireActivePowerControl()
+        val stoppedAt = clock.instant()
         setTarget(powerControl, 0, "0 W stop")
+
+        telemetryRegistration?.close()
+        telemetryRegistration = null
+        completedActivity = activityRecorder.finish(sessionId, stoppedAt)
 
         state =
             activeState.copy(
                 phase = TrainingSessionPhase.STOPPED,
-                changedAt = clock.instant(),
+                changedAt = stoppedAt,
                 ergTargetPowerWatts = 0,
+                activityUpload =
+                    if (completedActivity?.samples?.isNotEmpty() == true) {
+                        TrainingActivityUploadState.available()
+                    } else {
+                        TrainingActivityUploadState.unavailable()
+                    },
             )
         clearActiveExecution()
         return state
+    }
+
+    @Synchronized
+    fun upload(sessionId: UUID): TrainingSessionState {
+        val stoppedState = requireStoppedSession(sessionId)
+        val activity =
+            completedActivity
+                ?: throw TrainingActivityUploadUnavailableException(
+                    "The stopped session has no in-memory activity recording",
+                )
+        if (activity.samples.isEmpty()) {
+            throw TrainingActivityUploadUnavailableException(
+                "The stopped session has no telemetry to upload",
+            )
+        }
+        if (stoppedState.activityUpload.phase == TrainingActivityUploadPhase.UPLOADED) {
+            return stoppedState
+        }
+
+        state =
+            stoppedState.copy(
+                activityUpload = TrainingActivityUploadState(TrainingActivityUploadPhase.UPLOADING),
+            )
+        return try {
+            val receipt = activityUploader.upload(activity)
+            state =
+                state.copy(
+                    activityUpload =
+                        TrainingActivityUploadState(
+                            phase = TrainingActivityUploadPhase.UPLOADED,
+                            remoteActivityId = receipt.remoteActivityId,
+                        ),
+                )
+            state
+        } catch (exception: ActivityUploadException) {
+            state =
+                state.copy(
+                    activityUpload =
+                        TrainingActivityUploadState(
+                            phase = TrainingActivityUploadPhase.FAILED,
+                            error = exception.message,
+                        ),
+                )
+            throw exception
+        } catch (exception: Exception) {
+            val uploadException = ActivityUploadException("The training activity could not be uploaded", exception)
+            state =
+                state.copy(
+                    activityUpload =
+                        TrainingActivityUploadState(
+                            phase = TrainingActivityUploadPhase.FAILED,
+                            error = uploadException.message,
+                        ),
+                )
+            throw uploadException
+        }
     }
 
     private fun isComplete(
@@ -205,13 +308,17 @@ class TrainingSessionCoordinator(
         if (nextIndex >= workout.steps.size) {
             val powerControl = requireActivePowerControl()
             setTarget(powerControl, 0, "workout completion")
+            activityRecorder.completeWorkout(
+                sessionId = requireNotNull(state.sessionId),
+                completedAt = transitionAt,
+            )
             state =
                 state.copy(
-                    phase = TrainingSessionPhase.COMPLETED,
                     changedAt = transitionAt,
                     ergTargetPowerWatts = 0,
+                    workout = progress.copy(completed = true),
                 )
-            clearActiveExecution()
+            clearActiveWorkout()
             return state
         }
 
@@ -219,6 +326,12 @@ class TrainingSessionCoordinator(
         val nextTarget = targetPower(nextStep)
         val powerControl = requireActivePowerControl()
         setTarget(powerControl, nextTarget, "workout step ${nextIndex + 1}")
+        activityRecorder.startSegment(
+            sessionId = requireNotNull(state.sessionId),
+            startedAt = transitionAt,
+            name = activitySegmentName(nextIndex + 1, workout.steps.size, nextStep),
+            targetPowerWatts = nextTarget,
+        )
         val nextProgress =
             TrainingWorkoutProgress(
                 source = workout.source,
@@ -254,6 +367,15 @@ class TrainingSessionCoordinator(
             }
         }
 
+    private fun activitySegmentName(
+        stepNumber: Int,
+        totalSteps: Int,
+        step: ExecutableWorkoutStep,
+    ): String {
+        val stepName = step.text?.trim()?.takeIf(String::isNotBlank) ?: "Step $stepNumber"
+        return "Step $stepNumber/$totalSteps: $stepName"
+    }
+
     private fun setTarget(
         powerControl: IndoorBikePowerControl,
         powerWatts: Int,
@@ -276,6 +398,23 @@ class TrainingSessionCoordinator(
             else -> state
         }
 
+    private fun requireStoppedSession(sessionId: UUID): TrainingSessionState =
+        when {
+            state.sessionId != sessionId -> {
+                throw TrainingSessionMismatchException(sessionId)
+            }
+
+            state.phase != TrainingSessionPhase.STOPPED -> {
+                throw TrainingActivityUploadUnavailableException(
+                    "A training activity can be uploaded only after the session is stopped",
+                )
+            }
+
+            else -> {
+                state
+            }
+        }
+
     private fun requireActivePowerControl(): IndoorBikePowerControl =
         activePowerControl
             ?: throw TrainingSessionUnavailableException(
@@ -284,6 +423,10 @@ class TrainingSessionCoordinator(
 
     private fun clearActiveExecution() {
         activePowerControl = null
+        clearActiveWorkout()
+    }
+
+    private fun clearActiveWorkout() {
         activeWorkout = null
         stepDistanceStartMeters = null
     }

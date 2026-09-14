@@ -1,16 +1,19 @@
 package paceline.training.domain
 
 import paceline.device.domain.IndoorBikeTelemetry
+import paceline.testsupport.FakeActivityUploader
 import paceline.testsupport.FakeIndoorBikePowerControl
 import paceline.testsupport.FakeTrainingDevice
 import paceline.workout.domain.ExecutableSport
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutSourceReference
+import paceline.workout.domain.WorkoutSourceType
 import paceline.workout.domain.WorkoutStepCompletion
 import paceline.workout.domain.WorkoutStepTarget
 import java.time.Clock
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -154,7 +157,7 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `timed workout steps apply midpoint targets and complete at zero watts`() {
+    fun `finishing a workout keeps the session active for manual ERG continuation`() {
         // given a two-step workout whose power ranges resolve to different midpoint targets:
         val powerControl = FakeIndoorBikePowerControl()
         val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
@@ -169,12 +172,96 @@ class TrainingSessionCoordinatorTest {
         val firstTransition = session.tick(now.plusSeconds(10))
         val completed = session.tick(now.plusSeconds(30))
 
-        // then each step receives its midpoint and completion sends the safe zero target:
+        // then each step receives its midpoint and workout completion leaves the session open at zero watts:
         assertEquals(listOf(250, 100, 0), powerControl.targetPowers)
         assertEquals(2, firstTransition.workout?.currentStepNumber)
-        assertEquals(TrainingSessionPhase.COMPLETED, completed.phase)
+        assertEquals(TrainingSessionPhase.ACTIVE, completed.phase)
+        assertEquals(true, completed.workout?.completed)
         assertEquals(0, completed.ergTargetPowerWatts)
         assertEquals(started.sessionId, completed.sessionId)
+
+        // when the user selects a manual target after the planned workout:
+        val continued = session.setTargetPower(requireNotNull(started.sessionId), 180)
+
+        // then manual ERG control is available without starting a second session:
+        assertEquals(180, continued.ergTargetPowerWatts)
+        assertEquals(listOf(250, 100, 0, 180), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `stopping records each telemetry notification once and uploads the in-memory activity`() {
+        // given an active session and an uploader that records the submitted activity:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val started = session.start()
+        val firstSample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
+        val secondSample = telemetry(receivedAt = now.plusMillis(100), distanceMeters = 1_001.0)
+
+        // when telemetry notifications include the same timestamp twice and the session is stopped and uploaded:
+        trainingDevice.emitTelemetry(firstSample)
+        trainingDevice.emitTelemetry(firstSample)
+        trainingDevice.emitTelemetry(secondSample)
+        val stopped = session.stop(requireNotNull(started.sessionId))
+        val uploaded = session.upload(requireNotNull(started.sessionId))
+
+        // then the upload is optional after stop and contains each notification timestamp once:
+        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+        assertEquals(TrainingActivityUploadPhase.UPLOADED, uploaded.activityUpload.phase)
+        assertEquals(
+            listOf(firstSample.receivedAt, secondSample.receivedAt),
+            uploader.uploads
+                .single()
+                .samples
+                .map { it.receivedAt },
+        )
+    }
+
+    @Test
+    fun `recorded scheduled workouts retain step and manual continuation segments`() {
+        // given a scheduled two-step workout and telemetry around each transition:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        var currentTime = now
+        val mutableClock =
+            object : Clock() {
+                override fun instant(): Instant = currentTime
+
+                override fun getZone(): ZoneId = ZoneOffset.UTC
+
+                override fun withZone(zone: ZoneId): Clock = this
+            }
+        val session = TrainingSessionCoordinator(trainingDevice, mutableClock, uploader)
+        val workout =
+            workout(
+                timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
+                timedStep("Recovery", seconds = 20, lowWatts = 100, highWatts = 100),
+            ).copy(sourceType = WorkoutSourceType.SCHEDULED)
+        val started = session.start(workout)
+        val sessionId = requireNotNull(started.sessionId)
+
+        // when the workout completes, the ride continues briefly, and the session is uploaded:
+        trainingDevice.emitTelemetry(telemetry(receivedAt = now, distanceMeters = 1_000.0))
+        session.tick(now.plusSeconds(10))
+        trainingDevice.emitTelemetry(telemetry(receivedAt = now.plusSeconds(10), distanceMeters = 1_001.0))
+        session.tick(now.plusSeconds(30))
+        trainingDevice.emitTelemetry(telemetry(receivedAt = now.plusSeconds(30), distanceMeters = 1_002.0))
+        currentTime = now.plusSeconds(31)
+        session.stop(sessionId)
+        session.upload(sessionId)
+        val activity = uploader.uploads.single()
+
+        // then the uploaded activity preserves the planned steps and the post-workout manual continuation:
+        assertEquals(WorkoutSourceType.SCHEDULED, activity.workoutSourceType)
+        assertEquals(
+            listOf("Step 1/2: Work", "Step 2/2: Recovery", "Manual continuation"),
+            activity.segments.map { it.name },
+        )
+        assertEquals(listOf(250, 100, null), activity.segments.map { it.targetPowerWatts })
+        assertEquals(listOf(1, 1, 1), activity.segments.map { it.samples.size })
+        assertEquals(true, activity.workoutCompleted)
     }
 
     @Test
@@ -279,12 +366,15 @@ class TrainingSessionCoordinatorTest {
             target = WorkoutStepTarget.Power(lowWatts, highWatts),
         )
 
-    private fun telemetry(distanceMeters: Double): IndoorBikeTelemetry =
+    private fun telemetry(
+        receivedAt: Instant = now,
+        distanceMeters: Double,
+    ): IndoorBikeTelemetry =
         IndoorBikeTelemetry(
             powerWatts = 200,
             cadenceRpm = 90.0,
             speedKph = 25.0,
             distanceMeters = distanceMeters,
-            receivedAt = now,
+            receivedAt = receivedAt,
         )
 }

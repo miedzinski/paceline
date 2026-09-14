@@ -28,6 +28,7 @@ dependencies {
     implementation(libs.jmdns)
     implementation(libs.bluez.dbus)
     implementation(libs.dbus.java.transport.native.unixsocket)
+    implementation(libs.reactive.streams)
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.mockk)

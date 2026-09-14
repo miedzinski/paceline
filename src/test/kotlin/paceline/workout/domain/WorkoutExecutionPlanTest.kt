@@ -45,6 +45,7 @@ class WorkoutExecutionPlanTest {
 
         // then repetitions are expanded and every executable step has strict completion and target types:
         assertEquals(ExecutableSport.CYCLING, result.sport)
+        assertEquals(WorkoutSourceType.SCHEDULED, result.sourceType)
         assertEquals(listOf("Work", "Free recovery", "Work", "Free recovery"), result.steps.map { it.text })
         assertEquals(
             250,

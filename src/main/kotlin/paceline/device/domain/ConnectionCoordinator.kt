@@ -7,6 +7,7 @@ import paceline.device.ports.DeviceCommunication
 import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
 import paceline.device.ports.IndoorBikePowerControl
+import paceline.device.ports.IndoorBikeTelemetryListener
 import paceline.device.ports.IndoorBikeTelemetrySource
 import paceline.device.ports.WifiDiscovery
 import java.util.UUID
@@ -45,6 +46,14 @@ class ConnectionCoordinator(
         connection
             ?.takeIf { it.connection.isOpen() && current().phase == ConnectionPhase.CONNECTED }
             ?.capability<IndoorBikePowerControl>()
+
+    @Synchronized
+    fun addTelemetryListener(listener: IndoorBikeTelemetryListener): AutoCloseable =
+        connection
+            ?.takeIf { it.connection.isOpen() && current().phase == ConnectionPhase.CONNECTED }
+            ?.capability<IndoorBikeTelemetrySource>()
+            ?.addTelemetryListener(listener)
+            ?: AutoCloseable { }
 
     @Synchronized
     fun discover(): DiscoverySnapshot {

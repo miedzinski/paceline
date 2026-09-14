@@ -11,6 +11,7 @@ data class ExecutableWorkout(
     val name: String,
     val sport: ExecutableSport,
     val steps: List<ExecutableWorkoutStep>,
+    val sourceType: WorkoutSourceType? = null,
 ) {
     init {
         require(steps.isNotEmpty()) { "An executable workout must contain at least one step" }
@@ -66,6 +67,7 @@ class WorkoutNotExecutableException(
 object ExecutableWorkoutFactory {
     fun from(workout: ScheduledWorkout): ExecutableWorkout =
         from(
+            sourceType = WorkoutSourceType.SCHEDULED,
             source = workout.reference,
             name = workout.name,
             type = workout.type,
@@ -74,6 +76,7 @@ object ExecutableWorkoutFactory {
 
     fun from(workout: LibraryWorkout): ExecutableWorkout =
         from(
+            sourceType = WorkoutSourceType.LIBRARY,
             source = workout.reference,
             name = workout.name,
             type = workout.type,
@@ -81,6 +84,7 @@ object ExecutableWorkoutFactory {
         )
 
     private fun from(
+        sourceType: WorkoutSourceType,
         source: WorkoutSourceReference,
         name: String?,
         type: String?,
@@ -99,6 +103,7 @@ object ExecutableWorkoutFactory {
             name = name?.takeIf(String::isNotBlank) ?: "Workout",
             sport = sport,
             steps = steps,
+            sourceType = sourceType,
         )
     }
 

@@ -27,6 +27,12 @@ data class IntervalsActivityDto(
 )
 
 @JsonIgnoreProperties(ignoreUnknown = true)
+data class IntervalsActivityUploadDto(
+    @JsonProperty("icu_athlete_id") val athleteId: String? = null,
+    val id: String? = null,
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class IntervalsLibraryWorkoutDto(
     val id: Long,
     val name: String? = null,

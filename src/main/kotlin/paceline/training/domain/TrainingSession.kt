@@ -13,6 +13,26 @@ enum class TrainingSessionPhase {
     COMPLETED,
 }
 
+enum class TrainingActivityUploadPhase {
+    UNAVAILABLE,
+    AVAILABLE,
+    UPLOADING,
+    UPLOADED,
+    FAILED,
+}
+
+data class TrainingActivityUploadState(
+    val phase: TrainingActivityUploadPhase,
+    val remoteActivityId: String? = null,
+    val error: String? = null,
+) {
+    companion object {
+        fun unavailable(): TrainingActivityUploadState = TrainingActivityUploadState(phase = TrainingActivityUploadPhase.UNAVAILABLE)
+
+        fun available(): TrainingActivityUploadState = TrainingActivityUploadState(phase = TrainingActivityUploadPhase.AVAILABLE)
+    }
+}
+
 data class TrainingWorkoutProgress(
     val source: WorkoutSourceReference,
     val name: String,
@@ -20,6 +40,7 @@ data class TrainingWorkoutProgress(
     val totalSteps: Int,
     val step: ExecutableWorkoutStep,
     val stepStartedAt: Instant,
+    val completed: Boolean = false,
 ) {
     init {
         require(currentStepNumber in 1..totalSteps) {
@@ -50,6 +71,7 @@ data class TrainingSessionState(
     val changedAt: Instant,
     val ergTargetPowerWatts: Int? = null,
     val workout: TrainingWorkoutProgress? = null,
+    val activityUpload: TrainingActivityUploadState = TrainingActivityUploadState.unavailable(),
 ) {
     companion object {
         fun notStarted(now: Instant): TrainingSessionState =
@@ -81,6 +103,10 @@ class TrainingSessionUnavailableException(
     message: String,
     cause: Throwable? = null,
 ) : IllegalStateException(message, cause)
+
+class TrainingActivityUploadUnavailableException(
+    message: String,
+) : IllegalStateException(message)
 
 class TrainingSessionMismatchException(
     sessionId: UUID,
