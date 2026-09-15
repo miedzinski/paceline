@@ -111,6 +111,69 @@ class WorkoutExecutionIntegrationTest {
     }
 
     @Test
+    fun `pause and resume expose the whole session lifecycle`() {
+        // given an explicitly started workout session:
+        val request =
+            """
+            {
+              "workout": {
+                "provider": "test-provider",
+                "sourceType": "SCHEDULED",
+                "sourceId": "event-1"
+              }
+            }
+            """.trimIndent()
+        val started =
+            restClient
+                .post()
+                .uri("/training-sessions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(request)
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val sessionId =
+            Regex("\"sessionId\":\"([^\"]+)\"")
+                .find(started)
+                ?.groupValues
+                ?.get(1)
+                ?: error("No session id in response: $started")
+
+        // when the active session is paused and resumed through the REST API:
+        val paused =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/pause")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val resumed =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/resume")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+
+        // then the session state is paused and resumed while the workout context remains attached:
+        assertTrue(paused.contains("\"state\":\"PAUSED\""))
+        assertTrue(paused.contains("\"ergTargetPowerWatts\":0"))
+        assertTrue(paused.contains("\"sourceId\":\"event-1\""))
+        assertTrue(resumed.contains("\"state\":\"ACTIVE\""))
+        assertEquals(listOf(0, 0, 0), powerControl.targetPowers)
+        assertEquals(2, powerControl.requestControlCalls)
+    }
+
+    @Test
     fun `manual stop exposes optional upload without uploading automatically`() {
         // given a manually started session with one received telemetry notification:
         val started =

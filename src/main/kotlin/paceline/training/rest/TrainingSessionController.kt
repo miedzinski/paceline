@@ -17,6 +17,8 @@ import paceline.training.domain.TrainingSessionAlreadyActiveException
 import paceline.training.domain.TrainingSessionCoordinator
 import paceline.training.domain.TrainingSessionMismatchException
 import paceline.training.domain.TrainingSessionNotActiveException
+import paceline.training.domain.TrainingSessionPauseNotAllowedException
+import paceline.training.domain.TrainingSessionResumeNotAllowedException
 import paceline.training.domain.TrainingSessionState
 import paceline.training.domain.TrainingSessionUnavailableException
 import paceline.training.domain.TrainingWorkoutProgress
@@ -127,6 +129,42 @@ class TrainingSessionController(
         } catch (exception: TrainingSessionMismatchException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
         } catch (exception: WorkoutStepAdvanceNotAllowedException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        }
+
+    @PostMapping(
+        "/{sessionId}/pause",
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun pauseTrainingSession(
+        @PathVariable sessionId: UUID,
+    ): TrainingSessionResponse =
+        try {
+            coordinator.pause(sessionId).toResponse()
+        } catch (exception: TrainingSessionNotActiveException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionMismatchException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: TrainingSessionPauseNotAllowedException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        }
+
+    @PostMapping(
+        "/{sessionId}/resume",
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun resumeTrainingSession(
+        @PathVariable sessionId: UUID,
+    ): TrainingSessionResponse =
+        try {
+            coordinator.resume(sessionId).toResponse()
+        } catch (exception: TrainingSessionMismatchException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: TrainingSessionResumeNotAllowedException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         } catch (exception: TrainingSessionUnavailableException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)

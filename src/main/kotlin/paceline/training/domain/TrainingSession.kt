@@ -10,6 +10,7 @@ import java.util.UUID
 enum class TrainingSessionPhase {
     NOT_STARTED,
     ACTIVE,
+    PAUSED,
     STOPPED,
     COMPLETED,
 }
@@ -127,5 +128,13 @@ class TrainingSessionMismatchException(
 class WorkoutTargetManagedException : IllegalStateException("The active workout controls the ERG target")
 
 class WorkoutStepAdvanceNotAllowedException(
+    message: String,
+) : IllegalStateException(message)
+
+class TrainingSessionPauseNotAllowedException(
+    message: String,
+) : IllegalStateException(message)
+
+class TrainingSessionResumeNotAllowedException(
     message: String,
 ) : IllegalStateException(message)

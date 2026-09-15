@@ -444,6 +444,198 @@ class TrainingSessionCoordinatorTest {
         assertEquals(listOf(200), powerControl.targetPowers)
     }
 
+    @Test
+    fun `pausing a session sends zero watts and stops recording until resume`() {
+        // given an active manual session with a selected ERG target and telemetry:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val mutableClock = MutableTestClock(now)
+        val session = TrainingSessionCoordinator(trainingDevice, mutableClock, uploader)
+        val started = session.start()
+        val sessionId = requireNotNull(started.sessionId)
+        session.setTargetPower(sessionId, 300)
+        val beforePause = telemetry(receivedAt = now.plusSeconds(1), distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(beforePause)
+
+        // when the session is paused, a notification arrives, then the session resumes and records again:
+        mutableClock.currentTime = now.plusSeconds(2)
+        val paused = session.pause(sessionId)
+        val duringPause = telemetry(receivedAt = now.plusSeconds(3), distanceMeters = 1_001.0)
+        trainingDevice.emitTelemetry(duringPause)
+        mutableClock.currentTime = now.plusSeconds(10)
+        val resumed = session.resume(sessionId)
+        val afterResume = telemetry(receivedAt = now.plusSeconds(11), distanceMeters = 1_002.0)
+        trainingDevice.emitTelemetry(afterResume)
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then the session is paused at zero watts, resumes its prior target, and excludes paused samples:
+        assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
+        assertEquals(0, paused.ergTargetPowerWatts)
+        assertEquals(TrainingSessionPhase.ACTIVE, resumed.phase)
+        assertEquals(300, resumed.ergTargetPowerWatts)
+        assertEquals(listOf(300, 0, 300, 0), powerControl.targetPowers)
+        assertEquals(
+            listOf(beforePause.receivedAt, afterResume.receivedAt),
+            uploader.uploads
+                .single()
+                .samples
+                .map { it.receivedAt },
+        )
+    }
+
+    @Test
+    fun `paused workout timing resumes from the remaining step duration`() {
+        // given a timed workout that has run for part of its first step:
+        val powerControl = FakeIndoorBikePowerControl()
+        val mutableClock = MutableTestClock(now)
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), mutableClock)
+        val workout = workout(timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 200))
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        mutableClock.currentTime = now.plusSeconds(5)
+
+        // when the workout is paused for twenty seconds, resumed, and advanced by four more seconds:
+        val paused = session.pause(sessionId)
+        mutableClock.currentTime = now.plusSeconds(25)
+        val pausedTick = session.tick(mutableClock.currentTime)
+        val resumed = session.resume(sessionId)
+        mutableClock.currentTime = now.plusSeconds(29)
+        val beforeCompletion = session.tick(mutableClock.currentTime)
+
+        // then paused wall-clock time does not consume the timed step:
+        assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
+        assertEquals(1, pausedTick.workout?.currentStepNumber)
+        assertEquals(now.plusSeconds(20), resumed.workout?.stepStartedAt)
+        assertEquals(1, beforeCompletion.workout?.currentStepNumber)
+
+        // when the remaining step duration elapses after resume:
+        mutableClock.currentTime = now.plusSeconds(30)
+        val completed = session.tick(mutableClock.currentTime)
+
+        // then the workout completes only at the adjusted boundary:
+        assertEquals(true, completed.workout?.completed)
+        assertEquals(listOf(200, 0, 200, 0), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `paused distance workout ignores trainer distance accumulated during the pause`() {
+        // given a distance workout with thirty meters completed before pausing:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl, telemetry = telemetry(distanceMeters = 1_000.0))
+        val mutableClock = MutableTestClock(now)
+        val session = TrainingSessionCoordinator(trainingDevice, mutableClock)
+        val workout =
+            workout(
+                distanceStep("Block", meters = 100.0, lowWatts = 200, highWatts = 200),
+                timedStep("Finish", seconds = 1, lowWatts = 150, highWatts = 150),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        trainingDevice.telemetry = telemetry(distanceMeters = 1_030.0)
+        mutableClock.currentTime = now.plusSeconds(1)
+
+        // when the trainer moves fifty meters while paused and then moves sixty-nine meters after resume:
+        session.pause(sessionId)
+        trainingDevice.telemetry = telemetry(distanceMeters = 1_080.0)
+        mutableClock.currentTime = now.plusSeconds(20)
+        session.resume(sessionId)
+        trainingDevice.telemetry = telemetry(distanceMeters = 1_149.0)
+        val beforeBoundary = session.tick(now.plusSeconds(21), trainingDevice.telemetry)
+
+        // then distance accumulated while paused is not counted:
+        assertEquals(1, beforeBoundary.workout?.currentStepNumber)
+
+        // when the trainer reaches seventy post-resume meters:
+        trainingDevice.telemetry = telemetry(distanceMeters = 1_150.0)
+        val atBoundary = session.tick(now.plusSeconds(22), trainingDevice.telemetry)
+
+        // then the thirty pre-pause meters plus seventy post-resume meters complete the step:
+        assertEquals(2, atBoundary.workout?.currentStepNumber)
+    }
+
+    @Test
+    fun `stopping a paused session finalizes the recording and remains safe`() {
+        // given an active session with a recorded sample:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val sessionId = requireNotNull(session.start().sessionId)
+        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+
+        // when the session is paused and stopped without resuming:
+        session.pause(sessionId)
+        val stopped = session.stop(sessionId)
+
+        // then stopping sends the safe target again and makes the pre-pause recording available:
+        assertEquals(TrainingSessionPhase.STOPPED, stopped.phase)
+        assertEquals(listOf(0, 0), powerControl.targetPowers)
+        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+    }
+
+    @Test
+    fun `a failed pause target leaves the session active and recording`() {
+        // given an active session whose trainer rejects the pause target:
+        val powerControl =
+            FakeIndoorBikePowerControl().also {
+                it.targetPowerFailure = IllegalStateException("trainer unavailable")
+            }
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val sessionId = requireNotNull(session.start().sessionId)
+
+        // when the session is paused:
+        assertFailsWith<TrainingSessionUnavailableException> {
+            session.pause(sessionId)
+        }
+
+        // then the state and recording subscription remain active for a retry:
+        assertEquals(TrainingSessionPhase.ACTIVE, session.current().phase)
+        assertEquals(emptyList(), powerControl.targetPowers)
+        powerControl.targetPowerFailure = null
+        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        session.stop(sessionId)
+        session.upload(sessionId)
+        assertEquals(
+            1,
+            uploader.uploads
+                .single()
+                .samples
+                .size,
+        )
+    }
+
+    @Test
+    fun `a failed resume target leaves the session paused`() {
+        // given a paused session whose trainer rejects the restored target:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val sessionId = requireNotNull(session.start().sessionId)
+        session.pause(sessionId)
+        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+
+        // when the paused session is resumed:
+        assertFailsWith<TrainingSessionUnavailableException> {
+            session.resume(sessionId)
+        }
+
+        // then the session remains paused and no recording subscription is reopened:
+        assertEquals(TrainingSessionPhase.PAUSED, session.current().phase)
+        assertEquals(0, session.current().ergTargetPowerWatts)
+        assertEquals(listOf(0), powerControl.targetPowers)
+    }
+
+    private class MutableTestClock(
+        var currentTime: Instant,
+    ) : Clock() {
+        override fun instant(): Instant = currentTime
+
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+
+        override fun withZone(zone: ZoneId): Clock = this
+    }
+
     private fun workout(vararg steps: ExecutableWorkoutStep): ExecutableWorkout =
         ExecutableWorkout(
             source = WorkoutSourceReference("intervals.icu", "workout-1"),

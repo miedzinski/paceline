@@ -13,6 +13,7 @@ import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutStepCompletion
 import paceline.workout.domain.WorkoutStepTarget
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -30,6 +31,9 @@ class TrainingSessionCoordinator(
     private var activePowerControl: IndoorBikePowerControl? = null
     private var activeWorkout: ExecutableWorkout? = null
     private var stepDistanceStartMeters: Double? = null
+    private var stepDistanceProgressAtPauseMeters: Double? = null
+    private var pausedAt: Instant? = null
+    private var pausedErgTargetPowerWatts: Int? = null
     private var telemetryRegistration: AutoCloseable? = null
     private var activeHeartRateSourceId: String? = null
     private var heartRateRegistration: AutoCloseable? = null
@@ -47,7 +51,7 @@ class TrainingSessionCoordinator(
         workout: ExecutableWorkout? = null,
         heartRateSourceId: String? = null,
     ): TrainingSessionState {
-        if (state.phase == TrainingSessionPhase.ACTIVE) {
+        if (state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED)) {
             throw TrainingSessionAlreadyActiveException()
         }
 
@@ -116,17 +120,9 @@ class TrainingSessionCoordinator(
             initialTargetPowerWatts = initialTarget,
             initialWorkoutStep = workout?.steps?.first(),
         )
-        telemetryRegistration =
-            trainingDevice.addTelemetryListener { telemetry ->
-                activityRecorder.record(sessionId, telemetry)
-            }
+        registerTelemetry(sessionId)
         activeHeartRateSourceId = selectedHeartRateSourceId
-        heartRateRegistration =
-            selectedHeartRateSourceId?.let { sourceId ->
-                trainingDevice.addHeartRateListener(sourceId) { telemetry ->
-                    onHeartRate(sessionId, sourceId, telemetry)
-                }
-            }
+        registerHeartRate(sessionId, selectedHeartRateSourceId)
         completedActivity = null
         return state
     }
@@ -145,10 +141,7 @@ class TrainingSessionCoordinator(
 
         heartRateRegistration?.close()
         activeHeartRateSourceId = sourceId
-        heartRateRegistration =
-            trainingDevice.addHeartRateListener(sourceId) { telemetry ->
-                onHeartRate(sessionId, sourceId, telemetry)
-            }
+        registerHeartRate(sessionId, sourceId)
         state =
             activeState.copy(
                 changedAt = clock.instant(),
@@ -179,6 +172,86 @@ class TrainingSessionCoordinator(
             activeState.copy(
                 changedAt = clock.instant(),
                 ergTargetPowerWatts = powerWatts,
+            )
+        return state
+    }
+
+    @Synchronized
+    fun pause(sessionId: UUID): TrainingSessionState {
+        if (state.sessionId == sessionId && state.phase == TrainingSessionPhase.PAUSED) {
+            throw TrainingSessionPauseNotAllowedException(
+                "The training session is already paused",
+            )
+        }
+        val activeState = requireActiveSession(sessionId)
+        val powerControl = requireActivePowerControl()
+        val pauseAt = clock.instant()
+        val targetPowerWatts = activeState.ergTargetPowerWatts ?: 0
+        setTarget(powerControl, 0, "0 W pause")
+        captureDistanceProgressAtPause()
+
+        closeRecordingListeners()
+        pausedAt = pauseAt
+        pausedErgTargetPowerWatts = targetPowerWatts
+        state =
+            activeState.copy(
+                phase = TrainingSessionPhase.PAUSED,
+                changedAt = pauseAt,
+                ergTargetPowerWatts = 0,
+            )
+        return state
+    }
+
+    @Synchronized
+    fun resume(sessionId: UUID): TrainingSessionState {
+        val pausedState = requirePausedSession(sessionId)
+        val powerControl = requireActivePowerControl()
+        val resumedAt = clock.instant()
+        val pauseStartedAt =
+            pausedAt
+                ?: throw TrainingSessionResumeNotAllowedException(
+                    "The paused training session has no pause timestamp",
+                )
+        if (resumedAt.isBefore(pauseStartedAt)) {
+            throw TrainingSessionResumeNotAllowedException(
+                "The training session cannot resume before it was paused",
+            )
+        }
+
+        val pausedDuration = Duration.between(pauseStartedAt, resumedAt)
+        val progress = pausedState.workout
+        val resumedWorkout =
+            progress?.takeUnless { it.completed }?.copy(
+                stepStartedAt = progress.stepStartedAt.plus(pausedDuration),
+            )
+        val targetPowerWatts =
+            activeWorkout
+                ?.let { resumedWorkout?.let { workoutProgress -> targetPower(workoutProgress.step) } }
+                ?: pausedErgTargetPowerWatts
+                ?: 0
+
+        try {
+            powerControl.requestControl()
+        } catch (exception: Exception) {
+            throw TrainingSessionUnavailableException(
+                "The connected device did not grant ERG control on resume",
+                exception,
+            )
+        }
+        setTarget(powerControl, targetPowerWatts, "resume")
+
+        resumeDistanceTracking()
+        pausedAt = null
+        pausedErgTargetPowerWatts = null
+        registerTelemetry(sessionId)
+        registerHeartRate(sessionId, activeHeartRateSourceId)
+        state =
+            pausedState.copy(
+                phase = TrainingSessionPhase.ACTIVE,
+                changedAt = resumedAt,
+                ergTargetPowerWatts = targetPowerWatts,
+                heartRate = activeHeartRateSourceId?.let(trainingDevice::currentHeartRate),
+                workout = resumedWorkout ?: progress,
             )
         return state
     }
@@ -242,15 +315,12 @@ class TrainingSessionCoordinator(
 
     @Synchronized
     fun stop(sessionId: UUID): TrainingSessionState {
-        val activeState = requireActiveSession(sessionId)
+        val activeState = requireSessionInProgress(sessionId)
         val powerControl = requireActivePowerControl()
         val stoppedAt = clock.instant()
         setTarget(powerControl, 0, "0 W stop")
 
-        telemetryRegistration?.close()
-        telemetryRegistration = null
-        heartRateRegistration?.close()
-        heartRateRegistration = null
+        closeRecordingListeners()
         completedActivity = activityRecorder.finish(sessionId, stoppedAt)
 
         state =
@@ -325,6 +395,70 @@ class TrainingSessionCoordinator(
         }
     }
 
+    private fun captureDistanceProgressAtPause() {
+        val progress = state.workout ?: return
+        if (progress.completed || progress.step.completion !is WorkoutStepCompletion.Distance) {
+            stepDistanceProgressAtPauseMeters = null
+            return
+        }
+
+        val currentDistance = trainingDevice.currentTelemetry()?.distanceMeters ?: return
+        val startDistance = stepDistanceStartMeters
+        if (startDistance == null) {
+            stepDistanceStartMeters = currentDistance
+            stepDistanceProgressAtPauseMeters = 0.0
+        } else {
+            stepDistanceProgressAtPauseMeters = maxOf(0.0, currentDistance - startDistance)
+        }
+    }
+
+    private fun resumeDistanceTracking() {
+        val progress = state.workout ?: return
+        if (progress.completed || progress.step.completion !is WorkoutStepCompletion.Distance) {
+            stepDistanceProgressAtPauseMeters = null
+            return
+        }
+
+        val currentDistance = trainingDevice.currentTelemetry()?.distanceMeters
+        val progressAtPause = stepDistanceProgressAtPauseMeters
+        when {
+            currentDistance != null && progressAtPause != null -> {
+                stepDistanceStartMeters = currentDistance - progressAtPause
+                stepDistanceProgressAtPauseMeters = null
+            }
+
+            currentDistance != null && stepDistanceStartMeters == null -> {
+                stepDistanceStartMeters = currentDistance
+            }
+        }
+    }
+
+    private fun registerTelemetry(sessionId: UUID) {
+        telemetryRegistration =
+            trainingDevice.addTelemetryListener { telemetry ->
+                activityRecorder.record(sessionId, telemetry)
+            }
+    }
+
+    private fun registerHeartRate(
+        sessionId: UUID,
+        sourceId: String?,
+    ) {
+        heartRateRegistration =
+            sourceId?.let { selectedSourceId ->
+                trainingDevice.addHeartRateListener(selectedSourceId) { telemetry ->
+                    onHeartRate(sessionId, selectedSourceId, telemetry)
+                }
+            }
+    }
+
+    private fun closeRecordingListeners() {
+        telemetryRegistration?.close()
+        telemetryRegistration = null
+        heartRateRegistration?.close()
+        heartRateRegistration = null
+    }
+
     private fun isComplete(
         progress: TrainingWorkoutProgress,
         now: Instant,
@@ -337,6 +471,11 @@ class TrainingSessionCoordinator(
 
             is WorkoutStepCompletion.Distance -> {
                 val currentDistance = telemetry?.distanceMeters ?: return false
+                stepDistanceProgressAtPauseMeters?.let { progressAtPause ->
+                    stepDistanceStartMeters = currentDistance - progressAtPause
+                    stepDistanceProgressAtPauseMeters = null
+                    return progressAtPause >= completion.meters
+                }
                 val startDistance = stepDistanceStartMeters
                 if (startDistance == null) {
                     stepDistanceStartMeters = currentDistance
@@ -407,6 +546,7 @@ class TrainingSessionCoordinator(
             } else {
                 null
             }
+        stepDistanceProgressAtPauseMeters = null
         return state
     }
 
@@ -447,9 +587,49 @@ class TrainingSessionCoordinator(
 
     private fun requireActiveSession(sessionId: UUID): TrainingSessionState =
         when {
-            state.phase != TrainingSessionPhase.ACTIVE -> throw TrainingSessionNotActiveException()
-            state.sessionId != sessionId -> throw TrainingSessionMismatchException(sessionId)
-            else -> state
+            state.phase != TrainingSessionPhase.ACTIVE -> {
+                throw TrainingSessionNotActiveException()
+            }
+
+            state.sessionId != sessionId -> {
+                throw TrainingSessionMismatchException(sessionId)
+            }
+
+            else -> {
+                state
+            }
+        }
+
+    private fun requirePausedSession(sessionId: UUID): TrainingSessionState =
+        when {
+            state.sessionId != sessionId -> {
+                throw TrainingSessionMismatchException(sessionId)
+            }
+
+            state.phase != TrainingSessionPhase.PAUSED -> {
+                throw TrainingSessionResumeNotAllowedException(
+                    "The training session is not paused",
+                )
+            }
+
+            else -> {
+                state
+            }
+        }
+
+    private fun requireSessionInProgress(sessionId: UUID): TrainingSessionState =
+        when {
+            state.sessionId != sessionId -> {
+                throw TrainingSessionMismatchException(sessionId)
+            }
+
+            state.phase !in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED) -> {
+                throw TrainingSessionNotActiveException()
+            }
+
+            else -> {
+                state
+            }
         }
 
     private fun requireStoppedSession(sessionId: UUID): TrainingSessionState =
@@ -478,12 +658,15 @@ class TrainingSessionCoordinator(
     private fun clearActiveExecution() {
         activePowerControl = null
         activeHeartRateSourceId = null
+        pausedAt = null
+        pausedErgTargetPowerWatts = null
         clearActiveWorkout()
     }
 
     private fun clearActiveWorkout() {
         activeWorkout = null
         stepDistanceStartMeters = null
+        stepDistanceProgressAtPauseMeters = null
     }
 
     private fun resolveHeartRateSource(sourceId: String?): String? {
