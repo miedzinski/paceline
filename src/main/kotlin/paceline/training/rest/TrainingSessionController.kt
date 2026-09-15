@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
+import paceline.training.domain.ErgProtectionState
 import paceline.training.domain.HeartRateSourceNotFoundException
 import paceline.training.domain.HeartRateSourceSelectionRequiredException
 import paceline.training.domain.TrainingActivityUploadUnavailableException
@@ -229,11 +230,22 @@ data class TrainingSessionResponse(
     val sessionId: UUID?,
     val startedAt: Instant?,
     val changedAt: Instant,
+    val ergRequestedTargetPowerWatts: Int?,
     val ergTargetPowerWatts: Int?,
+    val ergProtection: ErgProtectionResponse,
     val heartRateSourceId: String?,
     val heartRate: HeartRateResponse?,
     val workout: TrainingWorkoutResponse?,
     val activityUpload: TrainingActivityUploadResponse,
+)
+
+data class ErgProtectionResponse(
+    val state: String,
+    val changedAt: Instant?,
+    val cadenceRpm: Double?,
+    val error: String?,
+    val retryAttempt: Int?,
+    val nextRetryAt: Instant?,
 )
 
 data class HeartRateResponse(
@@ -285,7 +297,9 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
         sessionId = sessionId,
         startedAt = startedAt,
         changedAt = changedAt,
+        ergRequestedTargetPowerWatts = ergRequestedTargetPowerWatts,
         ergTargetPowerWatts = ergTargetPowerWatts,
+        ergProtection = ergProtection.toResponse(),
         heartRateSourceId = heartRateSourceId,
         heartRate =
             heartRate?.let { telemetry ->
@@ -301,6 +315,16 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
                 remoteActivityId = activityUpload.remoteActivityId,
                 error = activityUpload.error,
             ),
+    )
+
+private fun ErgProtectionState.toResponse(): ErgProtectionResponse =
+    ErgProtectionResponse(
+        state = status.name,
+        changedAt = changedAt,
+        cadenceRpm = cadenceRpm,
+        error = error,
+        retryAttempt = retryAttempt,
+        nextRetryAt = nextRetryAt,
     )
 
 private fun TrainingWorkoutProgress.toResponse(): TrainingWorkoutResponse =

@@ -28,6 +28,8 @@ import com.garmin.fit.WorkoutStepMesg
 import org.springframework.stereotype.Component
 import paceline.training.domain.RecordedTrainingActivity
 import paceline.training.domain.RecordedTrainingActivitySegment
+import paceline.training.domain.TrainingActivityEvent
+import paceline.training.domain.TrainingActivityEventType
 import paceline.training.domain.TrainingTelemetrySample
 import paceline.training.ports.ActivityFile
 import paceline.training.ports.ActivityFileEncoder
@@ -70,9 +72,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
 
             fileEncoder.write(activity.timerEvent(EventType.START, activity.startedAt))
             val firstDistance = activity.samples.firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
-            activity.samples.forEach { sample ->
-                fileEncoder.write(sample.recordMessage(firstDistance))
-            }
+            activity.writeTimeline(fileEncoder, firstDistance)
             fileEncoder.write(activity.timerEvent(EventType.STOP_ALL, activity.stoppedAt))
             segments.forEachIndexed { index, segment ->
                 fileEncoder.write(segment.lapMessage(index, workoutStepIndices[index]))
@@ -134,6 +134,41 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             this.timestamp = timestamp.toFitDateTime()
             event = Event.TIMER
             this.eventType = eventType
+        }
+
+    private fun RecordedTrainingActivity.writeTimeline(
+        fileEncoder: FileEncoder,
+        firstDistance: Double?,
+    ) {
+        val events = events.sortedBy { it.occurredAt }
+        var eventIndex = 0
+        samples.forEach { sample ->
+            while (eventIndex < events.size && !events[eventIndex].occurredAt.isAfter(sample.receivedAt)) {
+                fileEncoder.write(events[eventIndex].eventMessage())
+                eventIndex += 1
+            }
+            fileEncoder.write(sample.recordMessage(firstDistance))
+        }
+        while (eventIndex < events.size) {
+            fileEncoder.write(events[eventIndex].eventMessage())
+            eventIndex += 1
+        }
+    }
+
+    private fun TrainingActivityEvent.eventMessage(): EventMesg =
+        EventMesg().apply {
+            timestamp = occurredAt.toFitDateTime()
+            event = Event.CAD_LOW_ALERT
+            eventType =
+                when (type) {
+                    TrainingActivityEventType.ERG_PROTECTION_STARTED -> EventType.START
+                    TrainingActivityEventType.ERG_PROTECTION_ENDED -> EventType.STOP
+                    TrainingActivityEventType.ERG_PROTECTION_FAILED -> EventType.MARKER
+                }
+            cadenceRpm
+                ?.roundToInt()
+                ?.coerceIn(FIT_UINT16_RANGE)
+                ?.let { data16 = it }
         }
 
     private fun RecordedTrainingActivity.sessionMessage(

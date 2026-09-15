@@ -71,7 +71,11 @@ data class TrainingSessionState(
     val sessionId: UUID? = null,
     val startedAt: Instant? = null,
     val changedAt: Instant,
+    /** The target currently requested by the manual controller or workout step. */
+    val ergRequestedTargetPowerWatts: Int? = null,
+    /** The target most recently accepted by the device, or null when it is unknown. */
     val ergTargetPowerWatts: Int? = null,
+    val ergProtection: ErgProtectionState = ErgProtectionState.inactive(),
     val heartRateSourceId: String? = null,
     val heartRate: HeartRateTelemetry? = null,
     val workout: TrainingWorkoutProgress? = null,

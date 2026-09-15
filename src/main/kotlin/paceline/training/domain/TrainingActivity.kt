@@ -57,6 +57,24 @@ data class RecordedTrainingActivitySegment(
     }
 }
 
+enum class TrainingActivityEventType {
+    ERG_PROTECTION_STARTED,
+    ERG_PROTECTION_ENDED,
+    ERG_PROTECTION_FAILED,
+}
+
+data class TrainingActivityEvent(
+    val type: TrainingActivityEventType,
+    val occurredAt: Instant,
+    val cadenceRpm: Double? = null,
+) {
+    init {
+        require(cadenceRpm == null || (cadenceRpm.isFinite() && cadenceRpm >= 0.0)) {
+            "An activity event cadence must be finite and non-negative"
+        }
+    }
+}
+
 data class RecordedTrainingActivity(
     val sessionId: UUID,
     val startedAt: Instant,
@@ -67,6 +85,7 @@ data class RecordedTrainingActivity(
     val samples: List<TrainingTelemetrySample>,
     val workoutSourceType: WorkoutSourceType? = null,
     val segments: List<RecordedTrainingActivitySegment> = emptyList(),
+    val events: List<TrainingActivityEvent> = emptyList(),
 )
 
 class InMemoryTrainingActivityRecorder {
@@ -114,6 +133,14 @@ class InMemoryTrainingActivityRecorder {
     ) {
         val recording = active?.takeIf { it.sessionId == sessionId } ?: return
         recording.record(TrainingTelemetrySample.fromHeartRate(telemetry, sourceId))
+    }
+
+    @Synchronized
+    fun recordEvent(
+        sessionId: UUID,
+        event: TrainingActivityEvent,
+    ) {
+        active?.takeIf { it.sessionId == sessionId }?.events?.add(event)
     }
 
     @Synchronized
@@ -172,6 +199,7 @@ class InMemoryTrainingActivityRecorder {
         initialWorkoutStep: ExecutableWorkoutStep?,
         val samples: MutableList<TrainingTelemetrySample> = mutableListOf(),
         val segments: MutableList<MutableSegment> = mutableListOf(),
+        val events: MutableList<TrainingActivityEvent> = mutableListOf(),
         var workoutCompleted: Boolean = false,
     ) {
         var currentSegment: MutableSegment =
@@ -227,6 +255,7 @@ class InMemoryTrainingActivityRecorder {
                     samples = samples.toList(),
                     workoutSourceType = workoutSourceType,
                     segments = segments.map { it.toRecorded() },
+                    events = events.sortedBy { it.occurredAt },
                 )
             }
     }

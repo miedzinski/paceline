@@ -9,6 +9,7 @@ import paceline.device.domain.IndoorBikeTelemetry
 import paceline.testsupport.FakeActivityUploader
 import paceline.testsupport.FakeIndoorBikePowerControl
 import paceline.testsupport.FakeTrainingDevice
+import paceline.training.config.ErgProtectionProperties
 import paceline.workout.domain.ExecutableSport
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
@@ -17,6 +18,7 @@ import paceline.workout.domain.WorkoutSourceType
 import paceline.workout.domain.WorkoutStepCompletion
 import paceline.workout.domain.WorkoutStepTarget
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -655,6 +657,489 @@ class TrainingSessionCoordinatorTest {
         assertEquals(listOf(0), powerControl.targetPowers)
     }
 
+    @Test
+    fun `automatically releases and restores a manual ERG target around a cadence collapse`() {
+        // given a manual session with cadence protection and an activity uploader:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = clock,
+                activityUploader = uploader,
+                ergProtectionProperties = ergProtectionProperties(),
+            )
+        val sessionId = requireNotNull(session.start().sessionId)
+        session.setTargetPower(sessionId, 300)
+
+        // when cadence stays below the threshold and then recovers without a manual action:
+        val lowCadence =
+            telemetry(
+                receivedAt = now.plusSeconds(1),
+                cadenceRpm = 44.0,
+                distanceMeters = 1_000.0,
+            )
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(lowCadence.receivedAt, lowCadence)
+        session.tick(now.plusSeconds(2), lowCadence)
+        val bailedOut = session.tick(now.plusSeconds(3), lowCadence)
+        val recoveredCadence =
+            telemetry(
+                receivedAt = now.plusSeconds(4),
+                cadenceRpm = 60.0,
+                distanceMeters = 1_001.0,
+            )
+        trainingDevice.emitTelemetry(recoveredCadence)
+        session.tick(recoveredCadence.receivedAt, recoveredCadence)
+        val recovered = session.tick(now.plusSeconds(6), recoveredCadence)
+
+        // then the applied target is released and restored while the requested target remains visible:
+        assertEquals(listOf(300, 0, 300), powerControl.targetPowers)
+        assertEquals(TrainingSessionPhase.ACTIVE, bailedOut.phase)
+        assertEquals(300, bailedOut.ergRequestedTargetPowerWatts)
+        assertEquals(0, bailedOut.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.BAILED_OUT, bailedOut.ergProtection.status)
+        assertEquals(TrainingSessionPhase.ACTIVE, recovered.phase)
+        assertEquals(300, recovered.ergRequestedTargetPowerWatts)
+        assertEquals(300, recovered.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
+
+        // when the ride is stopped and uploaded:
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then the exported activity retains the protection lifecycle:
+        val events =
+            uploader
+                .uploads
+                .single()
+                .events
+                .map { it.type }
+        assertEquals(
+            listOf(
+                TrainingActivityEventType.ERG_PROTECTION_STARTED,
+                TrainingActivityEventType.ERG_PROTECTION_ENDED,
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun `does not release ERG for a steady fifty rpm interval`() {
+        // given a manual session with a forty-five-rpm bailout threshold:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = clock,
+                ergProtectionProperties = ergProtectionProperties(),
+            )
+        val sessionId = requireNotNull(session.start().sessionId)
+        session.setTargetPower(sessionId, 300)
+
+        // when the rider holds fifty rpm and the scheduler evaluates after the low-cadence dwell:
+        val cadence =
+            telemetry(
+                receivedAt = now.plusSeconds(4),
+                cadenceRpm = 50.0,
+                distanceMeters = 1_000.0,
+            )
+        trainingDevice.emitTelemetry(cadence)
+        session.tick(cadence.receivedAt, cadence)
+        val state = session.tick(now.plusSeconds(6), cadence)
+
+        // then the low-cadence interval remains under the requested ERG target:
+        assertEquals(listOf(300), powerControl.targetPowers)
+        assertEquals(300, state.ergRequestedTargetPowerWatts)
+        assertEquals(300, state.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.INACTIVE, state.ergProtection.status)
+        session.stop(sessionId)
+    }
+
+    @Test
+    fun `continues workout timing while ERG protection is active`() {
+        // given a timed workout and a short cadence-protection dwell:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val mutableClock = MutableTestClock(now)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = mutableClock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                    ),
+            )
+        val workout =
+            workout(
+                timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
+                timedStep("Recovery", seconds = 3, lowWatts = 100, highWatts = 100),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+
+        // when the target is bailed out and the first timed step reaches its wall-clock boundary:
+        session.tick(now.plusSeconds(1), lowCadence)
+        val nextStep = session.tick(now.plusSeconds(3), lowCadence)
+
+        // then the workout advances even though the trainer remains at zero watts:
+        assertEquals(TrainingSessionPhase.ACTIVE, nextStep.phase)
+        assertEquals(2, nextStep.workout?.currentStepNumber)
+        assertEquals(100, nextStep.ergRequestedTargetPowerWatts)
+        assertEquals(0, nextStep.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.BAILED_OUT, nextStep.ergProtection.status)
+        assertEquals(listOf(300, 0), powerControl.targetPowers)
+
+        // when the incomplete ride is stopped:
+        mutableClock.currentTime = now.plusSeconds(3)
+        val stopped = session.stop(sessionId)
+
+        // then the recording remains available instead of being discarded as a failed workout:
+        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+    }
+
+    @Test
+    fun `retries a rejected structured workout recovery with the latest step target`() {
+        // given a structured workout that has entered confirmed zero-watt protection:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val mutableClock = MutableTestClock(now)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = mutableClock,
+                activityUploader = uploader,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                    ),
+            )
+        val workout =
+            workout(
+                timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
+                timedStep("Next", seconds = 3, lowWatts = 100, highWatts = 100),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+        session.tick(now.plusSeconds(1), lowCadence)
+        val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
+        trainingDevice.emitTelemetry(highCadence)
+        session.tick(now.plusSeconds(1), highCadence)
+        powerControl.targetPowerFailure = IllegalStateException("temporary trainer rejection")
+
+        // when the first recovery command is rejected, then the retry becomes due after the workout changes step:
+        val retrying = session.tick(now.plusSeconds(2), highCadence)
+        val beforeRetry = session.tick(now.plusMillis(2_500), highCadence)
+        val attemptsBeforeRetry = powerControl.targetPowerAttempts.toList()
+        powerControl.targetPowerFailure = null
+        val recovered = session.tick(now.plusSeconds(3), highCadence)
+
+        // then the workout clock continues, and the retry applies the current step's target:
+        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, retrying.ergProtection.status)
+        assertEquals(1, retrying.ergProtection.retryAttempt)
+        assertEquals(now.plusSeconds(3), retrying.ergProtection.nextRetryAt)
+        assertEquals(1, beforeRetry.workout?.currentStepNumber)
+        assertEquals(listOf(300, 0, 300), attemptsBeforeRetry)
+        assertEquals(2, recovered.workout?.currentStepNumber)
+        assertEquals(100, recovered.ergRequestedTargetPowerWatts)
+        assertEquals(100, recovered.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
+        assertEquals(listOf(300, 0, 300, 100), powerControl.targetPowerAttempts)
+        assertEquals(listOf(300, 0, 100), powerControl.targetPowers)
+
+        // when the incomplete workout is stopped:
+        mutableClock.currentTime = now.plusSeconds(3)
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then each failed recovery attempt and the eventual recovery remain in the activity:
+        assertEquals(
+            listOf(
+                TrainingActivityEventType.ERG_PROTECTION_STARTED,
+                TrainingActivityEventType.ERG_PROTECTION_FAILED,
+                TrainingActivityEventType.ERG_PROTECTION_ENDED,
+            ),
+            uploader
+                .uploads
+                .single()
+                .events
+                .map { it.type },
+        )
+    }
+
+    @Test
+    fun `requires a new recovery cadence dwell after cadence drops during a retry`() {
+        // given a structured workout whose first recovery attempt is rejected:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = clock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                    ),
+            )
+        val workout = workout(timedStep("Hard", seconds = 10, lowWatts = 300, highWatts = 300))
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+        session.tick(now.plusSeconds(1), lowCadence)
+        val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
+        trainingDevice.emitTelemetry(highCadence)
+        session.tick(now.plusSeconds(1), highCadence)
+        powerControl.targetPowerFailure = IllegalStateException("temporary trainer rejection")
+        val retrying = session.tick(now.plusSeconds(2), highCadence)
+
+        // when cadence drops before the retry deadline and then rises again:
+        val lowAgain = telemetry(receivedAt = now.plusMillis(2_500), cadenceRpm = 40.0, distanceMeters = 1_002.0)
+        trainingDevice.emitTelemetry(lowAgain)
+        val bailedOut = session.tick(now.plusMillis(2_500), lowAgain)
+        powerControl.targetPowerFailure = null
+        val highAgain = telemetry(receivedAt = now.plusMillis(2_500), cadenceRpm = 70.0, distanceMeters = 1_003.0)
+        trainingDevice.emitTelemetry(highAgain)
+        val rearmed = session.tick(now.plusMillis(2_500), highAgain)
+        val beforeDwell = session.tick(now.plusMillis(3_400), highAgain)
+        val attemptsBeforeRecovery = powerControl.targetPowerAttempts.toList()
+        val recovered = session.tick(now.plusMillis(3_500), highAgain)
+
+        // then the retry is paused, and recovery needs a fresh sustained high-cadence period:
+        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, retrying.ergProtection.status)
+        assertEquals(ErgProtectionStatus.BAILED_OUT, bailedOut.ergProtection.status)
+        assertEquals(ErgProtectionStatus.BAILED_OUT, rearmed.ergProtection.status)
+        assertEquals(listOf(300, 0, 300), attemptsBeforeRecovery)
+        assertEquals(ErgProtectionStatus.BAILED_OUT, beforeDwell.ergProtection.status)
+        assertEquals(attemptsBeforeRecovery, powerControl.targetPowerAttempts.dropLast(1))
+        assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
+        assertEquals(300, recovered.ergTargetPowerWatts)
+        assertEquals(listOf(300, 0, 300, 300), powerControl.targetPowerAttempts)
+
+        // when the workout is stopped:
+        session.stop(sessionId)
+    }
+
+    @Test
+    fun `backs off and stops structured workout recovery retries without freezing the workout`() {
+        // given a structured workout with a bounded recovery retry policy:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val mutableClock = MutableTestClock(now)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = mutableClock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                        recoveryRetryInitialDelay = Duration.ofSeconds(1),
+                        recoveryRetryMaxDelay = Duration.ofSeconds(2),
+                        recoveryRetryMaxAttempts = 3,
+                    ),
+            )
+        val workout =
+            workout(
+                timedStep("Hard", seconds = 4, lowWatts = 300, highWatts = 300),
+                timedStep("Next", seconds = 4, lowWatts = 100, highWatts = 100),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+        session.tick(now.plusSeconds(1), lowCadence)
+        val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
+        trainingDevice.emitTelemetry(highCadence)
+        session.tick(now.plusSeconds(1), highCadence)
+        powerControl.targetPowerFailure = IllegalStateException("persistent trainer rejection")
+
+        // when recovery attempts fail at the first deadline, the exponential deadline, and the final attempt:
+        val firstFailure = session.tick(now.plusSeconds(2), highCadence)
+        val secondFailure = session.tick(now.plusSeconds(3), highCadence)
+        val beforeThirdFailure = session.tick(now.plusSeconds(4), highCadence)
+        val thirdFailure = session.tick(now.plusSeconds(5), highCadence)
+        val attemptsAfterExhaustion = powerControl.targetPowerAttempts.toList()
+        val afterExhaustion = session.tick(now.plusSeconds(6), highCadence)
+
+        // then retries are bounded, and the workout keeps recording while zero watts remain applied:
+        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, firstFailure.ergProtection.status)
+        assertEquals(now.plusSeconds(3), firstFailure.ergProtection.nextRetryAt)
+        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, secondFailure.ergProtection.status)
+        assertEquals(2, secondFailure.ergProtection.retryAttempt)
+        assertEquals(now.plusSeconds(5), secondFailure.ergProtection.nextRetryAt)
+        assertEquals(2, beforeThirdFailure.workout?.currentStepNumber)
+        assertEquals(2, beforeThirdFailure.ergProtection.retryAttempt)
+        assertEquals(ErgProtectionStatus.RECOVERY_FAILED, thirdFailure.ergProtection.status)
+        assertEquals(3, thirdFailure.ergProtection.retryAttempt)
+        assertEquals(2, afterExhaustion.workout?.currentStepNumber)
+        assertEquals(100, afterExhaustion.ergRequestedTargetPowerWatts)
+        assertEquals(0, afterExhaustion.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.RECOVERY_FAILED, afterExhaustion.ergProtection.status)
+        assertEquals(listOf(300, 0, 300, 300, 100), attemptsAfterExhaustion)
+        assertEquals(attemptsAfterExhaustion, powerControl.targetPowerAttempts)
+
+        // when the active workout is stopped after retries are exhausted:
+        powerControl.targetPowerFailure = null
+        mutableClock.currentTime = now.plusSeconds(6)
+        val stopped = session.stop(sessionId)
+
+        // then the incomplete workout remains exportable:
+        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+    }
+
+    @Test
+    fun `holds workout progression after a failed protective release`() {
+        // given a timed workout whose trainer rejects the protective zero-watt command:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val mutableClock = MutableTestClock(now)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = mutableClock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                    ),
+            )
+        val workout =
+            workout(
+                timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
+                timedStep("Next", seconds = 3, lowWatts = 100, highWatts = 100),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+
+        // when the protection command fails and the current timed step reaches its boundary:
+        val unavailable = session.tick(now.plusSeconds(1), lowCadence)
+        val held = session.tick(now.plusSeconds(3), lowCadence)
+
+        // then the workout does not move to a new target while the trainer state is unknown:
+        assertEquals(ErgProtectionStatus.UNAVAILABLE, unavailable.ergProtection.status)
+        assertEquals(1, held.workout?.currentStepNumber)
+        assertEquals(300, held.ergRequestedTargetPowerWatts)
+        assertEquals(null, held.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.UNAVAILABLE, held.ergProtection.status)
+        assertEquals(listOf(300), powerControl.targetPowers)
+
+        // when the trainer accepts a stop command:
+        powerControl.targetPowerFailure = null
+        mutableClock.currentTime = now.plusSeconds(3)
+        val stopped = session.stop(sessionId)
+
+        // then the collected activity remains available despite the incomplete workout:
+        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+    }
+
+    @Test
+    fun `clears ERG protection when a workout enters an open target step`() {
+        // given a workout whose next step does not request ERG resistance:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val mutableClock = MutableTestClock(now)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = mutableClock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                    ),
+            )
+        val workout =
+            workout(
+                timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
+                ExecutableWorkoutStep(
+                    text = "Open",
+                    completion = WorkoutStepCompletion.Manual,
+                    target = WorkoutStepTarget.Open,
+                ),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+        session.tick(now.plusSeconds(1), lowCadence)
+
+        // when the protected workout advances into the open step:
+        val openStep = session.tick(now.plusSeconds(3), lowCadence)
+
+        // then no stale protection overlay remains after resistance is no longer requested:
+        assertEquals(2, openStep.workout?.currentStepNumber)
+        assertEquals(0, openStep.ergRequestedTargetPowerWatts)
+        assertEquals(0, openStep.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.INACTIVE, openStep.ergProtection.status)
+        assertEquals(listOf(300, 0), powerControl.targetPowers)
+
+        mutableClock.currentTime = now.plusSeconds(3)
+        session.stop(sessionId)
+    }
+
+    @Test
+    fun `records a failed protective target without claiming the target was applied`() {
+        // given a manual session whose trainer starts rejecting target writes after a target is active:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = clock,
+                activityUploader = uploader,
+                ergProtectionProperties = ergProtectionProperties(),
+            )
+        val sessionId = requireNotNull(session.start().sessionId)
+        session.setTargetPower(sessionId, 300)
+        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+
+        // when the low cadence dwell completes and the protective zero-watt command fails:
+        val unavailable = session.tick(now.plusSeconds(3), lowCadence)
+
+        // then the session exposes the protection failure and does not retain a stale applied target:
+        assertEquals(ErgProtectionStatus.UNAVAILABLE, unavailable.ergProtection.status)
+        assertEquals(300, unavailable.ergRequestedTargetPowerWatts)
+        assertEquals(null, unavailable.ergTargetPowerWatts)
+        assertEquals(listOf(300), powerControl.targetPowers)
+
+        // when the target write is restored, the incomplete recording can still be stopped and uploaded:
+        powerControl.targetPowerFailure = null
+        val stopped = session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then the failed protective attempt remains visible in the exported activity:
+        val event =
+            uploader
+                .uploads
+                .single()
+                .events
+                .single()
+        assertEquals(
+            TrainingActivityEventType.ERG_PROTECTION_FAILED,
+            event.type,
+        )
+        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+    }
+
     private class MutableTestClock(
         var currentTime: Instant,
     ) : Clock() {
@@ -699,11 +1184,12 @@ class TrainingSessionCoordinatorTest {
 
     private fun telemetry(
         receivedAt: Instant = now,
+        cadenceRpm: Double = 90.0,
         distanceMeters: Double,
     ): IndoorBikeTelemetry =
         IndoorBikeTelemetry(
             powerWatts = 200,
-            cadenceRpm = 90.0,
+            cadenceRpm = cadenceRpm,
             speedKph = 25.0,
             distanceMeters = distanceMeters,
             receivedAt = receivedAt,
@@ -724,5 +1210,22 @@ class TrainingSessionCoordinatorTest {
         HeartRateTelemetry(
             heartRateBpm = bpm,
             receivedAt = now.plusSeconds(bpm.toLong()),
+        )
+
+    private fun ergProtectionProperties(
+        lowCadenceDuration: Duration = Duration.ofSeconds(2),
+        recoveryDuration: Duration = Duration.ofSeconds(2),
+        recoveryRetryInitialDelay: Duration = Duration.ofSeconds(1),
+        recoveryRetryMaxDelay: Duration = Duration.ofSeconds(8),
+        recoveryRetryMaxAttempts: Int = 5,
+    ): ErgProtectionProperties =
+        ErgProtectionProperties(
+            lowCadenceDuration = lowCadenceDuration,
+            recoveryDuration = recoveryDuration,
+            telemetryFreshness = Duration.ofSeconds(5),
+            targetChangeGracePeriod = Duration.ZERO,
+            recoveryRetryInitialDelay = recoveryRetryInitialDelay,
+            recoveryRetryMaxDelay = recoveryRetryMaxDelay,
+            recoveryRetryMaxAttempts = recoveryRetryMaxAttempts,
         )
 }

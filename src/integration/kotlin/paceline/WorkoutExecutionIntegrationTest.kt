@@ -104,7 +104,9 @@ class WorkoutExecutionIntegrationTest {
         assertTrue(started.contains("\"state\":\"ACTIVE\""))
         assertTrue(started.contains("\"sourceId\":\"event-1\""))
         assertTrue(started.contains("\"currentStep\":1"))
+        assertTrue(started.contains("\"ergRequestedTargetPowerWatts\":0"))
         assertTrue(started.contains("\"ergTargetPowerWatts\":0"))
+        assertTrue(started.contains("\"ergProtection\":{\"state\":\"INACTIVE\""))
         assertTrue(completed.contains("\"state\":\"ACTIVE\""))
         assertTrue(completed.contains("\"completed\":true"))
         assertEquals(listOf(0, 0), powerControl.targetPowers)
@@ -166,6 +168,7 @@ class WorkoutExecutionIntegrationTest {
 
         // then the session state is paused and resumed while the workout context remains attached:
         assertTrue(paused.contains("\"state\":\"PAUSED\""))
+        assertTrue(paused.contains("\"ergRequestedTargetPowerWatts\":0"))
         assertTrue(paused.contains("\"ergTargetPowerWatts\":0"))
         assertTrue(paused.contains("\"sourceId\":\"event-1\""))
         assertTrue(resumed.contains("\"state\":\"ACTIVE\""))

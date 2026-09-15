@@ -3,6 +3,9 @@ package paceline.training.adapters
 import com.garmin.fit.ActivityMesg
 import com.garmin.fit.DateTime
 import com.garmin.fit.Decode
+import com.garmin.fit.Event
+import com.garmin.fit.EventMesg
+import com.garmin.fit.EventType
 import com.garmin.fit.Intensity
 import com.garmin.fit.LapMesg
 import com.garmin.fit.LapTrigger
@@ -15,6 +18,8 @@ import com.garmin.fit.WorkoutMesg
 import com.garmin.fit.WorkoutStepMesg
 import paceline.training.domain.RecordedTrainingActivity
 import paceline.training.domain.RecordedTrainingActivitySegment
+import paceline.training.domain.TrainingActivityEvent
+import paceline.training.domain.TrainingActivityEventType
 import paceline.training.domain.TrainingTelemetrySample
 import paceline.training.ports.ActivityFile
 import paceline.workout.domain.ExecutableWorkoutStep
@@ -187,6 +192,54 @@ class FitActivityFileEncoderTest {
             laps.map { it.getFieldFloatValue(LapMesg.TotalElapsedTimeFieldNum) },
         )
         assertNull(laps[2].getFieldIntegerValue(LapMesg.WktStepIndexFieldNum))
+    }
+
+    @Test
+    fun `activity file preserves ERG protection events alongside raw telemetry`() {
+        // given a ride that temporarily released ERG and then restored its target:
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.fromString("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+                startedAt = Instant.parse("2026-09-14T12:00:00Z"),
+                stoppedAt = Instant.parse("2026-09-14T12:00:03Z"),
+                name = "Protected ride",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples =
+                    listOf(
+                        sample("2026-09-14T12:00:00Z", 1_000.0, 220),
+                        sample("2026-09-14T12:00:02Z", 1_000.5, 0),
+                    ),
+                events =
+                    listOf(
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.ERG_PROTECTION_STARTED,
+                            occurredAt = Instant.parse("2026-09-14T12:00:01Z"),
+                            cadenceRpm = 42.0,
+                        ),
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.ERG_PROTECTION_ENDED,
+                            occurredAt = Instant.parse("2026-09-14T12:00:02Z"),
+                            cadenceRpm = 62.0,
+                        ),
+                    ),
+            )
+
+        // when the activity is encoded as FIT:
+        val messages = decode(encoder.encode(activity))
+        val events = messages.filter { it.name == "event" }
+
+        // then the low-cadence lifecycle is represented in the exported timeline:
+        assertEquals(
+            listOf(EventType.START, EventType.START, EventType.STOP, EventType.STOP_ALL),
+            events.map { EventType.getByValue(it.getFieldShortValue(EventMesg.EventTypeFieldNum)) },
+        )
+        assertEquals(
+            listOf(Event.TIMER, Event.CAD_LOW_ALERT, Event.CAD_LOW_ALERT, Event.TIMER),
+            events.map { Event.getByValue(it.getFieldShortValue(EventMesg.EventFieldNum)) },
+        )
+        assertEquals(42, events[1].getFieldIntegerValue(EventMesg.Data16FieldNum))
+        assertEquals(62, events[2].getFieldIntegerValue(EventMesg.Data16FieldNum))
     }
 
     private fun decode(file: ActivityFile): List<Mesg> {

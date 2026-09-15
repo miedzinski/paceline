@@ -1,5 +1,6 @@
 package paceline.device.adapters.gatt.ftms
 
+import org.slf4j.LoggerFactory
 import paceline.device.adapters.gatt.GattClient
 import paceline.device.adapters.gatt.GattNotification
 import paceline.device.ports.DeviceCommunicationException
@@ -34,6 +35,7 @@ class FtmsErgControl(
     private val controlGranted = AtomicBoolean(false)
     private val pending = AtomicReference<PendingCommand?>(null)
     private val commandLock = Any()
+    private val logger = LoggerFactory.getLogger(javaClass)
     private val notificationRegistration: AutoCloseable
 
     init {
@@ -96,6 +98,10 @@ class FtmsErgControl(
                     }
                 }
             try {
+                logger.debug(
+                    "Sending FTMS control-point command: opcode=0x{}",
+                    opcode.toString(16),
+                )
                 gattClient.writeCharacteristic(
                     controlPointCharacteristic,
                     byteArrayOf(opcode.toByte()) + parameter,
@@ -134,12 +140,28 @@ class FtmsErgControl(
                             "0x${response.resultCode.toString(16)}",
                     )
                 }
+                logger.debug(
+                    "FTMS control-point command accepted: opcode=0x{} resultCode=0x{}",
+                    opcode.toString(16),
+                    response.resultCode.toString(16),
+                )
             } catch (exception: FtmsControlException) {
+                logger.warn(
+                    "FTMS control-point command failed: opcode=0x{} error={}",
+                    opcode.toString(16),
+                    exception.message,
+                    exception,
+                )
                 if (opcode == OPCODE_REQUEST_CONTROL) {
                     controlGranted.set(false)
                 }
                 throw exception
             } catch (exception: Exception) {
+                logger.warn(
+                    "FTMS control-point command failed before a protocol response: opcode=0x{}",
+                    opcode.toString(16),
+                    exception,
+                )
                 if (opcode == OPCODE_REQUEST_CONTROL) {
                     controlGranted.set(false)
                 }

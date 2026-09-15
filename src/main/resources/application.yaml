@@ -11,5 +11,17 @@ paceline:
       gatt-service-discovery-timeout: 10s
     wifi:
       protocol-timeout: 3s
+  training:
+    erg-protection:
+      enabled: true
+      low-cadence-rpm: 45
+      low-cadence-duration: 3s
+      recovery-cadence-rpm: 60
+      recovery-duration: 2s
+      telemetry-freshness: 2s
+      target-change-grace-period: 2s
+      recovery-retry-initial-delay: 1s
+      recovery-retry-max-delay: 8s
+      recovery-retry-max-attempts: 5
   intervals:
     base-url: https://intervals.icu
