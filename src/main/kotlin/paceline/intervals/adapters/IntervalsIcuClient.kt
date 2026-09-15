@@ -75,7 +75,6 @@ class IntervalsIcuClient(
                         .queryParam("oldest", date)
                         .queryParam("newest", date)
                         .queryParam("category", "WORKOUT")
-                        .queryParam("resolve", true)
                         .build(properties.athleteId)
                 }.headers { headers -> headers.setBasicAuth("API_KEY", apiKey()) }
                 .retrieve()

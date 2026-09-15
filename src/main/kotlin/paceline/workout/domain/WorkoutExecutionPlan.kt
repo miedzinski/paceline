@@ -58,6 +58,24 @@ sealed interface WorkoutStepTarget {
         }
     }
 
+    data class Ramp(
+        val startWatts: Int,
+        val endWatts: Int,
+    ) : WorkoutStepTarget {
+        init {
+            require(startWatts >= 0) { "Power targets cannot be negative" }
+            require(endWatts >= 0) { "Power targets cannot be negative" }
+            require(startWatts <= Short.MAX_VALUE) { "Power targets exceed the FTMS signed 16-bit watt field" }
+            require(endWatts <= Short.MAX_VALUE) { "Power targets exceed the FTMS signed 16-bit watt field" }
+        }
+
+        val lowWatts: Int
+            get() = minOf(startWatts, endWatts)
+
+        val highWatts: Int
+            get() = maxOf(startWatts, endWatts)
+    }
+
     data object Open : WorkoutStepTarget
 }
 
@@ -93,7 +111,10 @@ object ExecutableWorkoutFactory {
     ): ExecutableWorkout {
         val sport = type.toExecutableSport()
         val summary = plan ?: throw WorkoutNotExecutableException("Workout ${source.id} has no structured plan")
-        val steps = summary.steps.flatMapIndexed { index, step -> expandStep(step, "step ${index + 1}") }
+        val steps =
+            summary.steps.flatMapIndexed { index, step ->
+                expandStep(step, "step ${index + 1}", summary.ftpWatts)
+            }
 
         if (steps.isEmpty()) {
             throw WorkoutNotExecutableException("Workout ${source.id} has no executable steps")
@@ -111,6 +132,7 @@ object ExecutableWorkoutFactory {
     private fun expandStep(
         step: WorkoutStepSummary,
         path: String,
+        ftpWatts: Int?,
     ): List<ExecutableWorkoutStep> {
         val repetitions = step.repeats ?: 1
         if (repetitions < 1) {
@@ -120,7 +142,7 @@ object ExecutableWorkoutFactory {
         if (step.steps.isNotEmpty()) {
             val nested =
                 step.steps.flatMapIndexed { index, child ->
-                    expandStep(child, "$path.${index + 1}")
+                    expandStep(child, "$path.${index + 1}", ftpWatts)
                 }
             return List(repetitions) { nested }.flatten()
         }
@@ -129,11 +151,17 @@ object ExecutableWorkoutFactory {
             throw WorkoutNotExecutableException("$path repeats without nested steps")
         }
 
+        val completion = step.completion(path)
+        val target = step.target(path, ftpWatts)
+        if (target is WorkoutStepTarget.Ramp && completion !is WorkoutStepCompletion.Time) {
+            throw WorkoutNotExecutableException("$path ramp must have a timed completion condition")
+        }
+
         return listOf(
             ExecutableWorkoutStep(
                 text = step.text,
-                completion = step.completion(path),
-                target = step.target(path),
+                completion = completion,
+                target = target,
                 intensity = step.fitIntensity(),
             ),
         )
@@ -178,33 +206,86 @@ object ExecutableWorkoutFactory {
             }
         }
 
-    private fun WorkoutStepSummary.target(path: String): WorkoutStepTarget {
-        val resolvedPower = resolvedPower?.toAbsolutePowerTarget()
-        val absolutePower = power?.toAbsolutePowerTarget()
+    private fun WorkoutStepSummary.target(
+        path: String,
+        ftpWatts: Int?,
+    ): WorkoutStepTarget {
+        val powerRange =
+            resolvedPower?.toAbsolutePowerRange()
+                ?: power?.toAbsolutePowerRange()
+                ?: power?.toFtpPowerRange(ftpWatts)
 
         return when {
-            resolvedPower != null -> resolvedPower
+            powerRange != null && ramp == true -> {
+                if (!powerRange.hasExplicitStartAndEnd) {
+                    throw WorkoutNotExecutableException("$path ramp has no start and end power targets")
+                }
+                WorkoutStepTarget.Ramp(powerRange.startWatts, powerRange.endWatts)
+            }
 
-            absolutePower != null -> absolutePower
+            powerRange != null -> {
+                WorkoutStepTarget.Power(powerRange.lowWatts, powerRange.highWatts)
+            }
 
-            freeRide == true -> WorkoutStepTarget.Open
+            freeRide == true -> {
+                WorkoutStepTarget.Open
+            }
 
-            else -> throw WorkoutNotExecutableException(
-                "$path has no resolved power target or explicit open target",
-            )
+            else -> {
+                throw WorkoutNotExecutableException(
+                    "$path has no resolved power target or explicit open target",
+                )
+            }
         }
     }
 
-    private fun WorkoutTargetSummary.toAbsolutePowerTarget(): WorkoutStepTarget.Power? {
+    private data class AbsolutePowerRange(
+        val startWatts: Int,
+        val endWatts: Int,
+        val hasExplicitStart: Boolean,
+        val hasExplicitEnd: Boolean,
+    ) {
+        val lowWatts: Int
+            get() = minOf(startWatts, endWatts)
+
+        val highWatts: Int
+            get() = maxOf(startWatts, endWatts)
+
+        val hasExplicitStartAndEnd: Boolean
+            get() = hasExplicitStart && hasExplicitEnd
+    }
+
+    private fun WorkoutTargetSummary.toAbsolutePowerRange(): AbsolutePowerRange? {
         val normalizedUnits = units?.trim()?.lowercase()
         val absoluteUnits = normalizedUnits == null || normalizedUnits in setOf("w", "watt", "watts")
         if (!absoluteUnits) {
             return null
         }
 
-        val low = (start ?: value ?: end)?.toWatts() ?: return null
-        val high = (end ?: value ?: start)?.toWatts() ?: return null
-        return WorkoutStepTarget.Power(minOf(low, high), maxOf(low, high))
+        val rawStart = start ?: value ?: end ?: return null
+        val rawEnd = end ?: value ?: start ?: return null
+        return AbsolutePowerRange(
+            startWatts = rawStart.toWatts(),
+            endWatts = rawEnd.toWatts(),
+            hasExplicitStart = start != null,
+            hasExplicitEnd = end != null,
+        )
+    }
+
+    private fun WorkoutTargetSummary.toFtpPowerRange(ftpWatts: Int?): AbsolutePowerRange? {
+        if (units.normalizedPowerUnits() !in FTP_PERCENT_UNITS) {
+            return null
+        }
+
+        val validFtpWatts = ftpWatts?.takeIf { it > 0 } ?: return null
+        val rawStart = start ?: value ?: end ?: return null
+        val rawEnd = end ?: value ?: start ?: return null
+        return AbsolutePowerRange(
+            startWatts = (rawStart / 100.0 * validFtpWatts).toWatts(),
+            endWatts = (rawEnd / 100.0 * validFtpWatts).toWatts(),
+            hasExplicitStart = start != null,
+            hasExplicitEnd = end != null,
+        )
     }
 
     private fun Double.toWatts(): Int {
@@ -220,3 +301,11 @@ object ExecutableWorkoutFactory {
             else -> throw WorkoutNotExecutableException("Workout sport '$this' is not supported")
         }
 }
+
+private val FTP_PERCENT_UNITS = setOf("%ftp", "%offtp", "percentftp")
+
+private fun String?.normalizedPowerUnits(): String? =
+    this
+        ?.trim()
+        ?.lowercase()
+        ?.replace(" ", "")

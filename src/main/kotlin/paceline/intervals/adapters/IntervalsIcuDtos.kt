@@ -36,6 +36,7 @@ data class IntervalsCalendarEventDto(
     @JsonProperty("moving_time") val movingTimeSeconds: Int? = null,
     val distance: Double? = null,
     @JsonProperty("icu_training_load") val trainingLoad: Double? = null,
+    @JsonProperty("icu_ftp") val ftpWatts: Int? = null,
     val target: String? = null,
     @JsonProperty("workout_doc") val workoutDocument: IntervalsWorkoutDocumentDto? = null,
 )
@@ -96,7 +97,6 @@ data class IntervalsWorkoutStepDto(
     @JsonProperty("hidepower") val hidePower: Boolean? = null,
     val steps: List<IntervalsWorkoutStepDto>? = null,
     val power: IntervalsWorkoutValueDto? = null,
-    @JsonProperty("_power") val resolvedPower: IntervalsWorkoutValueDto? = null,
     val hr: IntervalsWorkoutValueDto? = null,
     @JsonProperty("_hr") val resolvedHeartRate: IntervalsWorkoutValueDto? = null,
     val pace: IntervalsWorkoutValueDto? = null,

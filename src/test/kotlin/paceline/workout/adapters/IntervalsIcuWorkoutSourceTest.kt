@@ -46,14 +46,11 @@ class IntervalsIcuWorkoutSourceTest {
             )
         server
             .expect(
-                requestTo(
-                    "http://intervals.test/api/v1/athlete/0/events?oldest=2026-09-14&newest=2026-09-14&category=WORKOUT&resolve=true",
-                ),
+                requestTo("http://intervals.test/api/v1/athlete/0/events?oldest=2026-09-14&newest=2026-09-14&category=WORKOUT"),
             ).andExpect(method(HttpMethod.GET))
             .andExpect(queryParam("oldest", "2026-09-14"))
             .andExpect(queryParam("newest", "2026-09-14"))
             .andExpect(queryParam("category", "WORKOUT"))
-            .andExpect(queryParam("resolve", "true"))
             .andExpect(header("Authorization", authorization))
             .andRespond(
                 withSuccess(
@@ -67,10 +64,21 @@ class IntervalsIcuWorkoutSourceTest {
                         "type":"Ride",
                         "start_date_local":"2026-09-14T07:00:00",
                         "moving_time":1800,
-                        "workout_doc":{"target":"POWER","steps":[{"duration":900,"power":{"value":95,"units":"%ftp"},"_power":{"value":275,"units":"W"}}]}
+                        "workout_doc":{"target":"POWER","ftp":0,"steps":[{"duration":900,"power":{"value":95,"units":"%ftp"}}]}
                       }
                     ]
                     """.trimIndent(),
+                    MediaType.APPLICATION_JSON,
+                ),
+            )
+        server
+            .expect(
+                requestTo("http://intervals.test/api/v1/athlete/0/sport-settings/Ride"),
+            ).andExpect(method(HttpMethod.GET))
+            .andExpect(header("Authorization", authorization))
+            .andRespond(
+                withSuccess(
+                    """{"ftp":250}""",
                     MediaType.APPLICATION_JSON,
                 ),
             )
@@ -82,8 +90,9 @@ class IntervalsIcuWorkoutSourceTest {
         server.verify()
         assertEquals(listOf("102"), result.map { it.reference.id })
         assertEquals("intervals.icu", result.single().reference.provider)
+        assertEquals(250, result.single().workout?.ftpWatts)
         assertEquals(
-            275.0,
+            238.0,
             result
                 .single()
                 .workout
@@ -121,8 +130,19 @@ class IntervalsIcuWorkoutSourceTest {
             .andRespond(
                 withSuccess(
                     """
-                    {"id":77,"name":"Saved tempo","type":"Ride","workout_doc":{"steps":[{"duration":1200,"power":{"value":88,"units":"%ftp"}}]}}
+                    {"id":77,"name":"Saved tempo","type":"Ride","workout_doc":{"steps":[{"duration":300,"ramp":true,"power":{"start":60,"end":75,"units":"%ftp"}}]}}
                     """.trimIndent(),
+                    MediaType.APPLICATION_JSON,
+                ),
+            )
+        server
+            .expect(
+                requestTo("http://intervals.test/api/v1/athlete/0/sport-settings/Ride"),
+            ).andExpect(method(HttpMethod.GET))
+            .andExpect(header("Authorization", "Basic " + Base64.getEncoder().encodeToString("API_KEY:secret".toByteArray())))
+            .andRespond(
+                withSuccess(
+                    """{"ftp":250}""",
                     MediaType.APPLICATION_JSON,
                 ),
             )
@@ -137,12 +157,38 @@ class IntervalsIcuWorkoutSourceTest {
         assertEquals("Saved tempo", summaries.single().name)
         assertEquals("77", detail?.reference?.id)
         assertEquals(
-            1200,
+            300,
             detail
                 ?.workout
                 ?.steps
                 ?.single()
                 ?.durationSeconds,
+        )
+        assertEquals(
+            true,
+            detail
+                ?.workout
+                ?.steps
+                ?.single()
+                ?.ramp,
+        )
+        assertEquals(
+            150.0,
+            detail
+                ?.workout
+                ?.steps
+                ?.single()
+                ?.resolvedPower
+                ?.start,
+        )
+        assertEquals(
+            188.0,
+            detail
+                ?.workout
+                ?.steps
+                ?.single()
+                ?.resolvedPower
+                ?.end,
         )
     }
 

@@ -292,6 +292,35 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
+    fun `updates the ERG target progressively during a timed ramp`() {
+        // given a timed workout step with ordered ramp endpoints:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val workout =
+            workout(
+                ExecutableWorkoutStep(
+                    text = "Ramp",
+                    completion = WorkoutStepCompletion.Time(10),
+                    target = WorkoutStepTarget.Ramp(startWatts = 100, endWatts = 200),
+                ),
+            )
+
+        // when the scheduler observes the step at its midpoint and near its end:
+        val started = session.start(workout)
+        val halfway = session.tick(now.plusSeconds(5))
+        val nearEnd = session.tick(now.plusSeconds(9))
+        val completed = session.tick(now.plusSeconds(10))
+
+        // then the trainer receives the interpolated targets and a safe zero at completion:
+        assertEquals(listOf(100, 150, 190, 0), powerControl.targetPowers)
+        assertEquals(150, halfway.ergTargetPowerWatts)
+        assertEquals(190, nearEnd.ergTargetPowerWatts)
+        assertEquals(0, completed.ergTargetPowerWatts)
+        assertEquals(true, completed.workout?.completed)
+        assertEquals(started.sessionId, completed.sessionId)
+    }
+
+    @Test
     fun `stopping records each telemetry notification once and uploads the in-memory activity`() {
         // given an active session and an uploader that records the submitted activity:
         val powerControl = FakeIndoorBikePowerControl()

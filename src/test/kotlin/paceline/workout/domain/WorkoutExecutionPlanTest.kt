@@ -98,6 +98,43 @@ class WorkoutExecutionPlanTest {
     }
 
     @Test
+    fun `resolves relative power and preserves ramp direction from the plan FTP`() {
+        // given a workout whose power targets are expressed as FTP percentages:
+        val scheduled =
+            scheduledWorkout(
+                WorkoutPlanSummary(
+                    description = null,
+                    durationSeconds = 600,
+                    distanceMeters = null,
+                    ftpWatts = 200,
+                    thresholdHeartRateBpm = null,
+                    target = "POWER",
+                    steps =
+                        listOf(
+                            leafStep(
+                                text = "Steady",
+                                durationSeconds = 300,
+                                power = WorkoutTargetSummary(value = 80.0, units = "%ftp"),
+                            ),
+                            leafStep(
+                                text = "Ramp down",
+                                durationSeconds = 300,
+                                ramp = true,
+                                power = WorkoutTargetSummary(start = 75.0, end = 60.0, units = "%ftp"),
+                            ),
+                        ),
+                ),
+            )
+
+        // when the plan is normalized for execution:
+        val result = ExecutableWorkoutFactory.from(scheduled)
+
+        // then fixed percentages become watts and the descending ramp keeps its ordered endpoints:
+        assertEquals(WorkoutStepTarget.Power(160, 160), result.steps[0].target)
+        assertEquals(WorkoutStepTarget.Ramp(150, 120), result.steps[1].target)
+    }
+
+    @Test
     fun `rejects a step with ambiguous time and distance completion`() {
         // given a step carrying both time and distance completion values:
         val scheduled =
@@ -153,6 +190,7 @@ class WorkoutExecutionPlanTest {
         distanceMeters: Double? = null,
         freeRide: Boolean? = null,
         intensity: String? = null,
+        ramp: Boolean? = null,
         power: WorkoutTargetSummary? = null,
         resolvedPower: WorkoutTargetSummary? = null,
     ): WorkoutStepSummary =
@@ -164,7 +202,7 @@ class WorkoutExecutionPlanTest {
             warmup = null,
             cooldown = null,
             intensity = intensity,
-            ramp = null,
+            ramp = ramp,
             untilLapPress = null,
             freeRide = freeRide,
             maxEffort = null,

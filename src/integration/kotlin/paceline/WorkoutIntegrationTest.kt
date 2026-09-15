@@ -112,14 +112,13 @@ class WorkoutIntegrationTest {
                 once(),
                 requestTo(
                     "$MOCK_BASE_URL/api/v1/athlete/athlete-integration/events" +
-                        "?oldest=$today&newest=$today&category=WORKOUT&resolve=true",
+                        "?oldest=$today&newest=$today&category=WORKOUT",
                 ),
             ).andExpect(method(HttpMethod.GET))
-            .andExpect(queryParamCount(4))
+            .andExpect(queryParamCount(3))
             .andExpect(queryParam("oldest", today.toString()))
             .andExpect(queryParam("newest", today.toString()))
             .andExpect(queryParam("category", "WORKOUT"))
-            .andExpect(queryParam("resolve", "true"))
             .andExpect(header("Authorization", expectedAuthorization))
             .andRespond(withSuccess(calendarEvents(today), MediaType.APPLICATION_JSON))
     }
@@ -143,6 +142,15 @@ class WorkoutIntegrationTest {
             .andExpect(queryParamCount(0))
             .andExpect(header("Authorization", expectedAuthorization))
             .andRespond(withSuccess(LIBRARY_WORKOUT_DETAIL, MediaType.APPLICATION_JSON))
+
+        mockIntervalsServer
+            .expect(
+                once(),
+                requestTo("$MOCK_BASE_URL/api/v1/athlete/athlete-integration/sport-settings/Ride"),
+            ).andExpect(method(HttpMethod.GET))
+            .andExpect(queryParamCount(0))
+            .andExpect(header("Authorization", expectedAuthorization))
+            .andRespond(withSuccess("""{"ftp":250}""", MediaType.APPLICATION_JSON))
     }
 
     private fun get(path: String): String =
@@ -186,7 +194,7 @@ class WorkoutIntegrationTest {
                   "target":"POWER",
                   "ftp":250,
                   "steps":[
-                    {"duration":900,"power":{"value":95,"units":"%ftp"},"_power":{"value":238,"units":"W"}},
+                    {"duration":900,"power":{"value":95,"units":"%ftp"}},
                     {"duration":60,"freeride":true}
                   ]
                 }
@@ -201,7 +209,7 @@ class WorkoutIntegrationTest {
 
         private const val LIBRARY_WORKOUT_DETAIL =
             """
-            {"id":77,"name":"Saved tempo","type":"Ride","workout_doc":{"steps":[{"duration":1200,"power":{"value":88,"units":"%ftp"},"_power":{"value":220,"units":"W"}}]}}
+            {"id":77,"name":"Saved tempo","type":"Ride","workout_doc":{"steps":[{"duration":1200,"power":{"value":88,"units":"%ftp"}}]}}
             """
     }
 }

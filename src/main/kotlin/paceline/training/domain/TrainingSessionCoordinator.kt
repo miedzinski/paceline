@@ -73,7 +73,7 @@ class TrainingSessionCoordinator(
 
         val now = clock.instant()
         val progress = workout?.let { TrainingWorkoutProgress.firstStep(it, now) }
-        val initialTarget = progress?.let { targetPower(it.step) }
+        val initialTarget = progress?.let { targetPower(it, now) }
         if (initialTarget != null) {
             setTarget(powerControl, initialTarget, "initial workout")
         }
@@ -226,7 +226,7 @@ class TrainingSessionCoordinator(
             )
         val targetPowerWatts =
             activeWorkout
-                ?.let { resumedWorkout?.let { workoutProgress -> targetPower(workoutProgress.step) } }
+                ?.let { resumedWorkout?.let { workoutProgress -> targetPower(workoutProgress, resumedAt) } }
                 ?: pausedErgTargetPowerWatts
                 ?: 0
 
@@ -290,22 +290,24 @@ class TrainingSessionCoordinator(
         return try {
             while (state.phase == TrainingSessionPhase.ACTIVE && activeWorkout != null) {
                 val progress = state.workout ?: break
-                if (!isComplete(progress, now, telemetry)) {
+                if (isComplete(progress, now, telemetry)) {
+                    val transitionAt =
+                        when (val completion = progress.step.completion) {
+                            is WorkoutStepCompletion.Time -> {
+                                progress.stepStartedAt.plusSeconds(completion.seconds.toLong())
+                            }
+
+                            is WorkoutStepCompletion.Distance,
+                            WorkoutStepCompletion.Manual,
+                            -> {
+                                now
+                            }
+                        }
+                    advanceFrom(progress, transitionAt, telemetry)
+                } else {
+                    refreshWorkoutTarget(progress, now)
                     break
                 }
-                val transitionAt =
-                    when (val completion = progress.step.completion) {
-                        is WorkoutStepCompletion.Time -> {
-                            progress.stepStartedAt.plusSeconds(completion.seconds.toLong())
-                        }
-
-                        is WorkoutStepCompletion.Distance,
-                        WorkoutStepCompletion.Manual,
-                        -> {
-                            now
-                        }
-                    }
-                advanceFrom(progress, transitionAt, telemetry)
             }
             state
         } catch (_: TrainingSessionUnavailableException) {
@@ -515,16 +517,6 @@ class TrainingSessionCoordinator(
         }
 
         val nextStep = workout.steps[nextIndex]
-        val nextTarget = targetPower(nextStep)
-        val powerControl = requireActivePowerControl()
-        setTarget(powerControl, nextTarget, "workout step ${nextIndex + 1}")
-        activityRecorder.startSegment(
-            sessionId = requireNotNull(state.sessionId),
-            startedAt = transitionAt,
-            name = activitySegmentName(nextIndex + 1, workout.steps.size, nextStep),
-            targetPowerWatts = nextTarget,
-            workoutStep = nextStep,
-        )
         val nextProgress =
             TrainingWorkoutProgress(
                 source = workout.source,
@@ -534,6 +526,16 @@ class TrainingSessionCoordinator(
                 step = nextStep,
                 stepStartedAt = transitionAt,
             )
+        val nextTarget = targetPower(nextProgress, transitionAt)
+        val powerControl = requireActivePowerControl()
+        setTarget(powerControl, nextTarget, "workout step ${nextIndex + 1}")
+        activityRecorder.startSegment(
+            sessionId = requireNotNull(state.sessionId),
+            startedAt = transitionAt,
+            name = activitySegmentName(nextIndex + 1, workout.steps.size, nextStep),
+            targetPowerWatts = nextTarget,
+            workoutStep = nextStep,
+        )
         state =
             state.copy(
                 changedAt = transitionAt,
@@ -550,16 +552,58 @@ class TrainingSessionCoordinator(
         return state
     }
 
-    private fun targetPower(step: ExecutableWorkoutStep): Int =
-        when (val target = step.target) {
+    private fun targetPower(
+        progress: TrainingWorkoutProgress,
+        at: Instant,
+    ): Int =
+        when (val target = progress.step.target) {
             is WorkoutStepTarget.Power -> {
                 ((target.lowWatts.toLong() + target.highWatts.toLong()) / 2.0).roundToInt()
+            }
+
+            is WorkoutStepTarget.Ramp -> {
+                val completion =
+                    progress.step.completion as? WorkoutStepCompletion.Time
+                        ?: throw IllegalStateException("A ramp target must have a timed completion condition")
+                val durationMillis = completion.seconds.toLong() * MILLIS_PER_SECOND
+                val elapsedMillis =
+                    Duration
+                        .between(progress.stepStartedAt, at)
+                        .toMillis()
+                        .coerceIn(0L, durationMillis)
+                val fraction = elapsedMillis.toDouble() / durationMillis
+                (
+                    target.startWatts.toDouble() +
+                        (target.endWatts - target.startWatts) * fraction
+                ).roundToInt()
             }
 
             WorkoutStepTarget.Open -> {
                 0
             }
         }
+
+    private fun refreshWorkoutTarget(
+        progress: TrainingWorkoutProgress,
+        at: Instant,
+    ) {
+        val nextTarget = targetPower(progress, at)
+        if (nextTarget == state.ergTargetPowerWatts) {
+            return
+        }
+
+        val powerControl = requireActivePowerControl()
+        setTarget(powerControl, nextTarget, "workout target")
+        state =
+            state.copy(
+                changedAt = at,
+                ergTargetPowerWatts = nextTarget,
+            )
+    }
+
+    private companion object {
+        const val MILLIS_PER_SECOND = 1_000L
+    }
 
     private fun activitySegmentName(
         stepNumber: Int,

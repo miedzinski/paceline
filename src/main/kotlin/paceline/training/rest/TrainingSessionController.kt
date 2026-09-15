@@ -269,6 +269,8 @@ data class TrainingStepTargetResponse(
     val kind: String,
     val lowWatts: Int?,
     val highWatts: Int?,
+    val startWatts: Int? = null,
+    val endWatts: Int? = null,
 )
 
 private fun WorkoutSelectionRequest.toDomain(): WorkoutSelection =
@@ -337,6 +339,16 @@ private fun WorkoutStepTarget.toResponse(): TrainingStepTargetResponse =
                 kind = "POWER",
                 lowWatts = lowWatts,
                 highWatts = highWatts,
+            )
+        }
+
+        is WorkoutStepTarget.Ramp -> {
+            TrainingStepTargetResponse(
+                kind = "RAMP",
+                lowWatts = lowWatts,
+                highWatts = highWatts,
+                startWatts = startWatts,
+                endWatts = endWatts,
             )
         }
 

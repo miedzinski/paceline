@@ -215,6 +215,13 @@ class FitActivityFileEncoder : ActivityFileEncoder {
                     customTargetValueHigh = target.highWatts.toLong()
                 }
 
+                is WorkoutStepTarget.Ramp -> {
+                    targetType = WktStepTarget.POWER
+                    targetValue = 0L
+                    customTargetValueLow = target.lowWatts.toLong()
+                    customTargetValueHigh = target.highWatts.toLong()
+                }
+
                 WorkoutStepTarget.Open -> {
                     targetType = WktStepTarget.OPEN
                 }
@@ -286,6 +293,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
     private fun RecordedTrainingActivitySegment.notes(): String =
         when (val target = workoutStep?.target) {
             is WorkoutStepTarget.Power -> "$name — target ${target.lowWatts}-${target.highWatts} W"
+            is WorkoutStepTarget.Ramp -> "$name — ramp ${target.startWatts}→${target.endWatts} W"
             WorkoutStepTarget.Open -> name
             null -> targetPowerWatts?.let { "$name — target $it W" } ?: name
         }

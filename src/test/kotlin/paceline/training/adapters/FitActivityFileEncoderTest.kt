@@ -125,7 +125,7 @@ class FitActivityFileEncoderTest {
                                 ExecutableWorkoutStep(
                                     text = "Work",
                                     completion = WorkoutStepCompletion.Time(2),
-                                    target = WorkoutStepTarget.Power(200, 240),
+                                    target = WorkoutStepTarget.Ramp(200, 240),
                                     intensity = "interval",
                                 ),
                         ),
