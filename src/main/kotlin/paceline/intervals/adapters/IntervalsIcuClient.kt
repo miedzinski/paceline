@@ -23,6 +23,48 @@ class IntervalsIcuClient(
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
 
+    fun athleteProfile(): IntervalsAthleteProfileDto =
+        try {
+            restClient
+                .get()
+                .uri { builder ->
+                    builder
+                        .path("/api/v1/athlete/{athleteId}/profile")
+                        .build(properties.athleteId)
+                }.headers { headers -> headers.setBasicAuth("API_KEY", apiKey()) }
+                .retrieve()
+                .body(IntervalsAthleteProfileDto::class.java)
+                ?: throw WorkoutProviderUnavailableException(
+                    "Intervals.icu athlete profile response was empty",
+                )
+        } catch (exception: RestClientException) {
+            throw WorkoutProviderUnavailableException(
+                "Intervals.icu athlete profile could not be read",
+                exception,
+            )
+        }
+
+    fun sportSettings(sportType: String): IntervalsSportSettingsDto =
+        try {
+            restClient
+                .get()
+                .uri { builder ->
+                    builder
+                        .path("/api/v1/athlete/{athleteId}/sport-settings/{sportType}")
+                        .build(properties.athleteId, sportType)
+                }.headers { headers -> headers.setBasicAuth("API_KEY", apiKey()) }
+                .retrieve()
+                .body(IntervalsSportSettingsDto::class.java)
+                ?: throw WorkoutProviderUnavailableException(
+                    "Intervals.icu sport settings response was empty",
+                )
+        } catch (exception: RestClientException) {
+            throw WorkoutProviderUnavailableException(
+                "Intervals.icu sport settings could not be read",
+                exception,
+            )
+        }
+
     fun calendarEvents(date: LocalDate): List<IntervalsCalendarEventDto> =
         try {
             restClient

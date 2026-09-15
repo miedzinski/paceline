@@ -4,6 +4,26 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 
 @JsonIgnoreProperties(ignoreUnknown = true)
+data class IntervalsAthleteProfileDto(
+    val athlete: IntervalsAthleteSummaryDto? = null,
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class IntervalsAthleteSummaryDto(
+    val id: String? = null,
+    val name: String? = null,
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class IntervalsSportSettingsDto(
+    val types: List<String>? = null,
+    val ftp: Int? = null,
+    @JsonProperty("indoor_ftp") val indoorFtp: Int? = null,
+    @JsonProperty("power_zones") val powerZones: List<Int>? = null,
+    @JsonProperty("power_zone_names") val powerZoneNames: List<String>? = null,
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class IntervalsCalendarEventDto(
     val id: Long,
     @JsonProperty("start_date_local") val startDateLocal: String? = null,
