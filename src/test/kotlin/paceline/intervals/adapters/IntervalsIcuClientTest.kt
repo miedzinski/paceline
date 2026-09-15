@@ -48,8 +48,7 @@ class IntervalsIcuClientTest {
             .andExpect(queryParam("paired_event_id", "123"))
             .andExpect(header("Authorization", authorization))
             .andExpect(content().contentTypeCompatibleWith(MediaType.MULTIPART_FORM_DATA))
-            .andExpect(content().string(containsString("paceline.tcx")))
-            .andExpect(content().string(containsString("Trackpoint")))
+            .andExpect(content().string(containsString("paceline.fit")))
             .andRespond(
                 withSuccess(
                     "{\"icu_athlete_id\":\"athlete-1\",\"id\":\"activity-1\"}",
@@ -60,9 +59,9 @@ class IntervalsIcuClientTest {
         // when the completed activity is uploaded:
         val result =
             client.uploadActivity(
-                fileName = "paceline.tcx",
-                contentType = "application/xml",
-                content = "<Trackpoint/>".toByteArray(),
+                fileName = "paceline.fit",
+                contentType = "application/octet-stream",
+                content = byteArrayOf(0x0e, 0x20, 0x00, 0x00),
                 name = "Paceline ride",
                 description = "Recorded by Paceline",
                 externalId = "session-1",

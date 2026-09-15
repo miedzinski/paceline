@@ -10,6 +10,7 @@ mockk = "1.14.11"
 bluez-dbus = "0.3.5"
 dbus-java = "5.2.0"
 reactive-streams = "1.0.4"
+garmin-fit = "21.214.0"
 
 [libraries]
 spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" }
@@ -24,6 +25,7 @@ mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
 bluez-dbus = { module = "com.github.hypfvieh:bluez-dbus", version.ref = "bluez-dbus" }
 dbus-java-transport-native-unixsocket = { module = "com.github.hypfvieh:dbus-java-transport-native-unixsocket", version.ref = "dbus-java" }
 reactive-streams = { module = "org.reactivestreams:reactive-streams", version.ref = "reactive-streams" }
+garmin-fit = { module = "com.garmin:fit", version.ref = "garmin-fit" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

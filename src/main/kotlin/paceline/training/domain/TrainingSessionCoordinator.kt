@@ -114,6 +114,7 @@ class TrainingSessionCoordinator(
                     )
                 } ?: "Manual ERG",
             initialTargetPowerWatts = initialTarget,
+            initialWorkoutStep = workout?.steps?.first(),
         )
         telemetryRegistration =
             trainingDevice.addTelemetryListener { telemetry ->
@@ -383,6 +384,7 @@ class TrainingSessionCoordinator(
             startedAt = transitionAt,
             name = activitySegmentName(nextIndex + 1, workout.steps.size, nextStep),
             targetPowerWatts = nextTarget,
+            workoutStep = nextStep,
         )
         val nextProgress =
             TrainingWorkoutProgress(

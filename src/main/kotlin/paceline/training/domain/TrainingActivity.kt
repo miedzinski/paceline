@@ -2,6 +2,7 @@ package paceline.training.domain
 
 import paceline.device.domain.HeartRateTelemetry
 import paceline.device.domain.IndoorBikeTelemetry
+import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutSourceType
 import java.time.Instant
@@ -48,6 +49,7 @@ data class RecordedTrainingActivitySegment(
     val startedAt: Instant,
     val stoppedAt: Instant,
     val samples: List<TrainingTelemetrySample>,
+    val workoutStep: ExecutableWorkoutStep? = null,
 ) {
     init {
         require(name.isNotBlank()) { "An activity segment must have a name" }
@@ -79,6 +81,7 @@ class InMemoryTrainingActivityRecorder {
         workoutSourceType: WorkoutSourceType? = null,
         initialSegmentName: String = name,
         initialTargetPowerWatts: Int? = null,
+        initialWorkoutStep: ExecutableWorkoutStep? = null,
     ) {
         check(active == null) { "A training activity is already being recorded" }
         active =
@@ -90,6 +93,7 @@ class InMemoryTrainingActivityRecorder {
                 workoutSourceType = workoutSourceType,
                 initialSegmentName = initialSegmentName,
                 initialTargetPowerWatts = initialTargetPowerWatts,
+                initialWorkoutStep = initialWorkoutStep,
             )
     }
 
@@ -118,11 +122,13 @@ class InMemoryTrainingActivityRecorder {
         startedAt: Instant,
         name: String,
         targetPowerWatts: Int?,
+        workoutStep: ExecutableWorkoutStep? = null,
     ) {
         active?.takeIf { it.sessionId == sessionId }?.startSegment(
             startedAt = startedAt,
             name = name,
             targetPowerWatts = targetPowerWatts,
+            workoutStep = workoutStep,
         )
     }
 
@@ -163,6 +169,7 @@ class InMemoryTrainingActivityRecorder {
         val workoutSourceType: WorkoutSourceType?,
         initialSegmentName: String,
         initialTargetPowerWatts: Int?,
+        initialWorkoutStep: ExecutableWorkoutStep?,
         val samples: MutableList<TrainingTelemetrySample> = mutableListOf(),
         val segments: MutableList<MutableSegment> = mutableListOf(),
         var workoutCompleted: Boolean = false,
@@ -171,6 +178,7 @@ class InMemoryTrainingActivityRecorder {
             MutableSegment(
                 name = initialSegmentName,
                 targetPowerWatts = initialTargetPowerWatts,
+                workoutStep = initialWorkoutStep,
                 startedAt = startedAt,
             )
 
@@ -193,12 +201,14 @@ class InMemoryTrainingActivityRecorder {
             startedAt: Instant,
             name: String,
             targetPowerWatts: Int?,
+            workoutStep: ExecutableWorkoutStep? = null,
         ) {
             currentSegment.stop(startedAt)
             currentSegment =
                 MutableSegment(
                     name = name,
                     targetPowerWatts = targetPowerWatts,
+                    workoutStep = workoutStep,
                     startedAt = startedAt,
                 )
             segments += currentSegment
@@ -250,6 +260,7 @@ class InMemoryTrainingActivityRecorder {
     private class MutableSegment(
         val name: String,
         val targetPowerWatts: Int?,
+        val workoutStep: ExecutableWorkoutStep?,
         val startedAt: Instant,
         val samples: MutableList<TrainingTelemetrySample> = mutableListOf(),
         var stoppedAt: Instant? = null,
@@ -266,6 +277,7 @@ class InMemoryTrainingActivityRecorder {
                 startedAt = startedAt,
                 stoppedAt = requireNotNull(stoppedAt),
                 samples = samples.toList(),
+                workoutStep = workoutStep,
             )
     }
 }

@@ -363,6 +363,13 @@ class TrainingSessionCoordinatorTest {
             activity.segments.map { it.name },
         )
         assertEquals(listOf(250, 100, null), activity.segments.map { it.targetPowerWatts })
+        assertEquals(
+            listOf(200, 100),
+            activity.segments
+                .take(2)
+                .map { (it.workoutStep?.target as WorkoutStepTarget.Power).lowWatts },
+        )
+        assertEquals(null, activity.segments[2].workoutStep)
         assertEquals(listOf(1, 1, 1), activity.segments.map { it.samples.size })
         assertEquals(true, activity.workoutCompleted)
     }

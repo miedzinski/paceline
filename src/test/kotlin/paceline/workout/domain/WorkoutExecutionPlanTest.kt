@@ -30,11 +30,13 @@ class WorkoutExecutionPlanTest {
                             text = "Work",
                             durationSeconds = 300,
                             resolvedPower = WorkoutTargetSummary(value = 250.0, units = "W"),
+                            intensity = "interval",
                         ),
                         leafStep(
                             text = "Free recovery",
                             durationSeconds = 60,
                             freeRide = true,
+                            intensity = "recovery",
                         ),
                     ),
             )
@@ -47,6 +49,10 @@ class WorkoutExecutionPlanTest {
         assertEquals(ExecutableSport.CYCLING, result.sport)
         assertEquals(WorkoutSourceType.SCHEDULED, result.sourceType)
         assertEquals(listOf("Work", "Free recovery", "Work", "Free recovery"), result.steps.map { it.text })
+        assertEquals(
+            listOf("interval", "recovery", "interval", "recovery"),
+            result.steps.map { it.intensity },
+        )
         assertEquals(
             250,
             assertIs<WorkoutStepTarget.Power>(result.steps[0].target).lowWatts,
@@ -146,6 +152,7 @@ class WorkoutExecutionPlanTest {
         durationSeconds: Int? = null,
         distanceMeters: Double? = null,
         freeRide: Boolean? = null,
+        intensity: String? = null,
         power: WorkoutTargetSummary? = null,
         resolvedPower: WorkoutTargetSummary? = null,
     ): WorkoutStepSummary =
@@ -156,7 +163,7 @@ class WorkoutExecutionPlanTest {
             repeats = null,
             warmup = null,
             cooldown = null,
-            intensity = null,
+            intensity = intensity,
             ramp = null,
             untilLapPress = null,
             freeRide = freeRide,

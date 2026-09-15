@@ -22,6 +22,7 @@ data class ExecutableWorkoutStep(
     val text: String?,
     val completion: WorkoutStepCompletion,
     val target: WorkoutStepTarget,
+    val intensity: String? = null,
 )
 
 sealed interface WorkoutStepCompletion {
@@ -133,9 +134,18 @@ object ExecutableWorkoutFactory {
                 text = step.text,
                 completion = step.completion(path),
                 target = step.target(path),
+                intensity = step.fitIntensity(),
             ),
         )
     }
+
+    private fun WorkoutStepSummary.fitIntensity(): String? =
+        intensity?.trim()?.takeIf(String::isNotBlank)
+            ?: when {
+                warmup == true -> "warmup"
+                cooldown == true -> "cooldown"
+                else -> null
+            }
 
     private fun WorkoutStepSummary.completion(path: String): WorkoutStepCompletion =
         when {
