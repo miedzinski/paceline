@@ -32,5 +32,7 @@ interface IndoorBikePowerControl :
 
     fun setTargetPower(powerWatts: Int)
 
+    fun setFreeRide()
+
     override fun close() = Unit
 }

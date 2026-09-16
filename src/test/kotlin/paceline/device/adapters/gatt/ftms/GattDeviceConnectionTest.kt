@@ -144,7 +144,7 @@ class GattDeviceConnectionTest {
     }
 
     @Test
-    fun `exposes optional ERG control and sends FTMS target power procedures`() {
+    fun `exposes optional ERG control and sends FTMS power and free ride procedures`() {
         // given a GATT client exposing a writable and indicatable FTMS control point:
         val gattClient = fakeGattClient(withPowerControl = true)
         gattClient.onWrite = { characteristic, value ->
@@ -167,8 +167,9 @@ class GattDeviceConnectionTest {
             )
         val powerControl = assertNotNull(connection.capabilities().filterIsInstance<IndoorBikePowerControl>().single())
 
-        // when the session acquires control and sets a target power:
+        // when the session acquires control, selects Free Ride, and sets a target power:
         powerControl.requestControl()
+        powerControl.setFreeRide()
         powerControl.setTargetPower(300)
 
         // then the control point is enabled and receives the expected little-endian commands:
@@ -176,12 +177,16 @@ class GattDeviceConnectionTest {
             listOf(FtmsUuid.INDOOR_BIKE_DATA, FtmsUuid.FITNESS_MACHINE_CONTROL_POINT),
             gattClient.enabledNotifications,
         )
-        assertEquals(2, gattClient.writes.size)
+        assertEquals(3, gattClient.writes.size)
         assertEquals(FtmsUuid.FITNESS_MACHINE_CONTROL_POINT, gattClient.writes[0].first)
         assertContentEquals(byteArrayOf(FtmsErgControl.OPCODE_REQUEST_CONTROL.toByte()), gattClient.writes[0].second)
         assertContentEquals(
-            byteArrayOf(FtmsErgControl.OPCODE_SET_TARGET_POWER.toByte(), 0x2c, 0x01),
+            byteArrayOf(FtmsErgControl.OPCODE_SET_TARGET_RESISTANCE_LEVEL.toByte(), 0x00, 0x00),
             gattClient.writes[1].second,
+        )
+        assertContentEquals(
+            byteArrayOf(FtmsErgControl.OPCODE_SET_TARGET_POWER.toByte(), 0x2c, 0x01),
+            gattClient.writes[2].second,
         )
 
         connection.close()
@@ -221,6 +226,9 @@ class GattDeviceConnectionTest {
         // then the adapter rejects the command without writing to the trainer:
         assertFailsWith<IllegalStateException> {
             powerControl.setTargetPower(300)
+        }
+        assertFailsWith<IllegalStateException> {
+            powerControl.setFreeRide()
         }
         assertEquals(emptyList(), gattClient.writes)
         connection.close()

@@ -100,16 +100,19 @@ class WorkoutExecutionIntegrationTest {
                 .returnResult()
                 .responseBody!!
 
-        // then the source identity and execution state are exposed and the trainer ends at zero watts:
+        // then the source identity and execution state are exposed and the trainer enters Free Ride:
         assertTrue(started.contains("\"state\":\"ACTIVE\""))
         assertTrue(started.contains("\"sourceId\":\"event-1\""))
         assertTrue(started.contains("\"currentStep\":1"))
-        assertTrue(started.contains("\"ergRequestedTargetPowerWatts\":0"))
-        assertTrue(started.contains("\"ergTargetPowerWatts\":0"))
+        assertTrue(started.contains("\"controlMode\":\"FREE_RIDE\""))
+        assertTrue(started.contains("\"ergRequestedTargetPowerWatts\":null"))
+        assertTrue(started.contains("\"ergTargetPowerWatts\":null"))
         assertTrue(started.contains("\"ergProtection\":{\"state\":\"INACTIVE\""))
         assertTrue(completed.contains("\"state\":\"ACTIVE\""))
         assertTrue(completed.contains("\"completed\":true"))
-        assertEquals(listOf(0, 0), powerControl.targetPowers)
+        assertTrue(completed.contains("\"controlMode\":\"FREE_RIDE\""))
+        assertEquals(emptyList(), powerControl.targetPowers)
+        assertEquals(1, powerControl.freeRideCalls)
     }
 
     @Test
@@ -168,11 +171,13 @@ class WorkoutExecutionIntegrationTest {
 
         // then the session state is paused and resumed while the workout context remains attached:
         assertTrue(paused.contains("\"state\":\"PAUSED\""))
-        assertTrue(paused.contains("\"ergRequestedTargetPowerWatts\":0"))
+        assertTrue(paused.contains("\"controlMode\":\"FREE_RIDE\""))
+        assertTrue(paused.contains("\"ergRequestedTargetPowerWatts\":null"))
         assertTrue(paused.contains("\"ergTargetPowerWatts\":0"))
         assertTrue(paused.contains("\"sourceId\":\"event-1\""))
         assertTrue(resumed.contains("\"state\":\"ACTIVE\""))
-        assertEquals(listOf(0, 0, 0), powerControl.targetPowers)
+        assertEquals(listOf(0), powerControl.targetPowers)
+        assertEquals(2, powerControl.freeRideCalls)
         assertEquals(2, powerControl.requestControlCalls)
     }
 

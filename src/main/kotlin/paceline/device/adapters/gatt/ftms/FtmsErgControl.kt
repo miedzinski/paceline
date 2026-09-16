@@ -63,13 +63,19 @@ class FtmsErgControl(
         }
         check(controlGranted.get()) { "FTMS control has not been acquired" }
 
-        val parameter =
-            ByteBuffer
-                .allocate(2)
-                .order(ByteOrder.LITTLE_ENDIAN)
-                .putShort(powerWatts.toShort())
-                .array()
+        val parameter = littleEndianShort(powerWatts.toShort())
         execute(opcode = OPCODE_SET_TARGET_POWER, parameter = parameter)
+    }
+
+    override fun setFreeRide() {
+        check(controlGranted.get()) { "FTMS control has not been acquired" }
+
+        // FTMS resistance level uses a 0.1-unit SINT16 field. Zero selects the
+        // trainer's neutral manual-resistance mode without creating an ERG target.
+        execute(
+            opcode = OPCODE_SET_TARGET_RESISTANCE_LEVEL,
+            parameter = littleEndianShort(0),
+        )
     }
 
     override fun close() {
@@ -206,8 +212,16 @@ class FtmsErgControl(
         )
     }
 
+    private fun littleEndianShort(value: Short): ByteArray =
+        ByteBuffer
+            .allocate(2)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putShort(value)
+            .array()
+
     companion object {
         const val OPCODE_REQUEST_CONTROL = 0x00
+        const val OPCODE_SET_TARGET_RESISTANCE_LEVEL = 0x04
         const val OPCODE_SET_TARGET_POWER = 0x05
         const val OPCODE_RESPONSE_CODE = 0x80
         const val RESULT_SUCCESS = 0x01

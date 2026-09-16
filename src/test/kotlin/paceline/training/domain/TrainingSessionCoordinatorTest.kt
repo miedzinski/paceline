@@ -47,14 +47,17 @@ class TrainingSessionCoordinatorTest {
         val powerControl = FakeIndoorBikePowerControl()
         val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
 
-        // when the session is started and a target is changed:
+        // when the session is started in Free Ride and a target is changed:
         val started = session.start()
         val updated = session.setTargetPower(requireNotNull(started.sessionId), 300)
 
-        // then control is requested once and the active session owns the target update:
+        // then control is requested once, Free Ride is selected initially, and the target update switches to ERG:
         assertEquals(TrainingSessionPhase.ACTIVE, started.phase)
         assertEquals(1, powerControl.requestControlCalls)
+        assertEquals(1, powerControl.freeRideCalls)
+        assertEquals(TrainingControlMode.FREE_RIDE, started.controlMode)
         assertEquals(listOf(300), powerControl.targetPowers)
+        assertEquals(TrainingControlMode.ERG, updated.controlMode)
         assertEquals(300, updated.ergTargetPowerWatts)
     }
 
@@ -188,6 +191,23 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
+    fun `a failed initial Free Ride command does not create a session`() {
+        // given a connected device that rejects the initial Free Ride command:
+        val powerControl =
+            FakeIndoorBikePowerControl().also {
+                it.freeRideFailure = IllegalStateException("free ride rejected")
+            }
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+
+        // when a manual session is started:
+        // then the failure is visible and the session remains not started:
+        assertFailsWith<TrainingSessionUnavailableException> { session.start() }
+        assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
+        assertEquals(1, powerControl.requestControlCalls)
+        assertEquals(1, powerControl.freeRideCalls)
+    }
+
+    @Test
     fun `a started session remains bound to the control it acquired`() {
         // given a session that acquired control from one device:
         val firstPowerControl = FakeIndoorBikePowerControl()
@@ -277,12 +297,15 @@ class TrainingSessionCoordinatorTest {
         val firstTransition = session.tick(now.plusSeconds(10))
         val completed = session.tick(now.plusSeconds(30))
 
-        // then each step receives its midpoint and workout completion leaves the session open at zero watts:
-        assertEquals(listOf(250, 100, 0), powerControl.targetPowers)
+        // then each step receives its midpoint and workout completion switches to Free Ride:
+        assertEquals(listOf(250, 100), powerControl.targetPowers)
+        assertEquals(1, powerControl.freeRideCalls)
         assertEquals(2, firstTransition.workout?.currentStepNumber)
         assertEquals(TrainingSessionPhase.ACTIVE, completed.phase)
         assertEquals(true, completed.workout?.completed)
-        assertEquals(0, completed.ergTargetPowerWatts)
+        assertEquals(TrainingControlMode.FREE_RIDE, completed.controlMode)
+        assertEquals(null, completed.ergRequestedTargetPowerWatts)
+        assertEquals(null, completed.ergTargetPowerWatts)
         assertEquals(started.sessionId, completed.sessionId)
 
         // when the user selects a manual target after the planned workout:
@@ -290,7 +313,8 @@ class TrainingSessionCoordinatorTest {
 
         // then manual ERG control is available without starting a second session:
         assertEquals(180, continued.ergTargetPowerWatts)
-        assertEquals(listOf(250, 100, 0, 180), powerControl.targetPowers)
+        assertEquals(listOf(250, 100, 180), powerControl.targetPowers)
+        assertEquals(TrainingControlMode.ERG, continued.controlMode)
     }
 
     @Test
@@ -313,11 +337,13 @@ class TrainingSessionCoordinatorTest {
         val nearEnd = session.tick(now.plusSeconds(9))
         val completed = session.tick(now.plusSeconds(10))
 
-        // then the trainer receives the interpolated targets and a safe zero at completion:
-        assertEquals(listOf(100, 150, 190, 0), powerControl.targetPowers)
+        // then the trainer receives the interpolated targets and switches to Free Ride at completion:
+        assertEquals(listOf(100, 150, 190), powerControl.targetPowers)
+        assertEquals(1, powerControl.freeRideCalls)
         assertEquals(150, halfway.ergTargetPowerWatts)
         assertEquals(190, nearEnd.ergTargetPowerWatts)
-        assertEquals(0, completed.ergTargetPowerWatts)
+        assertEquals(TrainingControlMode.FREE_RIDE, completed.controlMode)
+        assertEquals(null, completed.ergTargetPowerWatts)
         assertEquals(true, completed.workout?.completed)
         assertEquals(started.sessionId, completed.sessionId)
     }
@@ -454,10 +480,11 @@ class TrainingSessionCoordinatorTest {
         // when the explicit advance action is used:
         val advanced = session.advance(sessionId)
 
-        // then the open step starts at zero watts and the next target is applied:
+        // then the open step has selected Free Ride and the next ERG target is applied:
         assertEquals(2, advanced.workout?.currentStepNumber)
         assertEquals(180, advanced.ergTargetPowerWatts)
-        assertEquals(listOf(0, 180), powerControl.targetPowers)
+        assertEquals(1, powerControl.freeRideCalls)
+        assertEquals(listOf(180), powerControl.targetPowers)
     }
 
     @Test
@@ -546,7 +573,8 @@ class TrainingSessionCoordinatorTest {
 
         // then the workout completes only at the adjusted boundary:
         assertEquals(true, completed.workout?.completed)
-        assertEquals(listOf(200, 0, 200, 0), powerControl.targetPowers)
+        assertEquals(listOf(200, 0, 200), powerControl.targetPowers)
+        assertEquals(1, powerControl.freeRideCalls)
     }
 
     @Test
@@ -638,13 +666,13 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `a failed resume target leaves the session paused`() {
-        // given a paused session whose trainer rejects the restored target:
+    fun `a failed resume Free Ride command leaves the session paused`() {
+        // given a paused Free Ride session whose trainer rejects the restored mode:
         val powerControl = FakeIndoorBikePowerControl()
         val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
         session.pause(sessionId)
-        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+        powerControl.freeRideFailure = IllegalStateException("trainer unavailable")
 
         // when the paused session is resumed:
         assertFailsWith<TrainingSessionUnavailableException> {
@@ -655,6 +683,7 @@ class TrainingSessionCoordinatorTest {
         assertEquals(TrainingSessionPhase.PAUSED, session.current().phase)
         assertEquals(0, session.current().ergTargetPowerWatts)
         assertEquals(listOf(0), powerControl.targetPowers)
+        assertEquals(2, powerControl.freeRideCalls)
     }
 
     @Test
@@ -697,10 +726,12 @@ class TrainingSessionCoordinatorTest {
         // then the applied target is released and restored while the requested target remains visible:
         assertEquals(listOf(300, 0, 300), powerControl.targetPowers)
         assertEquals(TrainingSessionPhase.ACTIVE, bailedOut.phase)
+        assertEquals(TrainingControlMode.ERG, bailedOut.controlMode)
         assertEquals(300, bailedOut.ergRequestedTargetPowerWatts)
         assertEquals(0, bailedOut.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.BAILED_OUT, bailedOut.ergProtection.status)
         assertEquals(TrainingSessionPhase.ACTIVE, recovered.phase)
+        assertEquals(TrainingControlMode.ERG, recovered.controlMode)
         assertEquals(300, recovered.ergRequestedTargetPowerWatts)
         assertEquals(300, recovered.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
@@ -1083,10 +1114,12 @@ class TrainingSessionCoordinatorTest {
 
         // then no stale protection overlay remains after resistance is no longer requested:
         assertEquals(2, openStep.workout?.currentStepNumber)
-        assertEquals(0, openStep.ergRequestedTargetPowerWatts)
-        assertEquals(0, openStep.ergTargetPowerWatts)
+        assertEquals(TrainingControlMode.FREE_RIDE, openStep.controlMode)
+        assertEquals(null, openStep.ergRequestedTargetPowerWatts)
+        assertEquals(null, openStep.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.INACTIVE, openStep.ergProtection.status)
         assertEquals(listOf(300, 0), powerControl.targetPowers)
+        assertEquals(1, powerControl.freeRideCalls)
 
         mutableClock.currentTime = now.plusSeconds(3)
         session.stop(sessionId)

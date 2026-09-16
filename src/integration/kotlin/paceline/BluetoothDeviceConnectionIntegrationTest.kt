@@ -162,23 +162,29 @@ class BluetoothDeviceConnectionIntegrationTest {
                 .returnResult()
                 .responseBody!!
 
-        // then both control requests and the zero-watt stop target reach the device:
+        // then control requests, neutral Free Ride, and the zero-watt stop target reach the device:
         assertTrue(sessionResponse.contains("\"state\":\"ACTIVE\""))
+        assertTrue(sessionResponse.contains("\"controlMode\":\"FREE_RIDE\""))
+        assertTrue(targetResponse.contains("\"controlMode\":\"ERG\""))
         assertTrue(targetResponse.contains("\"ergTargetPowerWatts\":300"))
         assertTrue(stopResponse.contains("\"state\":\"STOPPED\""))
         assertTrue(stopResponse.contains("\"ergTargetPowerWatts\":0"))
-        assertEquals(3, bluetooth.gattClient.writes.size)
+        assertEquals(4, bluetooth.gattClient.writes.size)
         assertContentEquals(
             byteArrayOf(0x00),
             bluetooth.gattClient.writes[0].second,
         )
         assertContentEquals(
-            byteArrayOf(0x05, 0x2c, 0x01),
+            byteArrayOf(0x04, 0x00, 0x00),
             bluetooth.gattClient.writes[1].second,
         )
         assertContentEquals(
-            byteArrayOf(0x05, 0x00, 0x00),
+            byteArrayOf(0x05, 0x2c, 0x01),
             bluetooth.gattClient.writes[2].second,
+        )
+        assertContentEquals(
+            byteArrayOf(0x05, 0x00, 0x00),
+            bluetooth.gattClient.writes[3].second,
         )
     }
 

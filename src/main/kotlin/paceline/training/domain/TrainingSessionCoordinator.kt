@@ -38,6 +38,7 @@ class TrainingSessionCoordinator(
     private var stepDistanceProgressAtPauseMeters: Double? = null
     private var pausedAt: Instant? = null
     private var pausedErgTargetPowerWatts: Int? = null
+    private var pausedControlMode: TrainingControlMode? = null
     private var telemetryRegistration: AutoCloseable? = null
     private var activeHeartRateSourceId: String? = null
     private var heartRateRegistration: AutoCloseable? = null
@@ -79,8 +80,11 @@ class TrainingSessionCoordinator(
         val now = clock.instant()
         ergSpiralDetector.reset(now)
         val progress = workout?.let { TrainingWorkoutProgress.firstStep(it, now) }
-        val initialTarget = progress?.let { targetPower(it, now) }
-        if (initialTarget != null) {
+        val initialFreeRide = workout == null || progress?.let(::isFreeRideStep) == true
+        val initialTarget = progress?.takeUnless(::isFreeRideStep)?.let { targetPower(it, now) }
+        if (initialFreeRide) {
+            setFreeRide(powerControl, "initial Free Ride")
+        } else if (initialTarget != null) {
             setTarget(powerControl, initialTarget, "initial workout")
         }
 
@@ -105,8 +109,9 @@ class TrainingSessionCoordinator(
                     now = now,
                     workout = progress,
                 ).copy(
-                    ergRequestedTargetPowerWatts = initialTarget,
-                    ergTargetPowerWatts = initialTarget,
+                    controlMode = if (initialFreeRide) TrainingControlMode.FREE_RIDE else TrainingControlMode.ERG,
+                    ergRequestedTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
+                    ergTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
                     heartRateSourceId = selectedHeartRateSourceId,
                     heartRate = selectedHeartRateSourceId?.let(trainingDevice::currentHeartRate),
                 )
@@ -123,7 +128,7 @@ class TrainingSessionCoordinator(
                         totalSteps = it.steps.size,
                         step = it.steps.first(),
                     )
-                } ?: "Manual ERG",
+                } ?: "Manual Free Ride",
             initialTargetPowerWatts = initialTarget,
             initialWorkoutStep = workout?.steps?.first(),
         )
@@ -131,6 +136,8 @@ class TrainingSessionCoordinator(
         activeHeartRateSourceId = selectedHeartRateSourceId
         registerHeartRate(sessionId, selectedHeartRateSourceId)
         completedActivity = null
+        pausedControlMode = null
+        pausedErgTargetPowerWatts = null
         return state
     }
 
@@ -186,6 +193,7 @@ class TrainingSessionCoordinator(
             state =
                 activeState.copy(
                     changedAt = changedAt,
+                    controlMode = TrainingControlMode.ERG,
                     ergRequestedTargetPowerWatts = powerWatts,
                 )
             return state
@@ -198,6 +206,7 @@ class TrainingSessionCoordinator(
         state =
             activeState.copy(
                 changedAt = changedAt,
+                controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = powerWatts,
                 ergTargetPowerWatts = powerWatts,
                 ergProtection = ErgProtectionState.inactive(),
@@ -216,20 +225,25 @@ class TrainingSessionCoordinator(
         val powerControl = requireActivePowerControl()
         val pauseAt = clock.instant()
         val targetPowerWatts =
-            activeState.ergRequestedTargetPowerWatts
-                ?: activeState.ergTargetPowerWatts
-                ?: 0
+            activeState
+                .takeIf { it.controlMode == TrainingControlMode.ERG }
+                ?.let { session ->
+                    session.ergRequestedTargetPowerWatts
+                        ?: session.ergTargetPowerWatts
+                }
         setTarget(powerControl, 0, "0 W pause")
         captureDistanceProgressAtPause()
 
         closeRecordingListeners()
         pausedAt = pauseAt
         pausedErgTargetPowerWatts = targetPowerWatts
+        pausedControlMode = activeState.controlMode
         ergSpiralDetector.reset(pauseAt)
         state =
             activeState.copy(
                 phase = TrainingSessionPhase.PAUSED,
                 changedAt = pauseAt,
+                controlMode = activeState.controlMode,
                 ergRequestedTargetPowerWatts = targetPowerWatts,
                 ergTargetPowerWatts = 0,
                 ergProtection = ErgProtectionState.inactive(),
@@ -259,12 +273,20 @@ class TrainingSessionCoordinator(
             progress?.takeUnless { it.completed }?.copy(
                 stepStartedAt = progress.stepStartedAt.plus(pausedDuration),
             )
+        val resumedControlMode = pausedControlMode ?: pausedState.controlMode
+        val freeRide =
+            resumedControlMode == TrainingControlMode.FREE_RIDE ||
+                resumedWorkout?.let(::isFreeRideStep) == true
         val targetPowerWatts =
-            activeWorkout
-                ?.let { resumedWorkout?.let { workoutProgress -> targetPower(workoutProgress, resumedAt) } }
-                ?: pausedErgTargetPowerWatts
-                ?: pausedState.ergRequestedTargetPowerWatts
-                ?: 0
+            if (freeRide) {
+                null
+            } else {
+                activeWorkout
+                    ?.let { resumedWorkout?.let { workoutProgress -> targetPower(workoutProgress, resumedAt) } }
+                    ?: pausedErgTargetPowerWatts
+                    ?: pausedState.ergRequestedTargetPowerWatts
+                    ?: 0
+            }
 
         try {
             powerControl.requestControl()
@@ -274,18 +296,24 @@ class TrainingSessionCoordinator(
                 exception,
             )
         }
-        setTarget(powerControl, targetPowerWatts, "resume")
+        if (freeRide) {
+            setFreeRide(powerControl, "resume Free Ride")
+        } else {
+            setTarget(powerControl, requireNotNull(targetPowerWatts), "resume")
+        }
 
         resumeDistanceTracking()
         ergSpiralDetector.reset(resumedAt)
         pausedAt = null
         pausedErgTargetPowerWatts = null
+        pausedControlMode = null
         registerTelemetry(sessionId)
         registerHeartRate(sessionId, activeHeartRateSourceId)
         state =
             pausedState.copy(
                 phase = TrainingSessionPhase.ACTIVE,
                 changedAt = resumedAt,
+                controlMode = if (freeRide) TrainingControlMode.FREE_RIDE else TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = targetPowerWatts,
                 ergTargetPowerWatts = targetPowerWatts,
                 ergProtection = ErgProtectionState.inactive(),
@@ -374,6 +402,7 @@ class TrainingSessionCoordinator(
             activeState.copy(
                 phase = TrainingSessionPhase.STOPPED,
                 changedAt = stoppedAt,
+                controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = 0,
                 ergTargetPowerWatts = 0,
                 ergProtection = ErgProtectionState.inactive(),
@@ -552,9 +581,8 @@ class TrainingSessionCoordinator(
         val workout = requireNotNull(activeWorkout)
         val nextIndex = progress.currentStepNumber
         if (nextIndex >= workout.steps.size) {
-            if (state.ergProtection.status == ErgProtectionStatus.INACTIVE || state.ergTargetPowerWatts != 0) {
-                val powerControl = requireActivePowerControl()
-                setTarget(powerControl, 0, "workout completion")
+            if (state.controlMode != TrainingControlMode.FREE_RIDE) {
+                setFreeRide(requireActivePowerControl(), "workout completion Free Ride")
             }
             activityRecorder.completeWorkout(
                 sessionId = requireNotNull(state.sessionId),
@@ -563,8 +591,9 @@ class TrainingSessionCoordinator(
             state =
                 state.copy(
                     changedAt = transitionAt,
-                    ergRequestedTargetPowerWatts = 0,
-                    ergTargetPowerWatts = 0,
+                    controlMode = TrainingControlMode.FREE_RIDE,
+                    ergRequestedTargetPowerWatts = null,
+                    ergTargetPowerWatts = null,
                     ergProtection = ErgProtectionState.inactive(),
                     workout = progress.copy(completed = true),
                 )
@@ -584,30 +613,37 @@ class TrainingSessionCoordinator(
                 stepStartedAt = transitionAt,
             )
         val nextTarget = targetPower(nextProgress, transitionAt)
+        val nextFreeRide = isFreeRideStep(nextProgress)
         val protectionActive = isErgProtectionActive()
-        if (state.ergProtection.status == ErgProtectionStatus.INACTIVE) {
-            val powerControl = requireActivePowerControl()
-            setTarget(powerControl, nextTarget, "workout step ${nextIndex + 1}")
+        if (nextFreeRide) {
+            if (state.controlMode != TrainingControlMode.FREE_RIDE) {
+                setFreeRide(requireActivePowerControl(), "workout step ${nextIndex + 1} Free Ride")
+            }
+        } else if (state.ergProtection.status == ErgProtectionStatus.INACTIVE) {
+            setTarget(requireActivePowerControl(), nextTarget, "workout step ${nextIndex + 1}")
         }
         activityRecorder.startSegment(
             sessionId = requireNotNull(state.sessionId),
             startedAt = transitionAt,
             name = activitySegmentName(nextIndex + 1, workout.steps.size, nextStep),
-            targetPowerWatts = nextTarget,
+            targetPowerWatts = nextTarget.takeUnless { nextFreeRide },
             workoutStep = nextStep,
         )
         state =
             state.copy(
                 changedAt = transitionAt,
-                ergRequestedTargetPowerWatts = nextTarget,
+                controlMode = if (nextFreeRide) TrainingControlMode.FREE_RIDE else TrainingControlMode.ERG,
+                ergRequestedTargetPowerWatts = nextTarget.takeUnless { nextFreeRide },
                 ergTargetPowerWatts =
-                    if (state.ergProtection.status == ErgProtectionStatus.INACTIVE) {
+                    if (nextFreeRide) {
+                        null
+                    } else if (state.ergProtection.status == ErgProtectionStatus.INACTIVE) {
                         nextTarget
                     } else {
                         state.ergTargetPowerWatts
                     },
                 ergProtection =
-                    if (protectionActive && nextTarget <= 0) {
+                    if (nextFreeRide || (protectionActive && nextTarget <= 0)) {
                         ErgProtectionState.inactive()
                     } else {
                         state.ergProtection
@@ -656,13 +692,42 @@ class TrainingSessionCoordinator(
             }
         }
 
+    private fun isFreeRideStep(progress: TrainingWorkoutProgress): Boolean = progress.step.target is WorkoutStepTarget.Open
+
     private fun refreshWorkoutTarget(
         progress: TrainingWorkoutProgress,
         at: Instant,
     ) {
+        if (isFreeRideStep(progress)) {
+            if (
+                state.controlMode == TrainingControlMode.FREE_RIDE &&
+                state.ergRequestedTargetPowerWatts == null &&
+                state.ergTargetPowerWatts == null &&
+                state.ergProtection.status == ErgProtectionStatus.INACTIVE
+            ) {
+                return
+            }
+
+            setFreeRide(requireActivePowerControl(), "Free Ride workout target")
+            ergSpiralDetector.reset(at)
+            state =
+                state.copy(
+                    changedAt = at,
+                    controlMode = TrainingControlMode.FREE_RIDE,
+                    ergRequestedTargetPowerWatts = null,
+                    ergTargetPowerWatts = null,
+                    ergProtection = ErgProtectionState.inactive(),
+                )
+            return
+        }
+
         val nextTarget = targetPower(progress, at)
         val requestedTargetChanged = nextTarget != state.ergRequestedTargetPowerWatts
-        if (!requestedTargetChanged && nextTarget == state.ergTargetPowerWatts) {
+        if (
+            state.controlMode == TrainingControlMode.ERG &&
+            !requestedTargetChanged &&
+            nextTarget == state.ergTargetPowerWatts
+        ) {
             return
         }
 
@@ -671,6 +736,7 @@ class TrainingSessionCoordinator(
                 state =
                     state.copy(
                         changedAt = at,
+                        controlMode = TrainingControlMode.ERG,
                         ergRequestedTargetPowerWatts = nextTarget,
                         ergProtection =
                             if (isErgProtectionActive() && nextTarget <= 0) {
@@ -688,6 +754,7 @@ class TrainingSessionCoordinator(
         state =
             state.copy(
                 changedAt = at,
+                controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = nextTarget,
                 ergTargetPowerWatts = nextTarget,
             )
@@ -760,6 +827,7 @@ class TrainingSessionCoordinator(
                     state =
                         state.copy(
                             changedAt = now,
+                            controlMode = TrainingControlMode.ERG,
                             ergTargetPowerWatts = null,
                             ergProtection =
                                 ErgProtectionState.unavailable(
@@ -787,6 +855,7 @@ class TrainingSessionCoordinator(
                 state =
                     state.copy(
                         changedAt = now,
+                        controlMode = TrainingControlMode.ERG,
                         ergTargetPowerWatts = 0,
                         ergProtection = ErgProtectionState.bailedOut(now, decision.cadenceRpm),
                     )
@@ -863,6 +932,7 @@ class TrainingSessionCoordinator(
             state =
                 state.copy(
                     changedAt = now,
+                    controlMode = TrainingControlMode.ERG,
                     ergTargetPowerWatts = 0,
                     ergProtection = ErgProtectionState.inactive(),
                 )
@@ -937,6 +1007,7 @@ class TrainingSessionCoordinator(
             state =
                 state.copy(
                     changedAt = now,
+                    controlMode = TrainingControlMode.ERG,
                     ergTargetPowerWatts = if (activeWorkout != null) 0 else null,
                     ergProtection = nextProtection,
                 )
@@ -981,6 +1052,7 @@ class TrainingSessionCoordinator(
         state =
             state.copy(
                 changedAt = now,
+                controlMode = TrainingControlMode.ERG,
                 ergTargetPowerWatts = targetPowerWatts,
                 ergProtection = ErgProtectionState.inactive(),
             )
@@ -1080,6 +1152,37 @@ class TrainingSessionCoordinator(
         }
     }
 
+    private fun setFreeRide(
+        powerControl: IndoorBikePowerControl,
+        description: String,
+    ) {
+        logger.debug(
+            "Free Ride command: sessionId={} reason={}",
+            state.sessionId,
+            description,
+        )
+        try {
+            powerControl.setFreeRide()
+            logger.debug(
+                "Free Ride command accepted: sessionId={} reason={}",
+                state.sessionId,
+                description,
+            )
+        } catch (exception: Exception) {
+            logger.warn(
+                "Free Ride command rejected: sessionId={} reason={} error={}",
+                state.sessionId,
+                description,
+                exception.message,
+                exception,
+            )
+            throw TrainingSessionUnavailableException(
+                "The connected device rejected the $description command",
+                exception,
+            )
+        }
+    }
+
     private fun requireActiveSession(sessionId: UUID): TrainingSessionState =
         when {
             state.phase != TrainingSessionPhase.ACTIVE -> {
@@ -1155,6 +1258,7 @@ class TrainingSessionCoordinator(
         activeHeartRateSourceId = null
         pausedAt = null
         pausedErgTargetPowerWatts = null
+        pausedControlMode = null
         clearActiveWorkout()
     }
 

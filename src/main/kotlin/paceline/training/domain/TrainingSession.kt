@@ -15,6 +15,11 @@ enum class TrainingSessionPhase {
     COMPLETED,
 }
 
+enum class TrainingControlMode {
+    ERG,
+    FREE_RIDE,
+}
+
 enum class TrainingActivityUploadPhase {
     UNAVAILABLE,
     AVAILABLE,
@@ -71,6 +76,8 @@ data class TrainingSessionState(
     val sessionId: UUID? = null,
     val startedAt: Instant? = null,
     val changedAt: Instant,
+    /** The control mode currently intended by the active session. */
+    val controlMode: TrainingControlMode = TrainingControlMode.ERG,
     /** The target currently requested by the manual controller or workout step. */
     val ergRequestedTargetPowerWatts: Int? = null,
     /** The target most recently accepted by the device, or null when it is unknown. */
