@@ -212,8 +212,9 @@ object ExecutableWorkoutFactory {
     ): WorkoutStepTarget {
         val powerRange =
             resolvedPower?.toAbsolutePowerRange()
-                ?: power?.toAbsolutePowerRange()
-                ?: power?.toFtpPowerRange(ftpWatts)
+                ?: power
+                    ?.let { WorkoutTargetNormalizer.resolveFtpPower(it, ftpWatts) ?: it }
+                    ?.toAbsolutePowerRange()
 
         return when {
             powerRange != null && ramp == true -> {
@@ -272,22 +273,6 @@ object ExecutableWorkoutFactory {
         )
     }
 
-    private fun WorkoutTargetSummary.toFtpPowerRange(ftpWatts: Int?): AbsolutePowerRange? {
-        if (units.normalizedPowerUnits() !in FTP_PERCENT_UNITS) {
-            return null
-        }
-
-        val validFtpWatts = ftpWatts?.takeIf { it > 0 } ?: return null
-        val rawStart = start ?: value ?: end ?: return null
-        val rawEnd = end ?: value ?: start ?: return null
-        return AbsolutePowerRange(
-            startWatts = (rawStart / 100.0 * validFtpWatts).toWatts(),
-            endWatts = (rawEnd / 100.0 * validFtpWatts).toWatts(),
-            hasExplicitStart = start != null,
-            hasExplicitEnd = end != null,
-        )
-    }
-
     private fun Double.toWatts(): Int {
         if (!isFinite() || this < 0.0 || this > Short.MAX_VALUE) {
             throw WorkoutNotExecutableException("Power target is outside the supported range")
@@ -301,11 +286,3 @@ object ExecutableWorkoutFactory {
             else -> throw WorkoutNotExecutableException("Workout sport '$this' is not supported")
         }
 }
-
-private val FTP_PERCENT_UNITS = setOf("%ftp", "%offtp", "percentftp")
-
-private fun String?.normalizedPowerUnits(): String? =
-    this
-        ?.trim()
-        ?.lowercase()
-        ?.replace(" ", "")

@@ -13,15 +13,13 @@ import paceline.workout.domain.ScheduledWorkout
 import paceline.workout.domain.WorkoutPlanSummary
 import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutStepSummary
+import paceline.workout.domain.WorkoutTargetNormalizer
 import paceline.workout.domain.WorkoutTargetSummary
 import paceline.workout.ports.PlannedWorkoutCalendar
 import paceline.workout.ports.WorkoutLibrary
 import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.LocalDate
 import java.time.LocalDateTime
-import kotlin.math.roundToInt
-
-private val FTP_PERCENT_UNITS = setOf("%ftp", "%offtp", "percentftp")
 
 @Component
 class IntervalsIcuWorkoutSource(
@@ -145,8 +143,9 @@ class IntervalsIcuWorkoutSource(
     private fun toWorkoutStepSummary(
         step: IntervalsWorkoutStepDto,
         ftpWatts: Int?,
-    ): WorkoutStepSummary =
-        WorkoutStepSummary(
+    ): WorkoutStepSummary {
+        val power = step.power?.let(::toWorkoutTargetSummary)
+        return WorkoutStepSummary(
             text = step.text,
             durationSeconds = step.duration,
             distanceMeters = step.distance,
@@ -159,8 +158,8 @@ class IntervalsIcuWorkoutSource(
             freeRide = step.freeRide,
             maxEffort = step.maxEffort,
             hidePower = step.hidePower,
-            power = step.power?.let(::toWorkoutTargetSummary),
-            resolvedPower = step.power?.toResolvedPower(ftpWatts),
+            power = power,
+            resolvedPower = power?.let { WorkoutTargetNormalizer.resolveFtpPower(it, ftpWatts) },
             heartRate = step.hr?.let(::toWorkoutTargetSummary),
             resolvedHeartRate = step.resolvedHeartRate?.let(::toWorkoutTargetSummary),
             pace = step.pace?.let(::toWorkoutTargetSummary),
@@ -169,6 +168,7 @@ class IntervalsIcuWorkoutSource(
             resolvedDistanceMeters = step.resolvedDistanceMeters,
             steps = step.steps.orEmpty().map { child -> toWorkoutStepSummary(child, ftpWatts) },
         )
+    }
 
     private fun fallbackFtpWatts(documents: List<IntervalsWorkoutDocumentDto>): Int? {
         if (documents.none { it.requiresFtpResolution() && it.ftp?.takeIf { ftp -> ftp > 0 } == null }) {
@@ -185,32 +185,10 @@ class IntervalsIcuWorkoutSource(
     private fun IntervalsWorkoutDocumentDto.requiresFtpResolution(): Boolean = steps.orEmpty().any { it.requiresFtpResolution() }
 
     private fun IntervalsWorkoutStepDto.requiresFtpResolution(): Boolean =
-        power?.units.normalizedPowerUnits() in FTP_PERCENT_UNITS ||
+        power
+            ?.let(::toWorkoutTargetSummary)
+            ?.let(WorkoutTargetNormalizer::isFtpRelativePower) == true ||
             steps.orEmpty().any { it.requiresFtpResolution() }
-
-    private fun IntervalsWorkoutValueDto.toResolvedPower(ftpWatts: Int?): WorkoutTargetSummary? {
-        if (units.normalizedPowerUnits() !in FTP_PERCENT_UNITS) {
-            return null
-        }
-
-        val validFtpWatts = ftpWatts?.takeIf { it > 0 } ?: return null
-        if (value == null && start == null && end == null) {
-            return null
-        }
-
-        fun resolve(percent: Double?): Double? =
-            percent
-                ?.takeIf(Double::isFinite)
-                ?.let { ((it / 100.0) * validFtpWatts).roundToInt().toDouble() }
-
-        return WorkoutTargetSummary(
-            value = resolve(value),
-            start = resolve(start),
-            end = resolve(end),
-            units = "W",
-            target = target,
-        )
-    }
 
     private fun toWorkoutTargetSummary(value: IntervalsWorkoutValueDto): WorkoutTargetSummary =
         WorkoutTargetSummary(
@@ -232,9 +210,3 @@ class IntervalsIcuWorkoutSource(
         const val PROVIDER = "intervals.icu"
     }
 }
-
-private fun String?.normalizedPowerUnits(): String? =
-    this
-        ?.trim()
-        ?.lowercase()
-        ?.replace(" ", "")
