@@ -12,8 +12,6 @@ import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientException
 import org.springframework.web.client.RestClientResponseException
 import paceline.intervals.config.IntervalsIcuProperties
-import paceline.training.ports.ActivityUploadException
-import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.LocalDate
 
 @Component
@@ -34,11 +32,11 @@ class IntervalsIcuClient(
                 }.headers { headers -> headers.setBasicAuth("API_KEY", apiKey()) }
                 .retrieve()
                 .body(IntervalsAthleteProfileDto::class.java)
-                ?: throw WorkoutProviderUnavailableException(
+                ?: throw IntervalsIcuException(
                     "Intervals.icu athlete profile response was empty",
                 )
         } catch (exception: RestClientException) {
-            throw WorkoutProviderUnavailableException(
+            throw IntervalsIcuException(
                 "Intervals.icu athlete profile could not be read",
                 exception,
             )
@@ -55,11 +53,11 @@ class IntervalsIcuClient(
                 }.headers { headers -> headers.setBasicAuth("API_KEY", apiKey()) }
                 .retrieve()
                 .body(IntervalsSportSettingsDto::class.java)
-                ?: throw WorkoutProviderUnavailableException(
+                ?: throw IntervalsIcuException(
                     "Intervals.icu sport settings response was empty",
                 )
         } catch (exception: RestClientException) {
-            throw WorkoutProviderUnavailableException(
+            throw IntervalsIcuException(
                 "Intervals.icu sport settings could not be read",
                 exception,
             )
@@ -81,7 +79,7 @@ class IntervalsIcuClient(
                 .body(object : ParameterizedTypeReference<List<IntervalsCalendarEventDto>>() {})
                 ?: emptyList()
         } catch (exception: RestClientException) {
-            throw WorkoutProviderUnavailableException(
+            throw IntervalsIcuException(
                 "Intervals.icu calendar workouts could not be read",
                 exception,
             )
@@ -102,7 +100,7 @@ class IntervalsIcuClient(
                 .body(object : ParameterizedTypeReference<List<IntervalsActivityDto>>() {})
                 ?: emptyList()
         } catch (exception: RestClientException) {
-            throw WorkoutProviderUnavailableException(
+            throw IntervalsIcuException(
                 "Intervals.icu completed activities could not be read",
                 exception,
             )
@@ -161,21 +159,18 @@ class IntervalsIcuClient(
             response
         } catch (exception: RestClientException) {
             logUploadFailure(exception, fileName, externalId)
-            throw ActivityUploadException(
+            throw IntervalsIcuException(
                 "Intervals.icu activity upload failed",
                 exception,
             )
-        } catch (exception: WorkoutProviderUnavailableException) {
+        } catch (exception: IntervalsIcuException) {
             logger.warn(
                 "Intervals.icu activity upload could not start: externalId={}, fileName={}, reason={}",
                 externalId,
                 fileName,
                 exception.message,
             )
-            throw ActivityUploadException(
-                exception.message ?: "Intervals.icu API key is not configured",
-                exception,
-            )
+            throw exception
         } catch (exception: IllegalArgumentException) {
             logger.warn(
                 "Intervals.icu activity upload could not be prepared: externalId={}, fileName={}, reason={}",
@@ -184,7 +179,7 @@ class IntervalsIcuClient(
                 exception.message,
                 exception,
             )
-            throw ActivityUploadException(
+            throw IntervalsIcuException(
                 "Intervals.icu activity upload could not be prepared",
                 exception,
             )
@@ -229,7 +224,7 @@ class IntervalsIcuClient(
                 .body(object : ParameterizedTypeReference<List<IntervalsLibraryWorkoutDto>>() {})
                 ?: emptyList()
         } catch (exception: RestClientException) {
-            throw WorkoutProviderUnavailableException(
+            throw IntervalsIcuException(
                 "Intervals.icu workout library could not be read",
                 exception,
             )
@@ -249,7 +244,7 @@ class IntervalsIcuClient(
         } catch (exception: HttpClientErrorException.NotFound) {
             null
         } catch (exception: RestClientException) {
-            throw WorkoutProviderUnavailableException(
+            throw IntervalsIcuException(
                 "Intervals.icu workout could not be read",
                 exception,
             )
@@ -259,7 +254,7 @@ class IntervalsIcuClient(
         val apiKey =
             properties.apiKey
                 ?.takeIf { it.isNotBlank() }
-                ?: throw WorkoutProviderUnavailableException(
+                ?: throw IntervalsIcuException(
                     "Intervals.icu API key is not configured",
                 )
 

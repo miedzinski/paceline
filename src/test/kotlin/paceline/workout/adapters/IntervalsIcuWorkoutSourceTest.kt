@@ -1,22 +1,53 @@
 package paceline.workout.adapters
 
 import org.springframework.http.HttpMethod
+import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.web.client.MockRestServiceServer
 import org.springframework.test.web.client.match.MockRestRequestMatchers.header
 import org.springframework.test.web.client.match.MockRestRequestMatchers.method
 import org.springframework.test.web.client.match.MockRestRequestMatchers.queryParam
 import org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo
+import org.springframework.test.web.client.response.MockRestResponseCreators.withStatus
 import org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess
 import org.springframework.web.client.RestClient
 import paceline.intervals.adapters.IntervalsIcuClient
+import paceline.intervals.adapters.IntervalsIcuException
 import paceline.intervals.config.IntervalsIcuProperties
+import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.LocalDate
 import java.util.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 
 class IntervalsIcuWorkoutSourceTest {
+    @Test
+    fun `provider failures are translated to the workout port exception`() {
+        // given Intervals.icu rejects the completed-activity request:
+        val (client, server) = createClient()
+        val source = IntervalsIcuWorkoutSource(client)
+        val date = LocalDate.of(2026, 9, 14)
+        server
+            .expect(
+                requestTo(
+                    "http://intervals.test/api/v1/athlete/0/activities?oldest=2026-09-14&newest=2026-09-14",
+                ),
+            ).andRespond(withStatus(HttpStatus.BAD_GATEWAY))
+
+        // when today's uncompleted workouts are requested:
+        val exception =
+            assertFailsWith<WorkoutProviderUnavailableException> {
+                source.uncompletedFor(date)
+            }
+
+        // then the workout slice exposes its own provider boundary exception:
+        server.verify()
+        assertEquals("Intervals.icu completed activities could not be read", exception.message)
+        assertIs<IntervalsIcuException>(exception.cause)
+    }
+
     @Test
     fun `today hides calendar workouts paired with completed activities`() {
         // given Intervals.icu has one completed activity paired to the first calendar event:

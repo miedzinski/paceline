@@ -3,12 +3,12 @@ package paceline.profile.adapters
 import org.springframework.stereotype.Component
 import paceline.intervals.adapters.IntervalsAthleteSummaryDto
 import paceline.intervals.adapters.IntervalsIcuClient
+import paceline.intervals.adapters.IntervalsIcuException
 import paceline.intervals.adapters.IntervalsSportSettingsDto
 import paceline.profile.domain.AthleteProfile
 import paceline.profile.domain.PowerZoneCalculator
 import paceline.profile.ports.AthleteProfileSource
 import paceline.profile.ports.ProfileProviderUnavailableException
-import paceline.workout.ports.WorkoutProviderUnavailableException
 
 @Component
 class IntervalsIcuProfileSource(
@@ -19,7 +19,7 @@ class IntervalsIcuProfileSource(
             val athlete = client.athleteProfile().athlete
             val cyclingSettings = client.sportSettings(CYCLING_SPORT)
             athlete.toProfile(cyclingSettings)
-        } catch (exception: WorkoutProviderUnavailableException) {
+        } catch (exception: IntervalsIcuException) {
             throw ProfileProviderUnavailableException(
                 "Intervals.icu athlete profile could not be read",
                 exception,

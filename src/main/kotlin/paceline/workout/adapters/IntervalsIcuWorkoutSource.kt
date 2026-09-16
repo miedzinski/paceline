@@ -3,6 +3,7 @@ package paceline.workout.adapters
 import org.springframework.stereotype.Component
 import paceline.intervals.adapters.IntervalsCalendarEventDto
 import paceline.intervals.adapters.IntervalsIcuClient
+import paceline.intervals.adapters.IntervalsIcuException
 import paceline.intervals.adapters.IntervalsLibraryWorkoutDto
 import paceline.intervals.adapters.IntervalsWorkoutDocumentDto
 import paceline.intervals.adapters.IntervalsWorkoutStepDto
@@ -15,6 +16,7 @@ import paceline.workout.domain.WorkoutStepSummary
 import paceline.workout.domain.WorkoutTargetSummary
 import paceline.workout.ports.PlannedWorkoutCalendar
 import paceline.workout.ports.WorkoutLibrary
+import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.LocalDate
 import java.time.LocalDateTime
 import kotlin.math.roundToInt
@@ -27,32 +29,53 @@ class IntervalsIcuWorkoutSource(
 ) : PlannedWorkoutCalendar,
     WorkoutLibrary {
     override fun uncompletedFor(date: LocalDate): List<ScheduledWorkout> {
-        val completedEventIds =
-            client
-                .completedActivities(date)
-                .mapNotNull { it.pairedEventId }
-                .map(Long::toString)
-                .toSet()
+        try {
+            val completedEventIds =
+                client
+                    .completedActivities(date)
+                    .mapNotNull { it.pairedEventId }
+                    .map(Long::toString)
+                    .toSet()
 
-        val workouts =
-            client
-                .calendarEvents(date)
-                .filter { it.category.equals("WORKOUT", ignoreCase = true) }
-                .filterNot { it.id.toString() in completedEventIds }
-        val fallbackFtpWatts = fallbackFtpWatts(workouts.mapNotNull { it.workoutDocument })
-        return workouts.map { toScheduledWorkout(it, fallbackFtpWatts) }
+            val workouts =
+                client
+                    .calendarEvents(date)
+                    .filter { it.category.equals("WORKOUT", ignoreCase = true) }
+                    .filterNot { it.id.toString() in completedEventIds }
+            val fallbackFtpWatts = fallbackFtpWatts(workouts.mapNotNull { it.workoutDocument })
+            return workouts.map { toScheduledWorkout(it, fallbackFtpWatts) }
+        } catch (exception: IntervalsIcuException) {
+            throw WorkoutProviderUnavailableException(
+                exception.message ?: "Intervals.icu workouts could not be read",
+                exception,
+            )
+        }
     }
 
     override fun list(): List<LibraryWorkout> {
-        val workouts = client.libraryWorkouts()
-        val fallbackFtpWatts = fallbackFtpWatts(workouts.mapNotNull { it.workoutDocument })
-        return workouts.map { toLibraryWorkout(it, fallbackFtpWatts) }
+        try {
+            val workouts = client.libraryWorkouts()
+            val fallbackFtpWatts = fallbackFtpWatts(workouts.mapNotNull { it.workoutDocument })
+            return workouts.map { toLibraryWorkout(it, fallbackFtpWatts) }
+        } catch (exception: IntervalsIcuException) {
+            throw WorkoutProviderUnavailableException(
+                exception.message ?: "Intervals.icu workout library could not be read",
+                exception,
+            )
+        }
     }
 
     override fun find(workoutId: String): LibraryWorkout? {
-        val workout = client.libraryWorkout(workoutId) ?: return null
-        val fallbackFtpWatts = fallbackFtpWatts(listOfNotNull(workout.workoutDocument))
-        return toLibraryWorkout(workout, fallbackFtpWatts)
+        try {
+            val workout = client.libraryWorkout(workoutId) ?: return null
+            val fallbackFtpWatts = fallbackFtpWatts(listOfNotNull(workout.workoutDocument))
+            return toLibraryWorkout(workout, fallbackFtpWatts)
+        } catch (exception: IntervalsIcuException) {
+            throw WorkoutProviderUnavailableException(
+                exception.message ?: "Intervals.icu workout could not be read",
+                exception,
+            )
+        }
     }
 
     private fun toScheduledWorkout(

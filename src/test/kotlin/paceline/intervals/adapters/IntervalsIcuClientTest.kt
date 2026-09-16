@@ -12,11 +12,32 @@ import org.springframework.test.web.client.match.MockRestRequestMatchers.request
 import org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess
 import org.springframework.web.client.RestClient
 import paceline.intervals.config.IntervalsIcuProperties
+import java.time.LocalDate
 import java.util.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class IntervalsIcuClientTest {
+    @Test
+    fun `missing api key is reported as an intervals integration failure`() {
+        // given an Intervals.icu client without a configured API key:
+        val client =
+            IntervalsIcuClient(
+                RestClient.builder().baseUrl("http://intervals.test").build(),
+                IntervalsIcuProperties(baseUrl = "http://intervals.test"),
+            )
+
+        // when the client is asked to read completed activities:
+        val exception =
+            assertFailsWith<IntervalsIcuException> {
+                client.completedActivities(LocalDate.of(2026, 9, 14))
+            }
+
+        // then the integration slice owns the transport failure:
+        assertEquals("Intervals.icu API key is not configured", exception.message)
+    }
+
     @Test
     fun `activity upload sends a multipart file with api key authentication`() {
         // given an Intervals.icu client pointed at a controlled HTTP fixture:

@@ -2,8 +2,10 @@ package paceline.training.adapters
 
 import org.springframework.stereotype.Component
 import paceline.intervals.adapters.IntervalsIcuClient
+import paceline.intervals.adapters.IntervalsIcuException
 import paceline.training.domain.RecordedTrainingActivity
 import paceline.training.ports.ActivityFileEncoder
+import paceline.training.ports.ActivityUploadException
 import paceline.training.ports.ActivityUploadReceipt
 import paceline.training.ports.ActivityUploader
 import paceline.workout.domain.WorkoutSourceType
@@ -16,15 +18,22 @@ class IntervalsIcuActivityUploader(
     override fun upload(activity: RecordedTrainingActivity): ActivityUploadReceipt {
         val file = encoder.encode(activity)
         val response =
-            client.uploadActivity(
-                fileName = file.fileName,
-                contentType = file.contentType,
-                content = file.content,
-                name = activity.name,
-                description = "Recorded by Paceline",
-                externalId = activity.sessionId.toString(),
-                pairedEventId = activity.pairedEventId(),
-            )
+            try {
+                client.uploadActivity(
+                    fileName = file.fileName,
+                    contentType = file.contentType,
+                    content = file.content,
+                    name = activity.name,
+                    description = "Recorded by Paceline",
+                    externalId = activity.sessionId.toString(),
+                    pairedEventId = activity.pairedEventId(),
+                )
+            } catch (exception: IntervalsIcuException) {
+                throw ActivityUploadException(
+                    exception.message ?: "Intervals.icu activity upload failed",
+                    exception,
+                )
+            }
         return ActivityUploadReceipt(
             remoteActivityId = response?.id,
         )
