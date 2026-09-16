@@ -14,6 +14,8 @@ import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutStepCompletion
 import paceline.workout.domain.WorkoutStepTarget
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -81,7 +83,10 @@ class TrainingSessionCoordinator(
         ergSpiralDetector.reset(now)
         val progress = workout?.let { TrainingWorkoutProgress.firstStep(it, now) }
         val initialFreeRide = workout == null || progress?.let(::isFreeRideStep) == true
-        val initialTarget = progress?.takeUnless(::isFreeRideStep)?.let { targetPower(it, now) }
+        val initialTarget =
+            progress
+                ?.takeUnless(::isFreeRideStep)
+                ?.let { targetPower(it, now, DEFAULT_WORKOUT_POWER_TARGET_PERCENT) }
         if (initialFreeRide) {
             setFreeRide(powerControl, "initial Free Ride")
         } else if (initialTarget != null) {
@@ -112,6 +117,7 @@ class TrainingSessionCoordinator(
                     controlMode = if (initialFreeRide) TrainingControlMode.FREE_RIDE else TrainingControlMode.ERG,
                     ergRequestedTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
                     ergTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
+                    workoutPowerTargetPercent = workout?.let { DEFAULT_WORKOUT_POWER_TARGET_PERCENT },
                     heartRateSourceId = selectedHeartRateSourceId,
                     heartRate = selectedHeartRateSourceId?.let(trainingDevice::currentHeartRate),
                 )
@@ -138,6 +144,87 @@ class TrainingSessionCoordinator(
         completedActivity = null
         pausedControlMode = null
         pausedErgTargetPowerWatts = null
+        return state
+    }
+
+    @Synchronized
+    fun adjustWorkoutTarget(
+        sessionId: UUID,
+        deltaPercent: Long,
+    ): TrainingSessionState {
+        val activeState = requireActiveSession(sessionId)
+        val progress =
+            activeState.workout
+                ?: throw WorkoutTargetAdjustmentNotAllowedException(
+                    "The active session has no executable workout",
+                )
+        if (progress.completed || activeWorkout == null) {
+            throw WorkoutTargetAdjustmentNotAllowedException(
+                "The workout has already completed",
+            )
+        }
+        if (activeState.ergProtection.status == ErgProtectionStatus.UNAVAILABLE) {
+            throw TrainingSessionUnavailableException(
+                "The workout target cannot change while ERG protection is unavailable",
+            )
+        }
+        if (activeState.ergProtection.status == ErgProtectionStatus.RECOVERY_FAILED) {
+            throw TrainingSessionUnavailableException(
+                "The workout target cannot change while ERG recovery has failed",
+            )
+        }
+        if (deltaPercent == 0L) {
+            return activeState
+        }
+
+        val currentPercent =
+            activeState.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT
+        val nextPercent = addWorkoutTargetPercent(currentPercent, deltaPercent)
+        val changedAt = clock.instant()
+        val nextFreeRide = isFreeRideStep(progress)
+        val nextTarget = targetPower(progress, changedAt, nextPercent)
+
+        if (nextFreeRide) {
+            state =
+                activeState.copy(
+                    changedAt = changedAt,
+                    workoutPowerTargetPercent = nextPercent,
+                )
+            recordWorkoutTargetAdjustment(changedAt, nextPercent, null)
+            return state
+        }
+
+        if (activeState.ergProtection.status != ErgProtectionStatus.INACTIVE) {
+            ergSpiralDetector.reset(changedAt)
+            state =
+                activeState.copy(
+                    changedAt = changedAt,
+                    ergRequestedTargetPowerWatts = nextTarget,
+                    ergTargetPowerWatts =
+                        if (nextTarget <= 0) 0 else activeState.ergTargetPowerWatts,
+                    workoutPowerTargetPercent = nextPercent,
+                    ergProtection =
+                        if (isErgProtectionActive() && nextTarget <= 0) {
+                            ErgProtectionState.inactive()
+                        } else {
+                            activeState.ergProtection
+                        },
+                )
+            recordWorkoutTargetAdjustment(changedAt, nextPercent, nextTarget)
+            return state
+        }
+
+        setTarget(requireActivePowerControl(), nextTarget, "workout target adjustment")
+        ergSpiralDetector.reset(changedAt)
+        state =
+            activeState.copy(
+                changedAt = changedAt,
+                controlMode = TrainingControlMode.ERG,
+                ergRequestedTargetPowerWatts = nextTarget,
+                ergTargetPowerWatts = nextTarget,
+                workoutPowerTargetPercent = nextPercent,
+            )
+        recordWorkoutTargetAdjustment(changedAt, nextPercent, nextTarget)
         return state
     }
 
@@ -405,6 +492,7 @@ class TrainingSessionCoordinator(
                 controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = 0,
                 ergTargetPowerWatts = 0,
+                workoutPowerTargetPercent = null,
                 ergProtection = ErgProtectionState.inactive(),
                 activityUpload =
                     if (completedActivity?.samples?.isNotEmpty() == true) {
@@ -594,6 +682,7 @@ class TrainingSessionCoordinator(
                     controlMode = TrainingControlMode.FREE_RIDE,
                     ergRequestedTargetPowerWatts = null,
                     ergTargetPowerWatts = null,
+                    workoutPowerTargetPercent = null,
                     ergProtection = ErgProtectionState.inactive(),
                     workout = progress.copy(completed = true),
                 )
@@ -664,32 +753,65 @@ class TrainingSessionCoordinator(
     private fun targetPower(
         progress: TrainingWorkoutProgress,
         at: Instant,
-    ): Int =
-        when (val target = progress.step.target) {
-            is WorkoutStepTarget.Power -> {
-                ((target.lowWatts.toLong() + target.highWatts.toLong()) / 2.0).roundToInt()
-            }
+        targetPercent: Long =
+            state.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT,
+    ): Int {
+        val prescribedTarget =
+            when (val target = progress.step.target) {
+                is WorkoutStepTarget.Power -> {
+                    ((target.lowWatts.toLong() + target.highWatts.toLong()) / 2.0).roundToInt()
+                }
 
-            is WorkoutStepTarget.Ramp -> {
-                val completion =
-                    progress.step.completion as? WorkoutStepCompletion.Time
-                        ?: throw IllegalStateException("A ramp target must have a timed completion condition")
-                val durationMillis = completion.seconds.toLong() * MILLIS_PER_SECOND
-                val elapsedMillis =
-                    Duration
-                        .between(progress.stepStartedAt, at)
-                        .toMillis()
-                        .coerceIn(0L, durationMillis)
-                val fraction = elapsedMillis.toDouble() / durationMillis
-                (
-                    target.startWatts.toDouble() +
-                        (target.endWatts - target.startWatts) * fraction
-                ).roundToInt()
-            }
+                is WorkoutStepTarget.Ramp -> {
+                    val completion =
+                        progress.step.completion as? WorkoutStepCompletion.Time
+                            ?: throw IllegalStateException("A ramp target must have a timed completion condition")
+                    val durationMillis = completion.seconds.toLong() * MILLIS_PER_SECOND
+                    val elapsedMillis =
+                        Duration
+                            .between(progress.stepStartedAt, at)
+                            .toMillis()
+                            .coerceIn(0L, durationMillis)
+                    val fraction = elapsedMillis.toDouble() / durationMillis
+                    (
+                        target.startWatts.toDouble() +
+                            (target.endWatts - target.startWatts) * fraction
+                    ).roundToInt()
+                }
 
-            WorkoutStepTarget.Open -> {
-                0
+                WorkoutStepTarget.Open -> {
+                    0
+                }
             }
+        return adjustTargetPower(prescribedTarget, targetPercent)
+    }
+
+    private fun adjustTargetPower(
+        prescribedTargetWatts: Int,
+        targetPercent: Long,
+    ): Int {
+        if (prescribedTargetWatts <= 0 || targetPercent <= 0L) {
+            return 0
+        }
+
+        val adjustedTarget =
+            BigDecimal
+                .valueOf(prescribedTargetWatts.toLong())
+                .multiply(BigDecimal.valueOf(targetPercent))
+                .divide(BigDecimal.valueOf(100L), 0, RoundingMode.HALF_UP)
+        return adjustedTarget
+            .min(BigDecimal.valueOf(Short.MAX_VALUE.toLong()))
+            .intValueExact()
+    }
+
+    private fun addWorkoutTargetPercent(
+        currentPercent: Long,
+        deltaPercent: Long,
+    ): Long =
+        when {
+            deltaPercent > 0L && currentPercent > Long.MAX_VALUE - deltaPercent -> Long.MAX_VALUE
+            deltaPercent < 0L && currentPercent < Long.MIN_VALUE - deltaPercent -> Long.MIN_VALUE
+            else -> currentPercent + deltaPercent
         }
 
     private fun isFreeRideStep(progress: TrainingWorkoutProgress): Boolean = progress.step.target is WorkoutStepTarget.Open
@@ -1104,8 +1226,27 @@ class TrainingSessionCoordinator(
         )
     }
 
+    private fun recordWorkoutTargetAdjustment(
+        occurredAt: Instant,
+        targetPercent: Long,
+        targetPowerWatts: Int?,
+    ) {
+        val sessionId = state.sessionId ?: return
+        activityRecorder.recordEvent(
+            sessionId = sessionId,
+            event =
+                TrainingActivityEvent(
+                    type = TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED,
+                    occurredAt = occurredAt,
+                    workoutPowerTargetPercent = targetPercent,
+                    targetPowerWatts = targetPowerWatts,
+                ),
+        )
+    }
+
     private companion object {
         const val MILLIS_PER_SECOND = 1_000L
+        const val DEFAULT_WORKOUT_POWER_TARGET_PERCENT = 100L
     }
 
     private fun activitySegmentName(

@@ -349,6 +349,145 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
+    fun `adjusts every workout power step from the session target percentage`() {
+        // given a workout with two fixed power steps:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val workout =
+            workout(
+                timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
+                timedStep("Recovery", seconds = 10, lowWatts = 100, highWatts = 100),
+            )
+        val started = session.start(workout)
+        val sessionId = requireNotNull(started.sessionId)
+
+        // when the target is increased by one percent and the first step completes:
+        val increased = session.adjustWorkoutTarget(sessionId, 1L)
+        val nextStep = session.tick(now.plusSeconds(10))
+
+        // then the adjustment applies immediately and carries into the next step:
+        assertEquals(100L, started.workoutPowerTargetPercent)
+        assertEquals(101L, increased.workoutPowerTargetPercent)
+        assertEquals(253, increased.ergTargetPowerWatts)
+        assertEquals(101, nextStep.ergRequestedTargetPowerWatts)
+        assertEquals(101, nextStep.ergTargetPowerWatts)
+        assertEquals(101L, nextStep.workoutPowerTargetPercent)
+        assertEquals(listOf(250, 253, 101), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `adjusts ascending and descending ramp targets without changing their progression`() {
+        // given a timed ramp workout:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val workout =
+            workout(
+                ExecutableWorkoutStep(
+                    text = "Ramp",
+                    completion = WorkoutStepCompletion.Time(10),
+                    target = WorkoutStepTarget.Ramp(startWatts = 200, endWatts = 100),
+                ),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+
+        // when the ramp is reduced by one percent and observed at its midpoint:
+        val reduced = session.adjustWorkoutTarget(sessionId, -1L)
+        val midpoint = session.tick(now.plusSeconds(5))
+        val completed = session.tick(now.plusSeconds(10))
+
+        // then the percentage is applied to each interpolated target and the ramp still descends:
+        assertEquals(99L, reduced.workoutPowerTargetPercent)
+        assertEquals(198, reduced.ergTargetPowerWatts)
+        assertEquals(149, midpoint.ergTargetPowerWatts)
+        assertEquals(listOf(200, 198, 149), powerControl.targetPowers)
+        assertEquals(TrainingControlMode.FREE_RIDE, completed.controlMode)
+    }
+
+    @Test
+    fun `adjusts the retained target while ERG protection is active`() {
+        // given a workout that has released resistance after a sustained low cadence:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val mutableClock = MutableTestClock(now)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = mutableClock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                    ),
+            )
+        val workout = workout(timedStep("Hard", seconds = 10, lowWatts = 300, highWatts = 300))
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+        session.tick(now.plusSeconds(1), lowCadence)
+
+        // when the target is increased during protection and cadence then recovers:
+        val adjusted = session.adjustWorkoutTarget(sessionId, 1L)
+        val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
+        trainingDevice.emitTelemetry(highCadence)
+        session.tick(now.plusSeconds(1), highCadence)
+        val recovered = session.tick(now.plusSeconds(2), highCadence)
+
+        // then recovery reapplies the adjusted target instead of the original prescription:
+        assertEquals(101L, adjusted.workoutPowerTargetPercent)
+        assertEquals(303, adjusted.ergRequestedTargetPowerWatts)
+        assertEquals(0, adjusted.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.BAILED_OUT, adjusted.ergProtection.status)
+        assertEquals(303, recovered.ergRequestedTargetPowerWatts)
+        assertEquals(303, recovered.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
+        assertEquals(listOf(300, 0, 303), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `allows the target percentage to exceed ordinary intensity ranges while clamping device watts`() {
+        // given a fixed workout target:
+        val powerControl = FakeIndoorBikePowerControl()
+        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
+
+        // when a large positive percentage adjustment is requested:
+        val increased = session.adjustWorkoutTarget(sessionId, 1_000_000L)
+
+        // then no artificial intensity bound is applied, while the FTMS target remains representable:
+        assertEquals(1_000_100L, increased.workoutPowerTargetPercent)
+        assertEquals(Short.MAX_VALUE.toInt(), increased.ergTargetPowerWatts)
+        assertEquals(listOf(200, Short.MAX_VALUE.toInt()), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `records workout target adjustments in the uploaded activity`() {
+        // given an active workout with an in-memory activity uploader:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val uploader = FakeActivityUploader()
+        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
+
+        // when the target is adjusted and the session is stopped and uploaded:
+        session.adjustWorkoutTarget(sessionId, 1L)
+        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then the executed percentage and target remain reconstructable:
+        val event =
+            uploader
+                .uploads
+                .single()
+                .events
+                .single()
+        assertEquals(TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED, event.type)
+        assertEquals(101L, event.workoutPowerTargetPercent)
+        assertEquals(202, event.targetPowerWatts)
+    }
+
+    @Test
     fun `stopping records each telemetry notification once and uploads the in-memory activity`() {
         // given an active session and an uploader that records the submitted activity:
         val powerControl = FakeIndoorBikePowerControl()

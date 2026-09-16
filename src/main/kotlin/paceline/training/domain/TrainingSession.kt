@@ -82,6 +82,8 @@ data class TrainingSessionState(
     val ergRequestedTargetPowerWatts: Int? = null,
     /** The target most recently accepted by the device, or null when it is unknown. */
     val ergTargetPowerWatts: Int? = null,
+    /** The percentage of the prescribed target used for the active workout. */
+    val workoutPowerTargetPercent: Long? = null,
     val ergProtection: ErgProtectionState = ErgProtectionState.inactive(),
     val heartRateSourceId: String? = null,
     val heartRate: HeartRateTelemetry? = null,
@@ -137,6 +139,10 @@ class TrainingSessionMismatchException(
 ) : IllegalArgumentException("Training session $sessionId is not the active session")
 
 class WorkoutTargetManagedException : IllegalStateException("The active workout controls the ERG target")
+
+class WorkoutTargetAdjustmentNotAllowedException(
+    message: String = "The active workout has no adjustable power target",
+) : IllegalStateException(message)
 
 class WorkoutStepAdvanceNotAllowedException(
     message: String,

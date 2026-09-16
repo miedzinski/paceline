@@ -61,16 +61,22 @@ enum class TrainingActivityEventType {
     ERG_PROTECTION_STARTED,
     ERG_PROTECTION_ENDED,
     ERG_PROTECTION_FAILED,
+    WORKOUT_TARGET_ADJUSTED,
 }
 
 data class TrainingActivityEvent(
     val type: TrainingActivityEventType,
     val occurredAt: Instant,
     val cadenceRpm: Double? = null,
+    val workoutPowerTargetPercent: Long? = null,
+    val targetPowerWatts: Int? = null,
 ) {
     init {
         require(cadenceRpm == null || (cadenceRpm.isFinite() && cadenceRpm >= 0.0)) {
             "An activity event cadence must be finite and non-negative"
+        }
+        require(targetPowerWatts == null || targetPowerWatts in 0..Short.MAX_VALUE.toInt()) {
+            "An activity event target must fit the non-negative FTMS signed 16-bit watt field"
         }
     }
 }

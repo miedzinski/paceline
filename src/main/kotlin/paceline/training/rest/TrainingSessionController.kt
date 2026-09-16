@@ -24,6 +24,7 @@ import paceline.training.domain.TrainingSessionState
 import paceline.training.domain.TrainingSessionUnavailableException
 import paceline.training.domain.TrainingWorkoutProgress
 import paceline.training.domain.WorkoutStepAdvanceNotAllowedException
+import paceline.training.domain.WorkoutTargetAdjustmentNotAllowedException
 import paceline.training.domain.WorkoutTargetManagedException
 import paceline.training.ports.ActivityUploadException
 import paceline.workout.domain.WorkoutCatalog
@@ -114,6 +115,27 @@ class TrainingSessionController(
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         } catch (exception: IllegalArgumentException) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, exception.message, exception)
+        }
+
+    @PostMapping(
+        "/{sessionId}/workout-target-adjustment",
+        consumes = [MediaType.APPLICATION_JSON_VALUE],
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun adjustWorkoutTarget(
+        @PathVariable sessionId: UUID,
+        @RequestBody request: AdjustWorkoutTargetRequest,
+    ): TrainingSessionResponse =
+        try {
+            coordinator.adjustWorkoutTarget(sessionId, request.deltaPercent).toResponse()
+        } catch (exception: TrainingSessionNotActiveException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionMismatchException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: WorkoutTargetAdjustmentNotAllowedException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         }
 
     @PostMapping(
@@ -225,6 +247,10 @@ data class SetErgTargetRequest(
     val powerWatts: Int,
 )
 
+data class AdjustWorkoutTargetRequest(
+    val deltaPercent: Long,
+)
+
 data class TrainingSessionResponse(
     val state: String,
     val sessionId: UUID?,
@@ -233,6 +259,7 @@ data class TrainingSessionResponse(
     val controlMode: String,
     val ergRequestedTargetPowerWatts: Int?,
     val ergTargetPowerWatts: Int?,
+    val workoutPowerTargetPercent: Long?,
     val ergProtection: ErgProtectionResponse,
     val heartRateSourceId: String?,
     val heartRate: HeartRateResponse?,
@@ -301,6 +328,7 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
         controlMode = controlMode.name,
         ergRequestedTargetPowerWatts = ergRequestedTargetPowerWatts,
         ergTargetPowerWatts = ergTargetPowerWatts,
+        workoutPowerTargetPercent = workoutPowerTargetPercent,
         ergProtection = ergProtection.toResponse(),
         heartRateSourceId = heartRateSourceId,
         heartRate =

@@ -242,6 +242,42 @@ class FitActivityFileEncoderTest {
         assertEquals(62, events[2].getFieldIntegerValue(EventMesg.Data16FieldNum))
     }
 
+    @Test
+    fun `activity file preserves workout target adjustments as timeline markers`() {
+        // given a ride whose workout target was increased during execution:
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+                startedAt = Instant.parse("2026-09-14T12:00:00Z"),
+                stoppedAt = Instant.parse("2026-09-14T12:00:02Z"),
+                name = "Adjusted ride",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples = listOf(sample("2026-09-14T12:00:00Z", 1_000.0, 200)),
+                events =
+                    listOf(
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED,
+                            occurredAt = Instant.parse("2026-09-14T12:00:01Z"),
+                            workoutPowerTargetPercent = 101L,
+                            targetPowerWatts = 202,
+                        ),
+                    ),
+            )
+
+        // when the activity is encoded as FIT:
+        val events = decode(encoder.encode(activity)).filter { it.name == "event" }
+
+        // then the adjustment is visible as a user marker carrying its percentage and target watts:
+        assertEquals(
+            listOf(EventType.START, EventType.MARKER, EventType.STOP_ALL),
+            events.map { EventType.getByValue(it.getFieldShortValue(EventMesg.EventTypeFieldNum)) },
+        )
+        assertEquals(Event.USER_MARKER, Event.getByValue(events[1].getFieldShortValue(EventMesg.EventFieldNum)))
+        assertEquals(202, events[1].getFieldIntegerValue(EventMesg.Data16FieldNum))
+        assertEquals(101L, events[1].getFieldLongValue(EventMesg.DataFieldNum))
+    }
+
     private fun decode(file: ActivityFile): List<Mesg> {
         val messages = mutableListOf<Mesg>()
         val decoded =

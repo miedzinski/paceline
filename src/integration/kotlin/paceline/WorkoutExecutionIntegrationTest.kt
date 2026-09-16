@@ -22,6 +22,7 @@ import paceline.workout.domain.ScheduledWorkout
 import paceline.workout.domain.WorkoutPlanSummary
 import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutStepSummary
+import paceline.workout.domain.WorkoutTargetSummary
 import paceline.workout.ports.PlannedWorkoutCalendar
 import paceline.workout.ports.WorkoutLibrary
 import java.time.Instant
@@ -238,6 +239,71 @@ class WorkoutExecutionIntegrationTest {
         assertTrue(uploaded.contains("\"activityUpload\":{\"state\":\"UPLOADED\""))
         assertEquals(1, activityUploader.uploads.size)
     }
+
+    @Test
+    fun `active workout target adjustment changes the trainer target and carries across steps`() {
+        // given a scheduled workout with two power steps:
+        val request =
+            """
+            {
+              "workout": {
+                "provider": "test-provider",
+                "sourceType": "SCHEDULED",
+                "sourceId": "event-2"
+              }
+            }
+            """.trimIndent()
+        val started =
+            restClient
+                .post()
+                .uri("/training-sessions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(request)
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val sessionId =
+            Regex("\"sessionId\":\"([^\"]+)\"")
+                .find(started)
+                ?.groupValues
+                ?.get(1)
+                ?: error("No session id in response: $started")
+
+        // when the target is increased through the REST control and the first step is advanced:
+        val adjusted =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/workout-target-adjustment")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("{\"deltaPercent\":1}")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val nextStep =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/advance")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+
+        // then the API exposes the adjustment and the next step keeps using it:
+        assertTrue(started.contains("\"workoutPowerTargetPercent\":100"))
+        assertTrue(adjusted.contains("\"workoutPowerTargetPercent\":101"))
+        assertTrue(adjusted.contains("\"ergTargetPowerWatts\":202"))
+        assertTrue(nextStep.contains("\"workoutPowerTargetPercent\":101"))
+        assertTrue(nextStep.contains("\"ergTargetPowerWatts\":101"))
+        assertEquals(listOf(200, 202, 101), powerControl.targetPowers)
+    }
 }
 
 @TestConfiguration(proxyBeanMethods = false)
@@ -297,6 +363,85 @@ class WorkoutExecutionIntegrationTestConfiguration {
                                                 maxEffort = null,
                                                 hidePower = null,
                                                 power = null,
+                                                resolvedPower = null,
+                                                heartRate = null,
+                                                resolvedHeartRate = null,
+                                                pace = null,
+                                                resolvedPace = null,
+                                                cadence = null,
+                                                resolvedDistanceMeters = null,
+                                                steps = emptyList(),
+                                            ),
+                                        ),
+                                ),
+                        ),
+                        ScheduledWorkout(
+                            reference = WorkoutSourceReference("test-provider", "event-2"),
+                            name = "Power steps",
+                            description = null,
+                            type = "Ride",
+                            startAt = null,
+                            endAt = null,
+                            indoor = true,
+                            durationSeconds = 20,
+                            distanceMeters = null,
+                            trainingLoad = null,
+                            target = "POWER",
+                            workout =
+                                WorkoutPlanSummary(
+                                    description = null,
+                                    durationSeconds = 20,
+                                    distanceMeters = null,
+                                    ftpWatts = null,
+                                    thresholdHeartRateBpm = null,
+                                    target = "POWER",
+                                    steps =
+                                        listOf(
+                                            WorkoutStepSummary(
+                                                text = "Work",
+                                                durationSeconds = 10,
+                                                distanceMeters = null,
+                                                repeats = null,
+                                                warmup = null,
+                                                cooldown = null,
+                                                intensity = null,
+                                                ramp = null,
+                                                untilLapPress = true,
+                                                freeRide = null,
+                                                maxEffort = null,
+                                                hidePower = null,
+                                                power =
+                                                    WorkoutTargetSummary(
+                                                        value = 200.0,
+                                                        units = "W",
+                                                    ),
+                                                resolvedPower = null,
+                                                heartRate = null,
+                                                resolvedHeartRate = null,
+                                                pace = null,
+                                                resolvedPace = null,
+                                                cadence = null,
+                                                resolvedDistanceMeters = null,
+                                                steps = emptyList(),
+                                            ),
+                                            WorkoutStepSummary(
+                                                text = "Recovery",
+                                                durationSeconds = 10,
+                                                distanceMeters = null,
+                                                repeats = null,
+                                                warmup = null,
+                                                cooldown = null,
+                                                intensity = null,
+                                                ramp = null,
+                                                untilLapPress = true,
+                                                freeRide = null,
+                                                maxEffort = null,
+                                                hidePower = null,
+                                                power =
+                                                    WorkoutTargetSummary(
+                                                        value = 100.0,
+                                                        units = "W",
+                                                    ),
                                                 resolvedPower = null,
                                                 heartRate = null,
                                                 resolvedHeartRate = null,

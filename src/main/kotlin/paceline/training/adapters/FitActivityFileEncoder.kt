@@ -158,17 +158,32 @@ class FitActivityFileEncoder : ActivityFileEncoder {
     private fun TrainingActivityEvent.eventMessage(): EventMesg =
         EventMesg().apply {
             timestamp = occurredAt.toFitDateTime()
-            event = Event.CAD_LOW_ALERT
+            event =
+                if (type == TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED) {
+                    Event.USER_MARKER
+                } else {
+                    Event.CAD_LOW_ALERT
+                }
             eventType =
                 when (type) {
                     TrainingActivityEventType.ERG_PROTECTION_STARTED -> EventType.START
                     TrainingActivityEventType.ERG_PROTECTION_ENDED -> EventType.STOP
                     TrainingActivityEventType.ERG_PROTECTION_FAILED -> EventType.MARKER
+                    TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED -> EventType.MARKER
                 }
-            cadenceRpm
-                ?.roundToInt()
-                ?.coerceIn(FIT_UINT16_RANGE)
-                ?.let { data16 = it }
+            if (type == TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED) {
+                targetPowerWatts
+                    ?.coerceIn(FIT_UINT16_RANGE)
+                    ?.let { data16 = it }
+                workoutPowerTargetPercent
+                    ?.takeIf { it in 0L..UINT32_MAX }
+                    ?.let { data = it }
+            } else {
+                cadenceRpm
+                    ?.roundToInt()
+                    ?.coerceIn(FIT_UINT16_RANGE)
+                    ?.let { data16 = it }
+            }
         }
 
     private fun RecordedTrainingActivity.sessionMessage(
