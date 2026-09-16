@@ -2,62 +2,48 @@ package paceline.training.domain
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import paceline.device.domain.HeartRateSourceDescriptor
 import paceline.device.domain.HeartRateTelemetry
 import paceline.device.domain.IndoorBikeTelemetry
-import paceline.device.ports.IndoorBikePowerControl
 import paceline.training.config.ErgProtectionProperties
 import paceline.training.ports.ActivityUploadException
 import paceline.training.ports.ActivityUploader
 import paceline.training.ports.TrainingDevice
 import paceline.workout.domain.ExecutableWorkout
-import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutStepCompletion
-import paceline.workout.domain.WorkoutStepTarget
-import java.math.BigDecimal
-import java.math.RoundingMode
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CompletionStage
-import kotlin.math.roundToInt
 
 @Component
 class TrainingSessionCoordinator(
     private val trainingDevice: TrainingDevice,
     private val clock: Clock = Clock.systemUTC(),
-    private val activityUploader: ActivityUploader =
-        ActivityUploader {
-            throw ActivityUploadException("An Intervals.icu activity uploader is not configured")
-        },
-    private val ergProtectionProperties: ErgProtectionProperties = ErgProtectionProperties(),
+    private val activityUploader: ActivityUploader,
+    private val ergProtectionProperties: ErgProtectionProperties,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     private var state = TrainingSessionState.notStarted(clock.instant())
-    private var activePowerControl: IndoorBikePowerControl? = null
-    private var activeWorkout: ExecutableWorkout? = null
-    private var stepDistanceStartMeters: Double? = null
-    private var stepDistanceProgressAtPauseMeters: Double? = null
-    private var pausedAt: Instant? = null
-    private var pausedErgTargetPowerWatts: Int? = null
-    private var pausedControlMode: TrainingControlMode? = null
-    private var telemetryRegistration: AutoCloseable? = null
-    private var activeHeartRateSourceId: String? = null
-    private var heartRateRegistration: AutoCloseable? = null
-    private val activityRecorder = InMemoryTrainingActivityRecorder()
-    private var completedActivity: RecordedTrainingActivity? = null
-    private val ergSpiralDetector = ErgSpiralDetector(ergProtectionProperties)
-    private var connectionInterruptedAt: Instant? = null
-    private var nextConnectionRecoveryAt: Instant? = null
-    private var connectionRecoveryAttempt = 0
-    private var connectionRecovery: CompletionStage<IndoorBikePowerControl?>? = null
-    private var targetSynchronizationPending = false
-    private var targetSynchronizationAt: Instant? = null
-    private var pendingZeroPowerCommand = false
-    private var lastTelemetryReceivedAt: Instant? = null
-    private var telemetryObserved = false
+    private val workoutExecution = WorkoutExecution()
+    private val activitySession = TrainingActivitySession(trainingDevice)
+    private val heartRateSourceSelection = HeartRateSourceSelection(trainingDevice)
+    private val trainerConnection =
+        TrainerConnectionManager(
+            trainingDevice = trainingDevice,
+            clock = clock,
+            telemetryFreshness = ergProtectionProperties.telemetryFreshness,
+            onInterrupted = ::onTrainerConnectionInterrupted,
+            onRecovered = ::onTrainerConnectionRecovered,
+            recordActivityEvent = ::recordActivityEvent,
+        )
+    private val ergProtection =
+        ErgProtectionCoordinator(
+            properties = ergProtectionProperties,
+            setTarget = { powerWatts, description, at ->
+                trainerConnection.trySetTargetForExecution(powerWatts, description, at)
+            },
+            recordActivityEvent = ::recordActivityEvent,
+        )
 
     @Synchronized
     fun current(): TrainingSessionState {
@@ -73,56 +59,42 @@ class TrainingSessionCoordinator(
         if (state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED)) {
             throw TrainingSessionAlreadyActiveException()
         }
-        if (pendingZeroPowerCommand) {
+        if (trainerConnection.hasPendingZeroPowerCommand()) {
             throw TrainingSessionUnavailableException(
                 "The previous session is still waiting to confirm a 0 W trainer command",
             )
         }
 
-        val selectedHeartRateSourceId = resolveHeartRateSource(heartRateSourceId)
+        val selectedHeartRateSourceId = heartRateSourceSelection.resolve(heartRateSourceId)
 
         val powerControl =
-            trainingDevice.currentPowerControl()
+            trainerConnection.powerControlForStart()
                 ?: throw TrainingSessionUnavailableException(
                     "A connected device with ERG power control is required to start a training session",
                 )
-        try {
-            powerControl.requestControl()
-        } catch (exception: Exception) {
-            throw TrainingSessionUnavailableException(
-                "The connected device did not grant ERG control",
-                exception,
-            )
-        }
+        trainerConnection.requestControl(powerControl, reason = "")
 
         val now = clock.instant()
-        ergSpiralDetector.reset(now)
+        ergProtection.reset(now)
         val progress = workout?.let { TrainingWorkoutProgress.firstStep(it, now) }
-        val initialFreeRide = workout == null || progress?.let(::isFreeRideStep) == true
+        val initialFreeRide = workout == null || progress?.let(workoutExecution::isFreeRide) == true
         val initialTarget =
             progress
-                ?.takeUnless(::isFreeRideStep)
-                ?.let { targetPower(it, now, DEFAULT_WORKOUT_POWER_TARGET_PERCENT) }
+                ?.takeUnless(workoutExecution::isFreeRide)
+                ?.let { workoutExecution.targetPower(it, now, DEFAULT_WORKOUT_POWER_TARGET_PERCENT) }
         if (initialFreeRide) {
-            setFreeRide(powerControl, "initial Free Ride")
+            trainerConnection.setFreeRide(powerControl, "initial Free Ride")
         } else if (initialTarget != null) {
-            setTarget(powerControl, initialTarget, "initial workout")
+            trainerConnection.setTarget(powerControl, initialTarget, "initial workout")
         }
 
         val sessionId = UUID.randomUUID()
-        activePowerControl = powerControl
-        activeWorkout = workout
-        stepDistanceStartMeters =
-            progress
-                ?.step
-                ?.completion
-                ?.let { completion ->
-                    if (completion is WorkoutStepCompletion.Distance) {
-                        trainingDevice.currentTelemetry()?.distanceMeters
-                    } else {
-                        null
-                    }
-                }
+        trainerConnection.beginSession(sessionId, powerControl)
+        if (workout != null && progress != null) {
+            workoutExecution.attach(workout, progress, trainingDevice.currentTelemetry())
+        } else {
+            workoutExecution.clear()
+        }
         state =
             TrainingSessionState
                 .active(
@@ -137,39 +109,16 @@ class TrainingSessionCoordinator(
                     heartRateSourceId = selectedHeartRateSourceId,
                     heartRate = selectedHeartRateSourceId?.let(trainingDevice::currentHeartRate),
                 )
-        activityRecorder.start(
+        activitySession.start(
             sessionId = sessionId,
             startedAt = now,
-            name = workout?.name ?: "Paceline ride",
-            workoutSource = workout?.source,
-            workoutSourceType = workout?.sourceType,
-            initialSegmentName =
-                workout?.let {
-                    activitySegmentName(
-                        stepNumber = 1,
-                        totalSteps = it.steps.size,
-                        step = it.steps.first(),
-                    )
-                } ?: "Manual Free Ride",
+            workout = workout,
+            heartRateSourceId = selectedHeartRateSourceId,
             initialTargetPowerWatts = initialTarget,
-            initialWorkoutStep = workout?.steps?.first(),
+            onTelemetry = trainerConnection::observeTelemetry,
+            onHeartRate = ::onHeartRate,
         )
-        registerTelemetry(sessionId)
-        activeHeartRateSourceId = selectedHeartRateSourceId
-        registerHeartRate(sessionId, selectedHeartRateSourceId)
-        completedActivity = null
-        pausedControlMode = null
-        pausedErgTargetPowerWatts = null
-        connectionInterruptedAt = null
-        nextConnectionRecoveryAt = null
-        connectionRecoveryAttempt = 0
-        connectionRecovery = null
-        targetSynchronizationPending = false
-        targetSynchronizationAt = null
-        pendingZeroPowerCommand = false
-        lastTelemetryReceivedAt = null
-        telemetryObserved = false
-        observeTelemetry(trainingDevice.currentTelemetry())
+        trainerConnection.observeTelemetry(trainingDevice.currentTelemetry())
         return state
     }
 
@@ -184,7 +133,7 @@ class TrainingSessionCoordinator(
                 ?: throw WorkoutTargetAdjustmentNotAllowedException(
                     "The active session has no executable workout",
                 )
-        if (progress.completed || activeWorkout == null) {
+        if (progress.completed || !workoutExecution.hasActiveWorkout()) {
             throw WorkoutTargetAdjustmentNotAllowedException(
                 "The workout has already completed",
             )
@@ -205,10 +154,10 @@ class TrainingSessionCoordinator(
 
         val currentPercent =
             activeState.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT
-        val nextPercent = addWorkoutTargetPercent(currentPercent, deltaPercent)
+        val nextPercent = workoutExecution.addTargetPercent(currentPercent, deltaPercent)
         val changedAt = clock.instant()
-        val nextFreeRide = isFreeRideStep(progress)
-        val nextTarget = targetPower(progress, changedAt, nextPercent)
+        val nextFreeRide = workoutExecution.isFreeRide(progress)
+        val nextTarget = workoutExecution.targetPower(progress, changedAt, nextPercent)
 
         if (nextFreeRide) {
             state =
@@ -221,7 +170,7 @@ class TrainingSessionCoordinator(
         }
 
         if (activeState.ergProtection.status != ErgProtectionStatus.INACTIVE) {
-            ergSpiralDetector.reset(changedAt)
+            ergProtection.reset(changedAt)
             state =
                 activeState.copy(
                     changedAt = changedAt,
@@ -230,7 +179,7 @@ class TrainingSessionCoordinator(
                         if (nextTarget <= 0) 0 else activeState.ergTargetPowerWatts,
                     workoutPowerTargetPercent = nextPercent,
                     ergProtection =
-                        if (isErgProtectionActive() && nextTarget <= 0) {
+                        if (ergProtection.isActive(activeState) && nextTarget <= 0) {
                             ErgProtectionState.inactive()
                         } else {
                             activeState.ergProtection
@@ -240,8 +189,12 @@ class TrainingSessionCoordinator(
             return state
         }
 
-        setTarget(requireActivePowerControl(), nextTarget, "workout target adjustment")
-        ergSpiralDetector.reset(changedAt)
+        trainerConnection.setTarget(
+            trainerConnection.activePowerControlOrThrow(),
+            nextTarget,
+            "workout target adjustment",
+        )
+        ergProtection.reset(changedAt)
         state =
             activeState.copy(
                 changedAt = changedAt,
@@ -260,20 +213,18 @@ class TrainingSessionCoordinator(
         sourceId: String,
     ): TrainingSessionState {
         val activeState = requireActiveSession(sessionId)
-        requireConnectedHeartRateSource(sourceId)
-        if (activeHeartRateSourceId == sourceId) {
+        heartRateSourceSelection.requireConnected(sourceId)
+        if (activitySession.selectedHeartRateSourceId() == sourceId) {
             refreshHeartRate()
             return state
         }
 
-        heartRateRegistration?.close()
-        activeHeartRateSourceId = sourceId
-        registerHeartRate(sessionId, sourceId)
+        val heartRate = activitySession.selectHeartRateSource(sessionId, sourceId)
         state =
             activeState.copy(
                 changedAt = clock.instant(),
                 heartRateSourceId = sourceId,
-                heartRate = trainingDevice.currentHeartRate(sourceId),
+                heartRate = heartRate,
             )
         return state
     }
@@ -284,7 +235,7 @@ class TrainingSessionCoordinator(
         powerWatts: Int,
     ): TrainingSessionState {
         val activeState = requireActiveSession(sessionId)
-        if (activeWorkout != null) {
+        if (workoutExecution.hasActiveWorkout()) {
             throw WorkoutTargetManagedException()
         }
 
@@ -302,7 +253,7 @@ class TrainingSessionCoordinator(
                 powerWatts,
                 activeState.ergProtection.status,
             )
-            ergSpiralDetector.reset(changedAt)
+            ergProtection.reset(changedAt)
             state =
                 activeState.copy(
                     changedAt = changedAt,
@@ -312,9 +263,9 @@ class TrainingSessionCoordinator(
             return state
         }
 
-        val powerControl = requireActivePowerControl()
-        setTarget(powerControl, powerWatts, "ERG target")
-        ergSpiralDetector.reset(changedAt)
+        val powerControl = trainerConnection.activePowerControlOrThrow()
+        trainerConnection.setTarget(powerControl, powerWatts, "ERG target")
+        ergProtection.reset(changedAt)
 
         state =
             activeState.copy(
@@ -344,23 +295,21 @@ class TrainingSessionCoordinator(
                         ?: session.ergTargetPowerWatts
                 }
         val commandApplied =
-            if (activePowerControl != null) {
-                trySetTargetForExecution(0, "0 W pause", pauseAt)
+            if (trainerConnection.currentPowerControl() != null) {
+                trainerConnection.trySetTargetForExecution(0, "0 W pause", pauseAt)
             } else {
-                markConnectionInterrupted(pauseAt)
+                trainerConnection.markConnectionInterrupted(pauseAt)
                 false
             }
-        captureDistanceProgressAtPause()
+        workoutExecution.captureDistanceProgressAtPause(activeState.workout, trainingDevice.currentTelemetry())
 
-        closeRecordingListeners()
-        pausedAt = pauseAt
-        pausedErgTargetPowerWatts = targetPowerWatts
-        pausedControlMode = activeState.controlMode
-        ergSpiralDetector.reset(pauseAt)
+        activitySession.pauseRecording()
+        ergProtection.reset(pauseAt)
         state =
             activeState.copy(
                 phase = TrainingSessionPhase.PAUSED,
                 changedAt = pauseAt,
+                pauseStartedAt = pauseAt,
                 controlMode = activeState.controlMode,
                 ergRequestedTargetPowerWatts = targetPowerWatts,
                 ergTargetPowerWatts = if (commandApplied) 0 else null,
@@ -372,10 +321,10 @@ class TrainingSessionCoordinator(
     @Synchronized
     fun resume(sessionId: UUID): TrainingSessionState {
         val pausedState = requirePausedSession(sessionId)
-        val powerControl = requireActivePowerControl()
+        val powerControl = trainerConnection.activePowerControlOrThrow()
         val resumedAt = clock.instant()
         val pauseStartedAt =
-            pausedAt
+            pausedState.pauseStartedAt
                 ?: throw TrainingSessionResumeNotAllowedException(
                     "The paused training session has no pause timestamp",
                 )
@@ -391,51 +340,49 @@ class TrainingSessionCoordinator(
             progress?.takeUnless { it.completed }?.copy(
                 stepStartedAt = progress.stepStartedAt.plus(pausedDuration),
             )
-        val resumedControlMode = pausedControlMode ?: pausedState.controlMode
+        val resumedControlMode = pausedState.controlMode
         val freeRide =
             resumedControlMode == TrainingControlMode.FREE_RIDE ||
-                resumedWorkout?.let(::isFreeRideStep) == true
+                resumedWorkout?.let(workoutExecution::isFreeRide) == true
         val targetPowerWatts =
             if (freeRide) {
                 null
             } else {
-                activeWorkout
-                    ?.let { resumedWorkout?.let { workoutProgress -> targetPower(workoutProgress, resumedAt) } }
-                    ?: pausedErgTargetPowerWatts
-                    ?: pausedState.ergRequestedTargetPowerWatts
+                if (workoutExecution.hasActiveWorkout()) {
+                    resumedWorkout?.let { workoutProgress ->
+                        workoutExecution.targetPower(
+                            progress = workoutProgress,
+                            at = resumedAt,
+                            targetPercent =
+                                pausedState.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT,
+                        )
+                    }
+                } else {
+                    null
+                } ?: pausedState.ergRequestedTargetPowerWatts
                     ?: 0
             }
 
-        try {
-            powerControl.requestControl()
-        } catch (exception: Exception) {
-            throw TrainingSessionUnavailableException(
-                "The connected device did not grant ERG control on resume",
-                exception,
-            )
-        }
+        trainerConnection.requestControl(powerControl, reason = " on resume")
         if (freeRide) {
-            setFreeRide(powerControl, "resume Free Ride")
+            trainerConnection.setFreeRide(powerControl, "resume Free Ride")
         } else {
-            setTarget(powerControl, requireNotNull(targetPowerWatts), "resume")
+            trainerConnection.setTarget(powerControl, requireNotNull(targetPowerWatts), "resume")
         }
 
-        resumeDistanceTracking()
-        ergSpiralDetector.reset(resumedAt)
-        pausedAt = null
-        pausedErgTargetPowerWatts = null
-        pausedControlMode = null
-        registerTelemetry(sessionId)
-        registerHeartRate(sessionId, activeHeartRateSourceId)
+        workoutExecution.resumeDistanceTracking(progress, trainingDevice.currentTelemetry())
+        ergProtection.reset(resumedAt)
+        activitySession.resumeRecording(sessionId)
         state =
             pausedState.copy(
                 phase = TrainingSessionPhase.ACTIVE,
                 changedAt = resumedAt,
+                pauseStartedAt = null,
                 controlMode = if (freeRide) TrainingControlMode.FREE_RIDE else TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = targetPowerWatts,
                 ergTargetPowerWatts = targetPowerWatts,
                 ergProtection = ErgProtectionState.inactive(),
-                heartRate = activeHeartRateSourceId?.let(trainingDevice::currentHeartRate),
+                heartRate = activitySession.currentHeartRate(),
                 workout = resumedWorkout ?: progress,
             )
         return state
@@ -449,7 +396,7 @@ class TrainingSessionCoordinator(
                 ?: throw WorkoutStepAdvanceNotAllowedException(
                     "The active session has no executable workout",
                 )
-        if (progress.completed || activeWorkout == null) {
+        if (progress.completed || !workoutExecution.hasActiveWorkout()) {
             throw WorkoutStepAdvanceNotAllowedException(
                 "The workout has already completed",
             )
@@ -461,7 +408,7 @@ class TrainingSessionCoordinator(
         }
 
         val now = clock.instant()
-        observeTelemetry(trainingDevice.currentTelemetry())
+        trainerConnection.observeTelemetry(trainingDevice.currentTelemetry())
         val connection = ensureTrainerConnection(now)
         val telemetry = if (connection.connected) trainingDevice.currentTelemetry() else null
         return advanceFrom(progress, now, telemetry)
@@ -475,11 +422,11 @@ class TrainingSessionCoordinator(
         if (
             state.phase != TrainingSessionPhase.ACTIVE &&
             state.phase != TrainingSessionPhase.PAUSED &&
-            !(state.phase == TrainingSessionPhase.STOPPED && pendingZeroPowerCommand)
+            !(state.phase == TrainingSessionPhase.STOPPED && trainerConnection.hasPendingZeroPowerCommand())
         ) {
             return state
         }
-        observeTelemetry(telemetry)
+        trainerConnection.observeTelemetry(telemetry)
         val connection = ensureTrainerConnection(now)
         val effectiveTelemetry =
             if (!connection.connected) {
@@ -489,18 +436,18 @@ class TrainingSessionCoordinator(
             } else {
                 telemetry
             }
-        observeTelemetry(effectiveTelemetry)
+        trainerConnection.observeTelemetry(effectiveTelemetry)
         return try {
             if (state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE) {
-                if (connection.connected && targetSynchronizationPending) {
+                if (connection.connected && trainerConnection.hasPendingTargetSynchronization()) {
                     synchronizeCurrentControl(now)
                 }
                 return state
             }
-            if (state.phase == TrainingSessionPhase.ACTIVE && activeWorkout != null) {
-                while (state.phase == TrainingSessionPhase.ACTIVE && activeWorkout != null) {
+            if (state.phase == TrainingSessionPhase.ACTIVE && workoutExecution.hasActiveWorkout()) {
+                while (state.phase == TrainingSessionPhase.ACTIVE && workoutExecution.hasActiveWorkout()) {
                     val progress = state.workout ?: break
-                    if (isComplete(progress, now, effectiveTelemetry)) {
+                    if (workoutExecution.isComplete(progress, now, effectiveTelemetry)) {
                         val transitionAt =
                             when (val completion = progress.step.completion) {
                                 is WorkoutStepCompletion.Time -> {
@@ -520,16 +467,16 @@ class TrainingSessionCoordinator(
                     }
                 }
             }
-            if (connection.connected && targetSynchronizationPending) {
+            if (connection.connected && trainerConnection.hasPendingTargetSynchronization()) {
                 synchronizeCurrentControl(now)
             }
             if (state.phase == TrainingSessionPhase.ACTIVE && connection.connected) {
-                evaluateErgProtection(now, effectiveTelemetry)
+                state = ergProtection.evaluate(state, now, effectiveTelemetry, workoutExecution.hasActiveWorkout())
             }
             state
         } catch (exception: TrainingSessionUnavailableException) {
-            if (targetSynchronizationPending) {
-                markConnectionInterrupted(now, exception.message)
+            if (trainerConnection.hasPendingTargetSynchronization()) {
+                trainerConnection.markConnectionInterrupted(now, exception.message)
             }
             state
         }
@@ -540,34 +487,35 @@ class TrainingSessionCoordinator(
         val activeState = requireSessionInProgress(sessionId)
         val stoppedAt = clock.instant()
         val commandApplied =
-            if (activePowerControl != null) {
-                trySetTargetForExecution(0, "0 W stop", stoppedAt)
+            if (trainerConnection.currentPowerControl() != null) {
+                trainerConnection.trySetTargetForExecution(0, "0 W stop", stoppedAt)
             } else {
-                markConnectionInterrupted(stoppedAt)
+                trainerConnection.markConnectionInterrupted(stoppedAt)
                 false
             }
-        pendingZeroPowerCommand = !commandApplied
+        trainerConnection.markZeroPowerCommandPending(!commandApplied)
 
-        closeRecordingListeners()
-        completedActivity = activityRecorder.finish(sessionId, stoppedAt)
+        val completedActivity = activitySession.finish(sessionId, stoppedAt)
 
         state =
             activeState.copy(
                 phase = TrainingSessionPhase.STOPPED,
                 changedAt = stoppedAt,
+                pauseStartedAt = null,
                 controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = 0,
                 ergTargetPowerWatts = if (commandApplied) 0 else null,
                 workoutPowerTargetPercent = null,
                 ergProtection = ErgProtectionState.inactive(),
                 activityUpload =
-                    if (completedActivity?.samples?.isNotEmpty() == true) {
+                    if (completedActivity.samples.isNotEmpty()) {
                         TrainingActivityUploadState.available()
                     } else {
                         TrainingActivityUploadState.unavailable()
                     },
             )
-        clearActiveExecution(preserveTrainerRecovery = pendingZeroPowerCommand)
+        workoutExecution.clear()
+        trainerConnection.clear(preserveRecovery = trainerConnection.hasPendingZeroPowerCommand())
         return state
     }
 
@@ -575,7 +523,7 @@ class TrainingSessionCoordinator(
     fun upload(sessionId: UUID): TrainingSessionState {
         val stoppedState = requireStoppedSession(sessionId)
         val activity =
-            completedActivity
+            activitySession.completedActivity()
                 ?: throw TrainingActivityUploadUnavailableException(
                     "The stopped session has no in-memory activity recording",
                 )
@@ -593,7 +541,14 @@ class TrainingSessionCoordinator(
                 activityUpload = TrainingActivityUploadState(TrainingActivityUploadPhase.UPLOADING),
             )
         return try {
-            val receipt = activityUploader.upload(activity)
+            val receipt =
+                try {
+                    activityUploader.upload(activity)
+                } catch (exception: ActivityUploadException) {
+                    throw exception
+                } catch (exception: Exception) {
+                    throw ActivityUploadException("The training activity could not be uploaded", exception)
+                }
             state =
                 state.copy(
                     activityUpload =
@@ -613,137 +568,8 @@ class TrainingSessionCoordinator(
                         ),
                 )
             throw exception
-        } catch (exception: Exception) {
-            val uploadException = ActivityUploadException("The training activity could not be uploaded", exception)
-            state =
-                state.copy(
-                    activityUpload =
-                        TrainingActivityUploadState(
-                            phase = TrainingActivityUploadPhase.FAILED,
-                            error = uploadException.message,
-                        ),
-                )
-            throw uploadException
         }
     }
-
-    private fun captureDistanceProgressAtPause() {
-        val progress = state.workout ?: return
-        if (progress.completed || progress.step.completion !is WorkoutStepCompletion.Distance) {
-            stepDistanceProgressAtPauseMeters = null
-            return
-        }
-
-        val currentDistance = trainingDevice.currentTelemetry()?.distanceMeters ?: return
-        val startDistance = stepDistanceStartMeters
-        if (startDistance == null) {
-            stepDistanceStartMeters = currentDistance
-            stepDistanceProgressAtPauseMeters = 0.0
-        } else {
-            stepDistanceProgressAtPauseMeters = maxOf(0.0, currentDistance - startDistance)
-        }
-    }
-
-    private fun resumeDistanceTracking() {
-        val progress = state.workout ?: return
-        if (progress.completed || progress.step.completion !is WorkoutStepCompletion.Distance) {
-            stepDistanceProgressAtPauseMeters = null
-            return
-        }
-
-        val currentDistance = trainingDevice.currentTelemetry()?.distanceMeters
-        val progressAtPause = stepDistanceProgressAtPauseMeters
-        when {
-            currentDistance != null && progressAtPause != null -> {
-                stepDistanceStartMeters = currentDistance - progressAtPause
-                stepDistanceProgressAtPauseMeters = null
-            }
-
-            currentDistance != null && stepDistanceStartMeters == null -> {
-                stepDistanceStartMeters = currentDistance
-            }
-        }
-    }
-
-    private fun registerTelemetry(sessionId: UUID) {
-        telemetryRegistration =
-            trainingDevice.addTelemetryListener { telemetry ->
-                synchronized(this) {
-                    observeTelemetry(telemetry)
-                    activityRecorder.record(sessionId, telemetry)
-                }
-            }
-    }
-
-    private fun observeTelemetry(telemetry: IndoorBikeTelemetry?) {
-        if (telemetry == null || !runCatching { trainingDevice.hasTelemetryCapability() }.getOrDefault(false)) {
-            return
-        }
-        val receivedAt = telemetry.receivedAt
-        if (telemetryObserved && lastTelemetryReceivedAt?.let { !receivedAt.isAfter(it) } == true) {
-            return
-        }
-        telemetryObserved = true
-        lastTelemetryReceivedAt = receivedAt
-    }
-
-    private fun isTelemetryStale(now: Instant): Boolean {
-        if (!runCatching { trainingDevice.hasTelemetryCapability() }.getOrDefault(false) || !telemetryObserved) {
-            return false
-        }
-        val lastReceivedAt = lastTelemetryReceivedAt ?: return false
-        return Duration.between(lastReceivedAt, now) > ergProtectionProperties.telemetryFreshness
-    }
-
-    private fun registerHeartRate(
-        sessionId: UUID,
-        sourceId: String?,
-    ) {
-        heartRateRegistration =
-            sourceId?.let { selectedSourceId ->
-                trainingDevice.addHeartRateListener(selectedSourceId) { telemetry ->
-                    onHeartRate(sessionId, selectedSourceId, telemetry)
-                }
-            }
-    }
-
-    private fun closeRecordingListeners() {
-        telemetryRegistration?.close()
-        telemetryRegistration = null
-        heartRateRegistration?.close()
-        heartRateRegistration = null
-    }
-
-    private fun isComplete(
-        progress: TrainingWorkoutProgress,
-        now: Instant,
-        telemetry: IndoorBikeTelemetry?,
-    ): Boolean =
-        when (val completion = progress.step.completion) {
-            is WorkoutStepCompletion.Time -> {
-                !now.isBefore(progress.stepStartedAt.plusSeconds(completion.seconds.toLong()))
-            }
-
-            is WorkoutStepCompletion.Distance -> {
-                val currentDistance = telemetry?.distanceMeters ?: return false
-                stepDistanceProgressAtPauseMeters?.let { progressAtPause ->
-                    stepDistanceStartMeters = currentDistance - progressAtPause
-                    stepDistanceProgressAtPauseMeters = null
-                    return progressAtPause >= completion.meters
-                }
-                val startDistance = stepDistanceStartMeters
-                if (startDistance == null) {
-                    stepDistanceStartMeters = currentDistance
-                    false
-                } else {
-                    currentDistance - startDistance >= completion.meters
-                }
-            }
-
-            WorkoutStepCompletion.Manual -> {
-                false
-            }
-        }
 
     private fun advanceFrom(
         progress: TrainingWorkoutProgress,
@@ -755,16 +581,18 @@ class TrainingSessionCoordinator(
                 "The workout cannot advance while ERG protection is unavailable",
             )
         }
-        val workout = requireNotNull(activeWorkout)
-        val nextIndex = progress.currentStepNumber
-        if (nextIndex >= workout.steps.size) {
+        val nextProgress = workoutExecution.nextProgress(progress, transitionAt)
+        if (nextProgress == null) {
             val freeRideApplied =
-                if (state.controlMode != TrainingControlMode.FREE_RIDE || targetSynchronizationPending) {
-                    trySetFreeRideForExecution("workout completion Free Ride", transitionAt)
+                if (
+                    state.controlMode != TrainingControlMode.FREE_RIDE ||
+                    trainerConnection.hasPendingTargetSynchronization()
+                ) {
+                    trainerConnection.trySetFreeRideForExecution("workout completion Free Ride", transitionAt)
                 } else {
                     true
                 }
-            activityRecorder.completeWorkout(
+            activitySession.completeWorkout(
                 sessionId = requireNotNull(state.sessionId),
                 completedAt = transitionAt,
             )
@@ -778,29 +606,28 @@ class TrainingSessionCoordinator(
                     ergProtection = ErgProtectionState.inactive(),
                     workout = progress.copy(completed = true),
                 )
-            ergSpiralDetector.reset(transitionAt)
-            clearActiveWorkout()
+            ergProtection.reset(transitionAt)
+            workoutExecution.clear()
             return state
         }
 
-        val nextStep = workout.steps[nextIndex]
-        val nextProgress =
-            TrainingWorkoutProgress(
-                source = workout.source,
-                name = workout.name,
-                currentStepNumber = nextIndex + 1,
-                totalSteps = workout.steps.size,
-                step = nextStep,
-                stepStartedAt = transitionAt,
+        val nextIndex = nextProgress.currentStepNumber - 1
+        val nextTarget =
+            workoutExecution.targetPower(
+                progress = nextProgress,
+                at = transitionAt,
+                targetPercent = state.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT,
             )
-        val nextTarget = targetPower(nextProgress, transitionAt)
-        val nextFreeRide = isFreeRideStep(nextProgress)
-        val protectionActive = isErgProtectionActive()
+        val nextFreeRide = workoutExecution.isFreeRide(nextProgress)
+        val protectionActive = ergProtection.isActive(state)
         val commandApplied =
             when {
                 nextFreeRide &&
-                    (state.controlMode != TrainingControlMode.FREE_RIDE || targetSynchronizationPending) -> {
-                    trySetFreeRideForExecution("workout step ${nextIndex + 1} Free Ride", transitionAt)
+                    (
+                        state.controlMode != TrainingControlMode.FREE_RIDE ||
+                            trainerConnection.hasPendingTargetSynchronization()
+                    ) -> {
+                    trainerConnection.trySetFreeRideForExecution("workout step ${nextIndex + 1} Free Ride", transitionAt)
                 }
 
                 nextFreeRide -> {
@@ -808,19 +635,20 @@ class TrainingSessionCoordinator(
                 }
 
                 state.ergProtection.status == ErgProtectionStatus.INACTIVE -> {
-                    trySetTargetForExecution(nextTarget, "workout step ${nextIndex + 1}", transitionAt)
+                    trainerConnection.trySetTargetForExecution(nextTarget, "workout step ${nextIndex + 1}", transitionAt)
                 }
 
                 else -> {
                     false
                 }
             }
-        activityRecorder.startSegment(
+        activitySession.startWorkoutSegment(
             sessionId = requireNotNull(state.sessionId),
             startedAt = transitionAt,
-            name = activitySegmentName(nextIndex + 1, workout.steps.size, nextStep),
+            stepNumber = nextIndex + 1,
+            totalSteps = nextProgress.totalSteps,
             targetPowerWatts = nextTarget.takeUnless { nextFreeRide },
-            workoutStep = nextStep,
+            workoutStep = nextProgress.step,
         )
         state =
             state.copy(
@@ -843,101 +671,29 @@ class TrainingSessionCoordinator(
                     },
                 workout = nextProgress,
             )
-        ergSpiralDetector.reset(transitionAt)
-        stepDistanceStartMeters =
-            if (nextStep.completion is WorkoutStepCompletion.Distance) {
-                telemetry?.distanceMeters
-            } else {
-                null
-            }
-        stepDistanceProgressAtPauseMeters = null
+        ergProtection.reset(transitionAt)
+        workoutExecution.beginStep(nextProgress, telemetry)
         return state
     }
-
-    private fun targetPower(
-        progress: TrainingWorkoutProgress,
-        at: Instant,
-        targetPercent: Long =
-            state.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT,
-    ): Int {
-        val prescribedTarget =
-            when (val target = progress.step.target) {
-                is WorkoutStepTarget.Power -> {
-                    ((target.lowWatts.toLong() + target.highWatts.toLong()) / 2.0).roundToInt()
-                }
-
-                is WorkoutStepTarget.Ramp -> {
-                    val completion =
-                        progress.step.completion as? WorkoutStepCompletion.Time
-                            ?: throw IllegalStateException("A ramp target must have a timed completion condition")
-                    val durationMillis = completion.seconds.toLong() * MILLIS_PER_SECOND
-                    val elapsedMillis =
-                        Duration
-                            .between(progress.stepStartedAt, at)
-                            .toMillis()
-                            .coerceIn(0L, durationMillis)
-                    val fraction = elapsedMillis.toDouble() / durationMillis
-                    (
-                        target.startWatts.toDouble() +
-                            (target.endWatts - target.startWatts) * fraction
-                    ).roundToInt()
-                }
-
-                WorkoutStepTarget.Open -> {
-                    0
-                }
-            }
-        return adjustTargetPower(prescribedTarget, targetPercent)
-    }
-
-    private fun adjustTargetPower(
-        prescribedTargetWatts: Int,
-        targetPercent: Long,
-    ): Int {
-        if (prescribedTargetWatts <= 0 || targetPercent <= 0L) {
-            return 0
-        }
-
-        val adjustedTarget =
-            BigDecimal
-                .valueOf(prescribedTargetWatts.toLong())
-                .multiply(BigDecimal.valueOf(targetPercent))
-                .divide(BigDecimal.valueOf(100L), 0, RoundingMode.HALF_UP)
-        return adjustedTarget
-            .min(BigDecimal.valueOf(Short.MAX_VALUE.toLong()))
-            .intValueExact()
-    }
-
-    private fun addWorkoutTargetPercent(
-        currentPercent: Long,
-        deltaPercent: Long,
-    ): Long =
-        when {
-            deltaPercent > 0L && currentPercent > Long.MAX_VALUE - deltaPercent -> Long.MAX_VALUE
-            deltaPercent < 0L && currentPercent < Long.MIN_VALUE - deltaPercent -> Long.MIN_VALUE
-            else -> currentPercent + deltaPercent
-        }
-
-    private fun isFreeRideStep(progress: TrainingWorkoutProgress): Boolean = progress.step.target is WorkoutStepTarget.Open
 
     private fun refreshWorkoutTarget(
         progress: TrainingWorkoutProgress,
         at: Instant,
     ) {
-        if (isFreeRideStep(progress)) {
+        if (workoutExecution.isFreeRide(progress)) {
             if (
                 state.controlMode == TrainingControlMode.FREE_RIDE &&
                 state.ergRequestedTargetPowerWatts == null &&
                 state.ergTargetPowerWatts == null &&
                 state.ergProtection.status == ErgProtectionStatus.INACTIVE &&
-                !targetSynchronizationPending
+                !trainerConnection.hasPendingTargetSynchronization()
             ) {
                 return
             }
 
             val commandApplied =
-                trySetFreeRideForExecution("Free Ride workout target", at)
-            ergSpiralDetector.reset(at)
+                trainerConnection.trySetFreeRideForExecution("Free Ride workout target", at)
+            ergProtection.reset(at)
             state =
                 state.copy(
                     changedAt = at,
@@ -949,21 +705,26 @@ class TrainingSessionCoordinator(
             return
         }
 
-        val nextTarget = targetPower(progress, at)
+        val nextTarget =
+            workoutExecution.targetPower(
+                progress = progress,
+                at = at,
+                targetPercent = state.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT,
+            )
         val requestedTargetChanged = nextTarget != state.ergRequestedTargetPowerWatts
         if (
             state.controlMode == TrainingControlMode.ERG &&
             !requestedTargetChanged &&
             nextTarget == state.ergTargetPowerWatts &&
-            !targetSynchronizationPending
+            !trainerConnection.hasPendingTargetSynchronization()
         ) {
             return
         }
 
         if (state.ergProtection.status != ErgProtectionStatus.INACTIVE) {
             val commandApplied =
-                if (targetSynchronizationPending) {
-                    trySetTargetForExecution(0, "reconnected ERG protection", at)
+                if (trainerConnection.hasPendingTargetSynchronization()) {
+                    trainerConnection.trySetTargetForExecution(0, "reconnected ERG protection", at)
                 } else {
                     false
                 }
@@ -974,7 +735,7 @@ class TrainingSessionCoordinator(
                     ergRequestedTargetPowerWatts = nextTarget,
                     ergTargetPowerWatts = if (commandApplied) 0 else state.ergTargetPowerWatts,
                     ergProtection =
-                        if (isErgProtectionActive() && nextTarget <= 0) {
+                        if (ergProtection.isActive(state) && nextTarget <= 0) {
                             ErgProtectionState.inactive()
                         } else {
                             state.ergProtection
@@ -984,7 +745,7 @@ class TrainingSessionCoordinator(
         }
 
         val commandApplied =
-            trySetTargetForExecution(nextTarget, "workout target", at)
+            trainerConnection.trySetTargetForExecution(nextTarget, "workout target", at)
         state =
             state.copy(
                 changedAt = at,
@@ -994,357 +755,13 @@ class TrainingSessionCoordinator(
             )
     }
 
-    private fun evaluateErgProtection(
-        now: Instant,
-        telemetry: IndoorBikeTelemetry?,
-    ) {
-        when (state.ergProtection.status) {
-            ErgProtectionStatus.UNAVAILABLE,
-            ErgProtectionStatus.RECOVERY_FAILED,
-            -> {
-                return
-            }
-
-            ErgProtectionStatus.RECOVERY_RETRYING -> {
-                retryRecovery(now, telemetry)
-                return
-            }
-
-            ErgProtectionStatus.INACTIVE,
-            ErgProtectionStatus.BAILED_OUT,
-            -> {
-                Unit
-            }
-        }
-
-        val requestedTarget = state.ergRequestedTargetPowerWatts
-        val protectionActive = isErgProtectionActive()
-        when (
-            val decision =
-                ergSpiralDetector.evaluate(
-                    now = now,
-                    requestedTargetPowerWatts = requestedTarget,
-                    telemetry = telemetry,
-                    protectionActive = protectionActive,
-                )
-        ) {
-            is ErgProtectionDecision.BailOut -> {
-                if (protectionActive) {
-                    return
-                }
-                logger.info(
-                    "ERG spiral detected; requesting bailout: sessionId={} cadenceRpm={} " +
-                        "requestedTargetPowerWatts={} lowCadenceThresholdRpm={} lowCadenceDuration={}",
-                    state.sessionId,
-                    decision.cadenceRpm,
-                    requestedTarget,
-                    ergProtectionProperties.lowCadenceRpm,
-                    ergProtectionProperties.lowCadenceDuration,
-                )
-                try {
-                    setTarget(requireActivePowerControl(), 0, "ERG protection")
-                } catch (exception: TrainingSessionUnavailableException) {
-                    logger.warn(
-                        "ERG protection bailout failed: sessionId={} cadenceRpm={} " +
-                            "requestedTargetPowerWatts={} error={}",
-                        state.sessionId,
-                        decision.cadenceRpm,
-                        requestedTarget,
-                        exception.message,
-                        exception,
-                    )
-                    recordErgProtectionEvent(
-                        type = TrainingActivityEventType.ERG_PROTECTION_FAILED,
-                        occurredAt = now,
-                        cadenceRpm = decision.cadenceRpm,
-                    )
-                    state =
-                        state.copy(
-                            changedAt = now,
-                            controlMode = TrainingControlMode.ERG,
-                            ergTargetPowerWatts = null,
-                            ergProtection =
-                                ErgProtectionState.unavailable(
-                                    changedAt = now,
-                                    cadenceRpm = decision.cadenceRpm,
-                                    error = exception.message,
-                                ),
-                        )
-                    return
-                }
-
-                logger.info(
-                    "ERG protection bailout applied: sessionId={} cadenceRpm={} " +
-                        "requestedTargetPowerWatts={} appliedTargetPowerWatts=0",
-                    state.sessionId,
-                    decision.cadenceRpm,
-                    requestedTarget,
-                )
-
-                recordErgProtectionEvent(
-                    type = TrainingActivityEventType.ERG_PROTECTION_STARTED,
-                    occurredAt = now,
-                    cadenceRpm = decision.cadenceRpm,
-                )
-                state =
-                    state.copy(
-                        changedAt = now,
-                        controlMode = TrainingControlMode.ERG,
-                        ergTargetPowerWatts = 0,
-                        ergProtection = ErgProtectionState.bailedOut(now, decision.cadenceRpm),
-                    )
-            }
-
-            is ErgProtectionDecision.Recover -> {
-                val target = requestedTarget ?: return
-                logger.info(
-                    "ERG spiral recovery detected; requesting target restore: sessionId={} cadenceRpm={} " +
-                        "targetPowerWatts={} recoveryCadenceThresholdRpm={} recoveryDuration={} attempt=1",
-                    state.sessionId,
-                    decision.cadenceRpm,
-                    target,
-                    ergProtectionProperties.recoveryCadenceRpm,
-                    ergProtectionProperties.recoveryDuration,
-                )
-                attemptRecovery(
-                    now = now,
-                    cadenceRpm = decision.cadenceRpm,
-                    targetPowerWatts = target,
-                    attempt = 1,
-                )
-            }
-
-            null -> {
-                Unit
-            }
-        }
-    }
-
-    private fun retryRecovery(
-        now: Instant,
-        telemetry: IndoorBikeTelemetry?,
-    ) {
-        val protection = state.ergProtection
-        val cadence = ergSpiralDetector.freshRecoveryCadence(now, telemetry)
-        if (cadence == null) {
-            logger.info(
-                "ERG recovery retry cancelled; cadence is no longer fresh and high enough: " +
-                    "sessionId={} retryAttempt={} observedCadenceRpm={} recoveryCadenceThresholdRpm={} " +
-                    "telemetryReceivedAt={}",
-                state.sessionId,
-                protection.retryAttempt,
-                telemetry?.cadenceRpm,
-                ergProtectionProperties.recoveryCadenceRpm,
-                telemetry?.receivedAt,
-            )
-            state =
-                state.copy(
-                    changedAt = now,
-                    ergProtection =
-                        ErgProtectionState.bailedOut(
-                            changedAt = now,
-                            cadenceRpm = protection.cadenceRpm,
-                        ),
-                )
-            return
-        }
-
-        val nextRetryAt = protection.nextRetryAt ?: return
-        if (now.isBefore(nextRetryAt)) {
-            return
-        }
-
-        val target = state.ergRequestedTargetPowerWatts
-        if (target == null || target <= 0) {
-            logger.info(
-                "ERG recovery retry cleared because no positive workout target remains: sessionId={} " +
-                    "retryAttempt={} targetPowerWatts={}",
-                state.sessionId,
-                protection.retryAttempt,
-                target,
-            )
-            state =
-                state.copy(
-                    changedAt = now,
-                    controlMode = TrainingControlMode.ERG,
-                    ergTargetPowerWatts = 0,
-                    ergProtection = ErgProtectionState.inactive(),
-                )
-            ergSpiralDetector.reset(now)
-            return
-        }
-
-        attemptRecovery(
-            now = now,
-            cadenceRpm = cadence,
-            targetPowerWatts = target,
-            attempt = (protection.retryAttempt ?: 0) + 1,
-        )
-    }
-
-    private fun attemptRecovery(
-        now: Instant,
-        cadenceRpm: Double,
-        targetPowerWatts: Int,
-        attempt: Int,
-    ) {
-        logger.info(
-            "ERG recovery command attempt: sessionId={} attempt={} targetPowerWatts={} cadenceRpm={} " +
-                "maxAttempts={}",
-            state.sessionId,
-            attempt,
-            targetPowerWatts,
-            cadenceRpm,
-            ergProtectionProperties.recoveryRetryMaxAttempts,
-        )
-        try {
-            setTarget(requireActivePowerControl(), targetPowerWatts, "ERG recovery")
-        } catch (exception: TrainingSessionUnavailableException) {
-            logger.warn(
-                "ERG recovery command rejected: sessionId={} attempt={} targetPowerWatts={} cadenceRpm={} " +
-                    "error={}",
-                state.sessionId,
-                attempt,
-                targetPowerWatts,
-                cadenceRpm,
-                exception.message,
-                exception,
-            )
-            recordErgProtectionEvent(
-                type = TrainingActivityEventType.ERG_PROTECTION_FAILED,
-                occurredAt = now,
-                cadenceRpm = cadenceRpm,
-            )
-            val nextProtection =
-                if (activeWorkout != null && attempt < ergProtectionProperties.recoveryRetryMaxAttempts) {
-                    ErgProtectionState.recoveryRetrying(
-                        changedAt = now,
-                        cadenceRpm = cadenceRpm,
-                        retryAttempt = attempt,
-                        nextRetryAt = now.plus(recoveryRetryDelay(attempt)),
-                        error = exception.message,
-                    )
-                } else if (activeWorkout != null) {
-                    ErgProtectionState.recoveryFailed(
-                        changedAt = now,
-                        cadenceRpm = cadenceRpm,
-                        retryAttempt = attempt,
-                        error = exception.message,
-                    )
-                } else {
-                    ErgProtectionState.unavailable(
-                        changedAt = now,
-                        cadenceRpm = cadenceRpm,
-                        error = exception.message,
-                    )
-                }
-            state =
-                state.copy(
-                    changedAt = now,
-                    controlMode = TrainingControlMode.ERG,
-                    ergTargetPowerWatts = if (activeWorkout != null) 0 else null,
-                    ergProtection = nextProtection,
-                )
-            if (nextProtection.status == ErgProtectionStatus.RECOVERY_RETRYING) {
-                logger.info(
-                    "ERG recovery retry scheduled: sessionId={} failedAttempt={} nextAttempt={} " +
-                        "nextRetryAt={} targetPowerWatts={} cadenceRpm={}",
-                    state.sessionId,
-                    attempt,
-                    attempt + 1,
-                    nextProtection.nextRetryAt,
-                    targetPowerWatts,
-                    cadenceRpm,
-                )
-            } else {
-                logger.warn(
-                    "ERG recovery retries exhausted; workout remains at bailout power: sessionId={} " +
-                        "attempt={} targetPowerWatts={} cadenceRpm={} status={}",
-                    state.sessionId,
-                    attempt,
-                    targetPowerWatts,
-                    cadenceRpm,
-                    nextProtection.status,
-                )
-            }
-            return
-        }
-
-        logger.info(
-            "ERG protection recovered: sessionId={} attempt={} targetPowerWatts={} cadenceRpm={}",
-            state.sessionId,
-            attempt,
-            targetPowerWatts,
-            cadenceRpm,
-        )
-
-        recordErgProtectionEvent(
-            type = TrainingActivityEventType.ERG_PROTECTION_ENDED,
-            occurredAt = now,
-            cadenceRpm = cadenceRpm,
-        )
-        state =
-            state.copy(
-                changedAt = now,
-                controlMode = TrainingControlMode.ERG,
-                ergTargetPowerWatts = targetPowerWatts,
-                ergProtection = ErgProtectionState.inactive(),
-            )
-    }
-
-    private fun recoveryRetryDelay(attempt: Int): Duration {
-        var delay = ergProtectionProperties.recoveryRetryInitialDelay
-        repeat((attempt - 1).coerceAtLeast(0)) {
-            val doubled = delay.multipliedBy(2)
-            delay =
-                if (doubled.compareTo(ergProtectionProperties.recoveryRetryMaxDelay) > 0) {
-                    ergProtectionProperties.recoveryRetryMaxDelay
-                } else {
-                    doubled
-                }
-        }
-        return delay
-    }
-
-    private fun isErgProtectionActive(): Boolean =
-        state.ergProtection.status in
-            setOf(
-                ErgProtectionStatus.BAILED_OUT,
-                ErgProtectionStatus.RECOVERY_RETRYING,
-                ErgProtectionStatus.RECOVERY_FAILED,
-            )
-
-    private fun recordErgProtectionEvent(
-        type: TrainingActivityEventType,
-        occurredAt: Instant,
-        cadenceRpm: Double?,
-    ) {
-        val sessionId = state.sessionId ?: return
-        logger.debug(
-            "ERG protection activity event recorded: sessionId={} type={} cadenceRpm={} occurredAt={}",
-            sessionId,
-            type,
-            cadenceRpm,
-            occurredAt,
-        )
-        activityRecorder.recordEvent(
-            sessionId = sessionId,
-            event =
-                TrainingActivityEvent(
-                    type = type,
-                    occurredAt = occurredAt,
-                    cadenceRpm = cadenceRpm,
-                ),
-        )
-    }
-
     private fun recordWorkoutTargetAdjustment(
         occurredAt: Instant,
         targetPercent: Long,
         targetPowerWatts: Int?,
     ) {
         val sessionId = state.sessionId ?: return
-        activityRecorder.recordEvent(
+        activitySession.recordEvent(
             sessionId = sessionId,
             event =
                 TrainingActivityEvent(
@@ -1354,386 +771,6 @@ class TrainingSessionCoordinator(
                     targetPowerWatts = targetPowerWatts,
                 ),
         )
-    }
-
-    private data class TrainerConnectionAvailability(
-        val connected: Boolean,
-        val recovered: Boolean,
-    )
-
-    private fun ensureTrainerConnection(now: Instant): TrainerConnectionAvailability {
-        val currentPowerControl = runCatching { trainingDevice.currentPowerControl() }.getOrNull()
-        val telemetryStale =
-            state.phase != TrainingSessionPhase.PAUSED &&
-                isTelemetryStale(now)
-        if (connectionInterruptedAt == null && currentPowerControl != null && !telemetryStale) {
-            activePowerControl = currentPowerControl
-            updateTrainerConnectionStatus(
-                status = TrainerConnectionStatus.CONNECTED,
-                at = now,
-                retryAttempt = null,
-                error = null,
-            )
-            return TrainerConnectionAvailability(connected = true, recovered = false)
-        }
-
-        if (connectionInterruptedAt == null) {
-            markConnectionInterrupted(now)
-        }
-
-        val pendingRecovery = connectionRecovery
-        if (pendingRecovery != null) {
-            val future = pendingRecovery.toCompletableFuture()
-            if (!future.isDone) {
-                updateTrainerConnectionStatus(
-                    status = TrainerConnectionStatus.RECONNECTING,
-                    at = now,
-                    retryAttempt = connectionRecoveryAttempt.takeIf { it > 0 },
-                    error = state.trainerConnectionError,
-                )
-                return TrainerConnectionAvailability(connected = false, recovered = false)
-            }
-
-            connectionRecovery = null
-            val recoveryResult = runCatching { future.join() }
-            val recoveredPowerControl = recoveryResult.getOrNull()
-            if (recoveredPowerControl != null) {
-                val latestPowerControl = runCatching { trainingDevice.currentPowerControl() }.getOrNull()
-                return trainerConnectionRecovered(
-                    powerControl = latestPowerControl ?: recoveredPowerControl,
-                    at = now,
-                )
-            }
-
-            val failure =
-                recoveryResult.exceptionOrNull()?.let { exception ->
-                    exception.cause?.message ?: exception.message
-                } ?: "Trainer reconnection failed"
-            val currentPowerControlAfterRecovery =
-                runCatching { trainingDevice.currentPowerControl() }.getOrNull()
-            if (currentPowerControlAfterRecovery != null) {
-                telemetryObserved = false
-                lastTelemetryReceivedAt = null
-            }
-            activePowerControl = null
-            nextConnectionRecoveryAt = now.plus(connectionRecoveryDelay(connectionRecoveryAttempt.coerceAtLeast(1)))
-            updateTrainerConnectionStatus(
-                status = TrainerConnectionStatus.RECONNECTING,
-                at = now,
-                retryAttempt = connectionRecoveryAttempt.takeIf { it > 0 },
-                error = failure,
-            )
-            return TrainerConnectionAvailability(connected = false, recovered = false)
-        }
-
-        val nextRecoveryAt = nextConnectionRecoveryAt
-        if (nextRecoveryAt != null && now.isBefore(nextRecoveryAt)) {
-            return TrainerConnectionAvailability(connected = false, recovered = false)
-        }
-
-        val attempt = connectionRecoveryAttempt + 1
-        connectionRecoveryAttempt = attempt
-        recordTrainerConnectionEvent(
-            type = TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
-            occurredAt = now,
-            retryAttempt = attempt,
-        )
-        logger.info(
-            "Trainer connection recovery attempt: sessionId={} attempt={}",
-            state.sessionId,
-            attempt,
-        )
-
-        val recoveryStage: CompletionStage<IndoorBikePowerControl?> =
-            if (currentPowerControl != null && !telemetryStale) {
-                CompletableFuture.completedFuture(currentPowerControl)
-            } else {
-                runCatching { trainingDevice.reconnectPowerControl(force = telemetryStale) }
-                    .onFailure { exception ->
-                        logger.warn(
-                            "Trainer connection recovery could not start: sessionId={} attempt={} error={}",
-                            state.sessionId,
-                            attempt,
-                            exception.message,
-                            exception,
-                        )
-                    }.getOrElse {
-                        CompletableFuture.completedFuture<IndoorBikePowerControl?>(null)
-                    }
-            }
-        startTrainerRecovery(now, recoveryStage)
-        return TrainerConnectionAvailability(connected = false, recovered = false)
-    }
-
-    private fun startTrainerRecovery(
-        now: Instant,
-        recoveryStage: CompletionStage<IndoorBikePowerControl?>,
-    ) {
-        updateTrainerConnectionStatus(
-            status = TrainerConnectionStatus.RECONNECTING,
-            at = now,
-            retryAttempt = connectionRecoveryAttempt,
-            error = state.trainerConnectionError,
-        )
-        connectionRecovery =
-            try {
-                recoveryStage.thenApplyAsync { powerControl ->
-                    powerControl?.also { it.requestControl() }
-                }
-            } catch (exception: Exception) {
-                logger.warn(
-                    "Trainer connection recovery could not be prepared: sessionId={} error={}",
-                    state.sessionId,
-                    exception.message,
-                    exception,
-                )
-                CompletableFuture.completedFuture(null)
-            }
-    }
-
-    private fun trainerConnectionRecovered(
-        powerControl: IndoorBikePowerControl,
-        at: Instant,
-    ): TrainerConnectionAvailability {
-        activePowerControl = powerControl
-        connectionInterruptedAt = null
-        nextConnectionRecoveryAt = null
-        connectionRecoveryAttempt = 0
-        targetSynchronizationPending = true
-        targetSynchronizationAt = at
-        telemetryObserved = false
-        lastTelemetryReceivedAt = null
-        rebindRecordingListenersAfterRecovery()
-        state =
-            state.copy(
-                changedAt = at,
-                trainerConnection = TrainerConnectionStatus.CONNECTED,
-                trainerConnectionRetryAttempt = null,
-                trainerConnectionError = null,
-                heartRate = activeHeartRateSourceId?.let(trainingDevice::currentHeartRate),
-            )
-        recordTrainerConnectionEvent(
-            type = TrainingActivityEventType.TRAINER_RECONNECTED,
-            occurredAt = at,
-        )
-        logger.info("Trainer connection recovered: sessionId={}", state.sessionId)
-        return TrainerConnectionAvailability(connected = true, recovered = true)
-    }
-
-    private fun markConnectionInterrupted(
-        at: Instant,
-        error: String? = null,
-    ) {
-        if (connectionInterruptedAt != null) {
-            if (error != null) {
-                state = state.copy(changedAt = at, trainerConnectionError = error)
-            }
-            return
-        }
-
-        connectionInterruptedAt = at
-        nextConnectionRecoveryAt = at
-        connectionRecoveryAttempt = 0
-        activePowerControl = null
-        targetSynchronizationPending = true
-        targetSynchronizationAt = null
-        telemetryRegistration?.close()
-        telemetryRegistration = null
-        updateTrainerConnectionStatus(
-            status = TrainerConnectionStatus.INTERRUPTED,
-            at = at,
-            retryAttempt = null,
-            error = error,
-        )
-        state = state.copy(heartRate = activeHeartRateSourceId?.let(trainingDevice::currentHeartRate))
-        recordTrainerConnectionEvent(
-            type = TrainingActivityEventType.TRAINER_CONNECTION_INTERRUPTED,
-            occurredAt = at,
-        )
-        logger.warn("Trainer connection interrupted: sessionId={} at={}", state.sessionId, at)
-    }
-
-    private fun rebindRecordingListenersAfterRecovery() {
-        val sessionId = state.sessionId ?: return
-        telemetryRegistration?.close()
-        telemetryRegistration = null
-        heartRateRegistration?.close()
-        heartRateRegistration = null
-        if (state.phase == TrainingSessionPhase.ACTIVE) {
-            registerTelemetry(sessionId)
-            registerHeartRate(sessionId, activeHeartRateSourceId)
-        }
-    }
-
-    private fun updateTrainerConnectionStatus(
-        status: TrainerConnectionStatus,
-        at: Instant,
-        retryAttempt: Int?,
-        error: String?,
-    ) {
-        if (
-            state.trainerConnection == status &&
-            state.trainerConnectionRetryAttempt == retryAttempt &&
-            state.trainerConnectionError == error
-        ) {
-            return
-        }
-        state =
-            state.copy(
-                changedAt = at,
-                trainerConnection = status,
-                trainerConnectionRetryAttempt = retryAttempt,
-                trainerConnectionError = error,
-            )
-    }
-
-    private fun connectionRecoveryDelay(attempt: Int): Duration {
-        var delay = CONNECTION_RECOVERY_INITIAL_DELAY
-        repeat((attempt - 1).coerceAtLeast(0)) {
-            val doubled = delay.multipliedBy(2)
-            delay = if (doubled > CONNECTION_RECOVERY_MAX_DELAY) CONNECTION_RECOVERY_MAX_DELAY else doubled
-        }
-        return delay
-    }
-
-    private fun recordTrainerConnectionEvent(
-        type: TrainingActivityEventType,
-        occurredAt: Instant,
-        retryAttempt: Int? = null,
-        targetPowerWatts: Int? = null,
-    ) {
-        val sessionId = state.sessionId ?: return
-        activityRecorder.recordEvent(
-            sessionId = sessionId,
-            event =
-                TrainingActivityEvent(
-                    type = type,
-                    occurredAt = occurredAt,
-                    retryAttempt = retryAttempt,
-                    targetPowerWatts = targetPowerWatts,
-                ),
-        )
-    }
-
-    private fun trySetTargetForExecution(
-        powerWatts: Int,
-        description: String,
-        at: Instant,
-    ): Boolean {
-        val powerControl = activePowerControl ?: return false
-        return try {
-            setTarget(powerControl, powerWatts, description)
-            true
-        } catch (exception: TrainingSessionUnavailableException) {
-            if (runCatching { trainingDevice.currentPowerControl() }.getOrNull() == null) {
-                markConnectionInterrupted(at)
-                false
-            } else {
-                throw exception
-            }
-        }
-    }
-
-    private fun trySetFreeRideForExecution(
-        description: String,
-        at: Instant,
-    ): Boolean {
-        val powerControl = activePowerControl ?: return false
-        return try {
-            setFreeRide(powerControl, description)
-            true
-        } catch (exception: TrainingSessionUnavailableException) {
-            if (runCatching { trainingDevice.currentPowerControl() }.getOrNull() == null) {
-                markConnectionInterrupted(at)
-                false
-            } else {
-                throw exception
-            }
-        }
-    }
-
-    private companion object {
-        const val MILLIS_PER_SECOND = 1_000L
-        const val DEFAULT_WORKOUT_POWER_TARGET_PERCENT = 100L
-        val CONNECTION_RECOVERY_INITIAL_DELAY: Duration = Duration.ofSeconds(1)
-        val CONNECTION_RECOVERY_MAX_DELAY: Duration = Duration.ofSeconds(8)
-    }
-
-    private fun activitySegmentName(
-        stepNumber: Int,
-        totalSteps: Int,
-        step: ExecutableWorkoutStep,
-    ): String {
-        val stepName = step.text?.trim()?.takeIf(String::isNotBlank) ?: "Step $stepNumber"
-        return "Step $stepNumber/$totalSteps: $stepName"
-    }
-
-    private fun setTarget(
-        powerControl: IndoorBikePowerControl,
-        powerWatts: Int,
-        description: String,
-    ) {
-        logger.debug(
-            "ERG target command: sessionId={} targetPowerWatts={} reason={}",
-            state.sessionId,
-            powerWatts,
-            description,
-        )
-        try {
-            powerControl.setTargetPower(powerWatts)
-            logger.debug(
-                "ERG target command accepted: sessionId={} targetPowerWatts={} reason={}",
-                state.sessionId,
-                powerWatts,
-                description,
-            )
-            recordTargetSynchronizationIfPending(powerWatts)
-        } catch (exception: Exception) {
-            logger.warn(
-                "ERG target command rejected: sessionId={} targetPowerWatts={} reason={} error={}",
-                state.sessionId,
-                powerWatts,
-                description,
-                exception.message,
-                exception,
-            )
-            throw TrainingSessionUnavailableException(
-                "The connected device rejected the $description target",
-                exception,
-            )
-        }
-    }
-
-    private fun setFreeRide(
-        powerControl: IndoorBikePowerControl,
-        description: String,
-    ) {
-        logger.debug(
-            "Free Ride command: sessionId={} reason={}",
-            state.sessionId,
-            description,
-        )
-        try {
-            powerControl.setFreeRide()
-            logger.debug(
-                "Free Ride command accepted: sessionId={} reason={}",
-                state.sessionId,
-                description,
-            )
-            recordTargetSynchronizationIfPending(null)
-        } catch (exception: Exception) {
-            logger.warn(
-                "Free Ride command rejected: sessionId={} reason={} error={}",
-                state.sessionId,
-                description,
-                exception.message,
-                exception,
-            )
-            throw TrainingSessionUnavailableException(
-                "The connected device rejected the $description command",
-                exception,
-            )
-        }
     }
 
     private fun requireActiveSession(sessionId: UUID): TrainingSessionState =
@@ -1800,61 +837,96 @@ class TrainingSessionCoordinator(
             }
         }
 
-    private fun requireActivePowerControl(): IndoorBikePowerControl =
-        activePowerControl
-            ?: throw TrainingSessionUnavailableException(
-                "The active training session no longer has a connected ERG power-control device",
+    private fun ensureTrainerConnection(now: Instant): TrainerConnectionAvailability {
+        val availability =
+            trainerConnection.ensure(
+                now = now,
+                paused = state.phase == TrainingSessionPhase.PAUSED,
             )
-
-    private fun clearActiveExecution(preserveTrainerRecovery: Boolean = false) {
-        activePowerControl = null
-        activeHeartRateSourceId = null
-        if (!preserveTrainerRecovery) {
-            connectionInterruptedAt = null
-            nextConnectionRecoveryAt = null
-            connectionRecoveryAttempt = 0
-            connectionRecovery = null
-            targetSynchronizationPending = false
-            targetSynchronizationAt = null
-            pendingZeroPowerCommand = false
-            lastTelemetryReceivedAt = null
-            telemetryObserved = false
-        }
-        pausedAt = null
-        pausedErgTargetPowerWatts = null
-        pausedControlMode = null
-        clearActiveWorkout()
+        updateTrainerConnectionStatus(
+            status = availability.status,
+            at = now,
+            retryAttempt = availability.retryAttempt,
+            error = availability.error,
+        )
+        return availability
     }
 
-    private fun clearActiveWorkout() {
-        activeWorkout = null
-        stepDistanceStartMeters = null
-        stepDistanceProgressAtPauseMeters = null
-    }
-
-    private fun recordTargetSynchronizationIfPending(targetPowerWatts: Int?) {
-        if (!targetSynchronizationPending) {
+    private fun updateTrainerConnectionStatus(
+        status: TrainerConnectionStatus,
+        at: Instant,
+        retryAttempt: Int?,
+        error: String?,
+    ) {
+        if (
+            state.trainerConnection == status &&
+            state.trainerConnectionRetryAttempt == retryAttempt &&
+            state.trainerConnectionError == error
+        ) {
             return
         }
+        state =
+            state.copy(
+                changedAt = at,
+                trainerConnection = status,
+                trainerConnectionRetryAttempt = retryAttempt,
+                trainerConnectionError = error,
+            )
+    }
 
-        recordTrainerConnectionEvent(
-            type = TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
-            occurredAt = targetSynchronizationAt ?: clock.instant(),
-            targetPowerWatts = targetPowerWatts,
-        )
-        targetSynchronizationPending = false
-        targetSynchronizationAt = null
+    private fun onTrainerConnectionInterrupted(
+        at: Instant,
+        error: String?,
+        initialInterruption: Boolean,
+    ) {
+        if (initialInterruption) {
+            activitySession.interruptTrainerRecording()
+            updateTrainerConnectionStatus(
+                status = TrainerConnectionStatus.INTERRUPTED,
+                at = at,
+                retryAttempt = null,
+                error = error,
+            )
+            state = state.copy(heartRate = activitySession.currentHeartRate())
+        } else if (error != null) {
+            state = state.copy(changedAt = at, trainerConnectionError = error)
+        }
+    }
+
+    private fun onTrainerConnectionRecovered(at: Instant) {
+        val sessionId = state.sessionId
+        if (sessionId != null) {
+            activitySession.rebindAfterTrainerRecovery(
+                sessionId = sessionId,
+                active = state.phase == TrainingSessionPhase.ACTIVE,
+            )
+        }
+        state =
+            state.copy(
+                changedAt = at,
+                trainerConnection = TrainerConnectionStatus.CONNECTED,
+                trainerConnectionRetryAttempt = null,
+                trainerConnectionError = null,
+                heartRate = activitySession.currentHeartRate(),
+            )
+    }
+
+    private fun recordActivityEvent(
+        sessionId: UUID,
+        event: TrainingActivityEvent,
+    ) {
+        activitySession.recordEvent(sessionId, event)
     }
 
     private fun synchronizeCurrentControl(at: Instant) {
         if (
-            pendingZeroPowerCommand ||
+            trainerConnection.hasPendingZeroPowerCommand() ||
             state.phase == TrainingSessionPhase.PAUSED ||
             state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE
         ) {
-            val commandApplied = trySetTargetForExecution(0, "reconnected 0 W hold", at)
+            val commandApplied = trainerConnection.trySetTargetForExecution(0, "reconnected 0 W hold", at)
             if (commandApplied) {
-                pendingZeroPowerCommand = false
+                trainerConnection.markZeroPowerCommandPending(false)
             }
             state =
                 state.copy(
@@ -1870,7 +942,7 @@ class TrainingSessionCoordinator(
             return
         }
         if (state.controlMode == TrainingControlMode.FREE_RIDE) {
-            val commandApplied = trySetFreeRideForExecution("reconnected Free Ride", at)
+            val commandApplied = trainerConnection.trySetFreeRideForExecution("reconnected Free Ride", at)
             state =
                 state.copy(
                     changedAt = at,
@@ -1881,43 +953,18 @@ class TrainingSessionCoordinator(
         }
 
         val targetPowerWatts =
-            if (state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE || isErgProtectionActive()) {
+            if (state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE || ergProtection.isActive(state)) {
                 0
             } else {
                 state.ergRequestedTargetPowerWatts ?: state.ergTargetPowerWatts ?: 0
             }
-        val commandApplied = trySetTargetForExecution(targetPowerWatts, "reconnected ERG target", at)
+        val commandApplied =
+            trainerConnection.trySetTargetForExecution(targetPowerWatts, "reconnected ERG target", at)
         state =
             state.copy(
                 changedAt = at,
                 ergTargetPowerWatts = if (commandApplied) targetPowerWatts else state.ergTargetPowerWatts,
             )
-    }
-
-    private fun resolveHeartRateSource(sourceId: String?): String? {
-        val sources = connectedHeartRateSources()
-        if (sourceId != null) {
-            requireConnectedHeartRateSource(sourceId, sources)
-            return sourceId
-        }
-        if (sources.size > 1) {
-            throw HeartRateSourceSelectionRequiredException()
-        }
-        return sources.singleOrNull()?.id
-    }
-
-    private fun connectedHeartRateSources(): List<HeartRateSourceDescriptor> =
-        trainingDevice
-            .heartRateSources()
-            .filter { source -> source.state == paceline.device.domain.ConnectionPhase.CONNECTED }
-
-    private fun requireConnectedHeartRateSource(
-        sourceId: String,
-        sources: List<HeartRateSourceDescriptor> = connectedHeartRateSources(),
-    ) {
-        if (sources.none { source -> source.id == sourceId }) {
-            throw HeartRateSourceNotFoundException(sourceId)
-        }
     }
 
     private fun onHeartRate(
@@ -1929,23 +976,31 @@ class TrainingSessionCoordinator(
             if (
                 state.phase != TrainingSessionPhase.ACTIVE ||
                 state.sessionId != sessionId ||
-                activeHeartRateSourceId != sourceId
+                activitySession.selectedHeartRateSourceId() != sourceId
             ) {
                 return
             }
-            activityRecorder.recordHeartRate(sessionId, sourceId, telemetry)
+            if (!activitySession.recordHeartRate(sessionId, sourceId, telemetry)) {
+                return
+            }
             state = state.copy(changedAt = clock.instant(), heartRate = telemetry)
         }
     }
 
     private fun refreshHeartRate() {
-        val sourceId = activeHeartRateSourceId ?: return
+        if (activitySession.selectedHeartRateSourceId() == null) {
+            return
+        }
         if (state.phase != TrainingSessionPhase.ACTIVE) {
             return
         }
-        val latest = trainingDevice.currentHeartRate(sourceId)
+        val latest = activitySession.currentHeartRate()
         if (latest != state.heartRate) {
             state = state.copy(heartRate = latest)
         }
+    }
+
+    private companion object {
+        const val DEFAULT_WORKOUT_POWER_TARGET_PERCENT = 100L
     }
 }

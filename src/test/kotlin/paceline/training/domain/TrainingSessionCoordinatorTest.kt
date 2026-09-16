@@ -34,7 +34,7 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `cannot start a training session before a controlled device is connected`() {
         // given a session coordinator whose device connection is still ready:
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(), clock)
+        val session = coordinator(FakeTrainingDevice(), clock)
 
         // when a training session is started:
         // then the session remains not started because device control is unavailable:
@@ -46,7 +46,7 @@ class TrainingSessionCoordinatorTest {
     fun `starting a session acquires control and gates target changes`() {
         // given a connected device with an ERG power-control capability:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
 
         // when the session is started in Free Ride and a target is changed:
         val started = session.start()
@@ -71,7 +71,7 @@ class TrainingSessionCoordinatorTest {
                 powerControl = powerControl,
                 availableHeartRateSources = listOf(heartRateSource("bridge"), heartRateSource("strap")),
             )
-        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val session = coordinator(trainingDevice, clock)
 
         // when a session is started without selecting one source:
         // then session creation is rejected before trainer control is requested:
@@ -90,7 +90,7 @@ class TrainingSessionCoordinatorTest {
                 availableHeartRateSources = listOf(heartRateSource("bridge"), heartRateSource("strap")),
             )
         val uploader = FakeActivityUploader()
-        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val session = coordinator(trainingDevice, clock, uploader)
 
         // when a session selects bridge HR, then switches to the strap:
         val started = session.start(heartRateSourceId = "bridge")
@@ -131,7 +131,7 @@ class TrainingSessionCoordinatorTest {
                 availableHeartRateSources = listOf(heartRateSource("strap")),
             )
         val uploader = FakeActivityUploader()
-        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val session = coordinator(trainingDevice, clock, uploader)
         val started = session.start(heartRateSourceId = "strap")
         val sessionId = requireNotNull(started.sessionId)
         val receivedAt = now.plusSeconds(1)
@@ -164,7 +164,7 @@ class TrainingSessionCoordinatorTest {
     fun `target changes are rejected without an active session`() {
         // given a connected device with ERG control but no started session:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val sessionId = java.util.UUID.randomUUID()
 
         // when a target is submitted before starting:
@@ -182,7 +182,7 @@ class TrainingSessionCoordinatorTest {
             FakeIndoorBikePowerControl().also {
                 it.requestControlFailure = IllegalStateException("control denied")
             }
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
 
         // when the session is started:
         // then the failure is visible and the session remains not started:
@@ -198,7 +198,7 @@ class TrainingSessionCoordinatorTest {
             FakeIndoorBikePowerControl().also {
                 it.freeRideFailure = IllegalStateException("free ride rejected")
             }
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
 
         // when a manual session is started:
         // then the failure is visible and the session remains not started:
@@ -213,7 +213,7 @@ class TrainingSessionCoordinatorTest {
         // given a session that acquired control from one device:
         val firstPowerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val session = coordinator(trainingDevice, clock)
         val started = session.start()
         val secondPowerControl = FakeIndoorBikePowerControl()
         trainingDevice.powerControl = secondPowerControl
@@ -230,7 +230,7 @@ class TrainingSessionCoordinatorTest {
     fun `stopping a session sends zero watts and marks it stopped`() {
         // given an active session with a previously selected ERG target:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val started = session.start()
         val sessionId = requireNotNull(started.sessionId)
         session.setTargetPower(sessionId, 300)
@@ -251,7 +251,7 @@ class TrainingSessionCoordinatorTest {
     fun `stopped sessions reject further target changes`() {
         // given a session that has sent its zero-watt stop target:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
         session.stop(sessionId)
 
@@ -270,7 +270,7 @@ class TrainingSessionCoordinatorTest {
             FakeIndoorBikePowerControl().also {
                 it.targetPowerFailure = IllegalStateException("trainer unavailable")
             }
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
 
         // when the active session is stopped:
@@ -286,7 +286,7 @@ class TrainingSessionCoordinatorTest {
     fun `finishing a workout keeps the session active for manual ERG continuation`() {
         // given a two-step workout whose power ranges resolve to different midpoint targets:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val workout =
             workout(
                 timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
@@ -326,7 +326,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(firstPowerControl)
         val uploader = FakeActivityUploader()
         val mutableClock = MutableTestClock(now)
-        val session = TrainingSessionCoordinator(trainingDevice, mutableClock, uploader)
+        val session = coordinator(trainingDevice, mutableClock, uploader)
         val workout =
             workout(
                 timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
@@ -392,7 +392,7 @@ class TrainingSessionCoordinatorTest {
         val firstPowerControl = FakeIndoorBikePowerControl()
         val recoveredPowerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val session = coordinator(trainingDevice, clock)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 20, 200, 200))).sessionId)
         trainingDevice.powerControl = null
         session.tick(now.plusSeconds(1), null)
@@ -419,7 +419,7 @@ class TrainingSessionCoordinatorTest {
         val firstPowerControl = FakeIndoorBikePowerControl()
         val recoveredPowerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val session = coordinator(trainingDevice, clock)
         val sessionId = requireNotNull(session.start().sessionId)
         trainingDevice.powerControl = null
         session.tick(now.plusSeconds(1), null)
@@ -451,7 +451,7 @@ class TrainingSessionCoordinatorTest {
                 telemetryCapabilityAvailable = true,
             )
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = clock,
                 ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
@@ -485,7 +485,7 @@ class TrainingSessionCoordinatorTest {
                 it.targetPowerFailure = IllegalStateException("target synchronization rejected")
             }
         val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val session = coordinator(trainingDevice, clock)
         val sessionId =
             requireNotNull(
                 session
@@ -535,7 +535,7 @@ class TrainingSessionCoordinatorTest {
                 telemetryCapabilityAvailable = true,
             )
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = clock,
                 ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
@@ -578,7 +578,7 @@ class TrainingSessionCoordinatorTest {
                 telemetryCapabilityAvailable = true,
             )
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = clock,
                 ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
@@ -602,7 +602,7 @@ class TrainingSessionCoordinatorTest {
     fun `updates the ERG target progressively during a timed ramp`() {
         // given a timed workout step with ordered ramp endpoints:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val workout =
             workout(
                 ExecutableWorkoutStep(
@@ -633,7 +633,7 @@ class TrainingSessionCoordinatorTest {
     fun `adjusts every workout power step from the session target percentage`() {
         // given a workout with two fixed power steps:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val workout =
             workout(
                 timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
@@ -660,7 +660,7 @@ class TrainingSessionCoordinatorTest {
     fun `adjusts ascending and descending ramp targets without changing their progression`() {
         // given a timed ramp workout:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val workout =
             workout(
                 ExecutableWorkoutStep(
@@ -691,7 +691,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = mutableClock,
                 ergProtectionProperties =
@@ -729,7 +729,7 @@ class TrainingSessionCoordinatorTest {
     fun `allows the target percentage to exceed ordinary intensity ranges while clamping device watts`() {
         // given a fixed workout target:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
 
         // when a large positive percentage adjustment is requested:
@@ -747,7 +747,7 @@ class TrainingSessionCoordinatorTest {
         val powerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(powerControl)
         val uploader = FakeActivityUploader()
-        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val session = coordinator(trainingDevice, clock, uploader)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
 
         // when the target is adjusted and the session is stopped and uploaded:
@@ -774,7 +774,7 @@ class TrainingSessionCoordinatorTest {
         val powerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(powerControl)
         val uploader = FakeActivityUploader()
-        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val session = coordinator(trainingDevice, clock, uploader)
         val started = session.start()
         val firstSample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
         val secondSample = telemetry(receivedAt = now.plusMillis(100), distanceMeters = 1_001.0)
@@ -813,7 +813,7 @@ class TrainingSessionCoordinatorTest {
 
                 override fun withZone(zone: ZoneId): Clock = this
             }
-        val session = TrainingSessionCoordinator(trainingDevice, mutableClock, uploader)
+        val session = coordinator(trainingDevice, mutableClock, uploader)
         val workout =
             workout(
                 timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
@@ -860,7 +860,7 @@ class TrainingSessionCoordinatorTest {
                 powerControl = powerControl,
                 telemetry = telemetry(distanceMeters = 1_000.0),
             )
-        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val session = coordinator(trainingDevice, clock)
         val workout =
             workout(
                 distanceStep("Block", meters = 100.0, lowWatts = 200, highWatts = 200),
@@ -885,7 +885,7 @@ class TrainingSessionCoordinatorTest {
     fun `manual workout steps advance only through the explicit advance action`() {
         // given a workout beginning with a manual step:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val workout =
             workout(
                 ExecutableWorkoutStep(
@@ -911,7 +911,7 @@ class TrainingSessionCoordinatorTest {
     fun `manual ERG target changes are rejected while a workout owns the target`() {
         // given an active executable workout:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
 
         // when a manual target is submitted during workout execution:
@@ -929,7 +929,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val uploader = FakeActivityUploader()
         val mutableClock = MutableTestClock(now)
-        val session = TrainingSessionCoordinator(trainingDevice, mutableClock, uploader)
+        val session = coordinator(trainingDevice, mutableClock, uploader)
         val started = session.start()
         val sessionId = requireNotNull(started.sessionId)
         session.setTargetPower(sessionId, 300)
@@ -968,7 +968,7 @@ class TrainingSessionCoordinatorTest {
         // given a timed workout that has run for part of its first step:
         val powerControl = FakeIndoorBikePowerControl()
         val mutableClock = MutableTestClock(now)
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), mutableClock)
+        val session = coordinator(FakeTrainingDevice(powerControl), mutableClock)
         val workout = workout(timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 200))
         val sessionId = requireNotNull(session.start(workout).sessionId)
         mutableClock.currentTime = now.plusSeconds(5)
@@ -1003,7 +1003,7 @@ class TrainingSessionCoordinatorTest {
         val powerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(powerControl, telemetry = telemetry(distanceMeters = 1_000.0))
         val mutableClock = MutableTestClock(now)
-        val session = TrainingSessionCoordinator(trainingDevice, mutableClock)
+        val session = coordinator(trainingDevice, mutableClock)
         val workout =
             workout(
                 distanceStep("Block", meters = 100.0, lowWatts = 200, highWatts = 200),
@@ -1038,7 +1038,7 @@ class TrainingSessionCoordinatorTest {
         val powerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(powerControl)
         val uploader = FakeActivityUploader()
-        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val session = coordinator(trainingDevice, clock, uploader)
         val sessionId = requireNotNull(session.start().sessionId)
         trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
 
@@ -1061,7 +1061,7 @@ class TrainingSessionCoordinatorTest {
             }
         val trainingDevice = FakeTrainingDevice(powerControl)
         val uploader = FakeActivityUploader()
-        val session = TrainingSessionCoordinator(trainingDevice, clock, uploader)
+        val session = coordinator(trainingDevice, clock, uploader)
         val sessionId = requireNotNull(session.start().sessionId)
 
         // when the session is paused:
@@ -1089,7 +1089,7 @@ class TrainingSessionCoordinatorTest {
     fun `a failed resume Free Ride command leaves the session paused`() {
         // given a paused Free Ride session whose trainer rejects the restored mode:
         val powerControl = FakeIndoorBikePowerControl()
-        val session = TrainingSessionCoordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeTrainingDevice(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
         session.pause(sessionId)
         powerControl.freeRideFailure = IllegalStateException("trainer unavailable")
@@ -1113,7 +1113,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val uploader = FakeActivityUploader()
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = clock,
                 activityUploader = uploader,
@@ -1182,7 +1182,7 @@ class TrainingSessionCoordinatorTest {
         val powerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(powerControl)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = clock,
                 ergProtectionProperties = ergProtectionProperties(),
@@ -1216,7 +1216,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = mutableClock,
                 ergProtectionProperties =
@@ -1263,7 +1263,7 @@ class TrainingSessionCoordinatorTest {
         val uploader = FakeActivityUploader()
         val mutableClock = MutableTestClock(now)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = mutableClock,
                 activityUploader = uploader,
@@ -1334,7 +1334,7 @@ class TrainingSessionCoordinatorTest {
         val powerControl = FakeIndoorBikePowerControl()
         val trainingDevice = FakeTrainingDevice(powerControl)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = clock,
                 ergProtectionProperties =
@@ -1389,7 +1389,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = mutableClock,
                 ergProtectionProperties =
@@ -1457,7 +1457,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = mutableClock,
                 ergProtectionProperties =
@@ -1506,7 +1506,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = mutableClock,
                 ergProtectionProperties =
@@ -1553,7 +1553,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = mutableClock,
                 ergProtectionProperties =
@@ -1600,7 +1600,7 @@ class TrainingSessionCoordinatorTest {
         val trainingDevice = FakeTrainingDevice(powerControl)
         val uploader = FakeActivityUploader()
         val session =
-            TrainingSessionCoordinator(
+            coordinator(
                 trainingDevice = trainingDevice,
                 clock = clock,
                 activityUploader = uploader,
@@ -1640,6 +1640,19 @@ class TrainingSessionCoordinatorTest {
         )
         assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
     }
+
+    private fun coordinator(
+        trainingDevice: FakeTrainingDevice,
+        clock: Clock,
+        activityUploader: FakeActivityUploader = FakeActivityUploader(),
+        ergProtectionProperties: ErgProtectionProperties = ErgProtectionProperties(),
+    ): TrainingSessionCoordinator =
+        TrainingSessionCoordinator(
+            trainingDevice = trainingDevice,
+            clock = clock,
+            activityUploader = activityUploader,
+            ergProtectionProperties = ergProtectionProperties,
+        )
 
     private class MutableTestClock(
         var currentTime: Instant,

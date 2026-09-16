@@ -83,13 +83,9 @@ data class TrainingSessionState(
     val sessionId: UUID? = null,
     val startedAt: Instant? = null,
     val changedAt: Instant,
-    /** The control mode currently intended by the active session. */
     val controlMode: TrainingControlMode = TrainingControlMode.ERG,
-    /** The target currently requested by the manual controller or workout step. */
     val ergRequestedTargetPowerWatts: Int? = null,
-    /** The target most recently accepted by the device, or null when it is unknown. */
     val ergTargetPowerWatts: Int? = null,
-    /** The percentage of the prescribed target used for the active workout. */
     val workoutPowerTargetPercent: Long? = null,
     val ergProtection: ErgProtectionState = ErgProtectionState.inactive(),
     val trainerConnection: TrainerConnectionStatus = TrainerConnectionStatus.NOT_ACTIVE,
@@ -99,6 +95,7 @@ data class TrainingSessionState(
     val heartRate: HeartRateTelemetry? = null,
     val workout: TrainingWorkoutProgress? = null,
     val activityUpload: TrainingActivityUploadState = TrainingActivityUploadState.unavailable(),
+    val pauseStartedAt: Instant? = null,
 ) {
     companion object {
         fun notStarted(now: Instant): TrainingSessionState =
