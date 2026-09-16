@@ -158,8 +158,17 @@ class FitActivityFileEncoder : ActivityFileEncoder {
     private fun TrainingActivityEvent.eventMessage(): EventMesg =
         EventMesg().apply {
             timestamp = occurredAt.toFitDateTime()
+            val isWorkoutAdjustment = type == TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED
+            val isTrainerConnectionEvent =
+                type in
+                    setOf(
+                        TrainingActivityEventType.TRAINER_CONNECTION_INTERRUPTED,
+                        TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
+                        TrainingActivityEventType.TRAINER_RECONNECTED,
+                        TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
+                    )
             event =
-                if (type == TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED) {
+                if (isWorkoutAdjustment || isTrainerConnectionEvent) {
                     Event.USER_MARKER
                 } else {
                     Event.CAD_LOW_ALERT
@@ -167,20 +176,32 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             eventType =
                 when (type) {
                     TrainingActivityEventType.ERG_PROTECTION_STARTED -> EventType.START
+
                     TrainingActivityEventType.ERG_PROTECTION_ENDED -> EventType.STOP
+
                     TrainingActivityEventType.ERG_PROTECTION_FAILED -> EventType.MARKER
+
                     TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED -> EventType.MARKER
+
+                    TrainingActivityEventType.TRAINER_CONNECTION_INTERRUPTED,
+                    TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
+                    TrainingActivityEventType.TRAINER_RECONNECTED,
+                    TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
+                    -> EventType.MARKER
                 }
-            if (type == TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED) {
+            if (isWorkoutAdjustment) {
                 targetPowerWatts
                     ?.coerceIn(FIT_UINT16_RANGE)
                     ?.let { data16 = it }
                 workoutPowerTargetPercent
                     ?.takeIf { it in 0L..UINT32_MAX }
                     ?.let { data = it }
+            } else if (isTrainerConnectionEvent) {
+                (targetPowerWatts ?: retryAttempt)
+                    ?.coerceIn(FIT_UINT16_RANGE)
+                    ?.let { data16 = it }
             } else {
-                cadenceRpm
-                    ?.roundToInt()
+                (cadenceRpm?.roundToInt() ?: retryAttempt)
                     ?.coerceIn(FIT_UINT16_RANGE)
                     ?.let { data16 = it }
             }

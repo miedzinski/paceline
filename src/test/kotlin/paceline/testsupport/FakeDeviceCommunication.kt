@@ -31,4 +31,8 @@ class FakeDeviceConnection(
     override fun close() {
         open.set(false)
     }
+
+    fun loseConnection() {
+        open.set(false)
+    }
 }

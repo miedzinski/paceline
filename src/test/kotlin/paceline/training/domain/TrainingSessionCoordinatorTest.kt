@@ -1,5 +1,6 @@
 package paceline.training.domain
 
+import org.awaitility.Awaitility
 import paceline.device.domain.ConnectionPhase
 import paceline.device.domain.DeviceAdvertisement
 import paceline.device.domain.DeviceEndpoint
@@ -315,6 +316,286 @@ class TrainingSessionCoordinatorTest {
         assertEquals(180, continued.ergTargetPowerWatts)
         assertEquals(listOf(250, 100, 180), powerControl.targetPowers)
         assertEquals(TrainingControlMode.ERG, continued.controlMode)
+    }
+
+    @Test
+    fun `connection loss keeps the workout moving and synchronizes the current target after recovery`() {
+        // given a timed workout whose trainer connection disappears after the first sample:
+        val firstPowerControl = FakeIndoorBikePowerControl()
+        val recoveredPowerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(firstPowerControl)
+        val uploader = FakeActivityUploader()
+        val mutableClock = MutableTestClock(now)
+        val session = TrainingSessionCoordinator(trainingDevice, mutableClock, uploader)
+        val workout =
+            workout(
+                timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
+                timedStep("Recovery", seconds = 10, lowWatts = 100, highWatts = 100),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+        val beforeLoss = telemetry(receivedAt = now, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(beforeLoss)
+        trainingDevice.powerControl = null
+
+        // when the scheduler observes the loss, advances the timed step, and later reconnects:
+        val interrupted = session.tick(now.plusSeconds(1), null)
+        val advancedWhileDisconnected = session.tick(now.plusSeconds(3), null)
+        val afterRecovery = telemetry(receivedAt = now.plusSeconds(5), distanceMeters = 1_005.0)
+        trainingDevice.telemetry = afterRecovery
+        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        session.tick(now.plusSeconds(5), null)
+        var recoveryTime = now.plusSeconds(5)
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            session.tick(recoveryTime, null)
+            assertEquals(listOf(100), recoveredPowerControl.targetPowers, session.current().toString())
+        }
+        trainingDevice.emitTelemetry(afterRecovery)
+        mutableClock.currentTime = now.plusSeconds(5)
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then the logical workout progressed without a zero-watt reset, and recovery applied the current step target:
+        assertEquals(TrainingSessionPhase.ACTIVE, interrupted.phase)
+        assertEquals(2, advancedWhileDisconnected.workout?.currentStepNumber)
+        assertEquals(100, advancedWhileDisconnected.ergRequestedTargetPowerWatts)
+        assertEquals(300, advancedWhileDisconnected.ergTargetPowerWatts)
+        assertEquals(listOf(300), firstPowerControl.targetPowers)
+        assertEquals(listOf(100, 0), recoveredPowerControl.targetPowers)
+        assertEquals(
+            listOf(beforeLoss.receivedAt, afterRecovery.receivedAt),
+            uploader
+                .uploads
+                .single()
+                .samples
+                .map { it.receivedAt },
+        )
+        assertEquals(
+            listOf(
+                TrainingActivityEventType.TRAINER_CONNECTION_INTERRUPTED,
+                TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
+                TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
+                TrainingActivityEventType.TRAINER_RECONNECTED,
+                TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
+            ),
+            uploader
+                .uploads
+                .single()
+                .events
+                .map { it.type },
+        )
+    }
+
+    @Test
+    fun `manual pause remains available during loss and applies zero after recovery`() {
+        // given an active workout whose trainer disappears while automatic recovery is pending:
+        val firstPowerControl = FakeIndoorBikePowerControl()
+        val recoveredPowerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(firstPowerControl)
+        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val sessionId = requireNotNull(session.start(workout(timedStep("Work", 20, 200, 200))).sessionId)
+        trainingDevice.powerControl = null
+        session.tick(now.plusSeconds(1), null)
+
+        // when the rider pauses and then the trainer becomes reachable again:
+        val paused = session.pause(sessionId)
+        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        var recoveryTime = now.plusSeconds(1)
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            session.tick(recoveryTime, null)
+            assertEquals(listOf(0), recoveredPowerControl.targetPowers)
+        }
+
+        // then the pause action was accepted immediately and the recovered trainer is held at 0 W:
+        assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
+        assertEquals(TrainingSessionPhase.PAUSED, session.current().phase)
+        assertEquals(TrainerConnectionStatus.CONNECTED, session.current().trainerConnection)
+    }
+
+    @Test
+    fun `manual stop during loss remains terminal until zero is confirmed`() {
+        // given an active ride whose trainer is disconnected before the stop command can be sent:
+        val firstPowerControl = FakeIndoorBikePowerControl()
+        val recoveredPowerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(firstPowerControl)
+        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val sessionId = requireNotNull(session.start().sessionId)
+        trainingDevice.powerControl = null
+        session.tick(now.plusSeconds(1), null)
+
+        // when the rider stops and the trainer later becomes reachable:
+        val stopped = session.stop(sessionId)
+        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        var recoveryTime = now.plusSeconds(1)
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            session.tick(recoveryTime, null)
+            assertEquals(listOf(0), recoveredPowerControl.targetPowers)
+        }
+
+        // then the ride stays stopped and the trainer receives the deferred safety command:
+        assertEquals(TrainingSessionPhase.STOPPED, stopped.phase)
+        assertEquals(TrainingSessionPhase.STOPPED, session.current().phase)
+        assertEquals(0, session.current().ergTargetPowerWatts)
+    }
+
+    @Test
+    fun `stale telemetry forces a transport recovery while the power capability is still open`() {
+        // given a trainer that advertises telemetry and has emitted one sample:
+        val firstPowerControl = FakeIndoorBikePowerControl()
+        val recoveredPowerControl = FakeIndoorBikePowerControl()
+        val trainingDevice =
+            FakeTrainingDevice(
+                powerControl = firstPowerControl,
+                telemetryCapabilityAvailable = true,
+            )
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = clock,
+                ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
+            )
+        session.start()
+        val sample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(sample)
+        session.tick(now, sample)
+        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+
+        // when no newer sample arrives past the configured freshness window:
+        val interrupted = session.tick(now.plusSeconds(3), null)
+
+        // then the session exposes recovery and forces a fresh transport connection:
+        assertEquals(TrainerConnectionStatus.RECONNECTING, interrupted.trainerConnection)
+        assertEquals(true, trainingDevice.lastReconnectForce)
+        var recoveryTime = now.plusSeconds(3)
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            assertEquals(TrainerConnectionStatus.CONNECTED, session.tick(recoveryTime, null).trainerConnection)
+        }
+        assertEquals(1, trainingDevice.reconnectCalls)
+    }
+
+    @Test
+    fun `failed target synchronization exposes the interrupted connection and retries`() {
+        // given a workout whose replacement trainer rejects the first synchronized target:
+        val firstPowerControl = FakeIndoorBikePowerControl()
+        val recoveredPowerControl =
+            FakeIndoorBikePowerControl().also {
+                it.targetPowerFailure = IllegalStateException("target synchronization rejected")
+            }
+        val trainingDevice = FakeTrainingDevice(firstPowerControl)
+        val session = TrainingSessionCoordinator(trainingDevice, clock)
+        val sessionId =
+            requireNotNull(
+                session
+                    .start(workout(timedStep("Work", seconds = 20, lowWatts = 200, highWatts = 200)))
+                    .sessionId,
+            )
+        trainingDevice.powerControl = null
+        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+
+        // when the trainer reconnects, rejects synchronization, and then accepts the retry:
+        session.tick(now.plusSeconds(1), null)
+        var recoveryTime = now.plusSeconds(1)
+        var interrupted = session.current()
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            interrupted = session.tick(recoveryTime, null)
+            assertEquals(TrainerConnectionStatus.INTERRUPTED, interrupted.trainerConnection)
+            assertEquals(
+                true,
+                interrupted.trainerConnectionError?.contains("target"),
+            )
+        }
+        recoveredPowerControl.targetPowerFailure = null
+        var retryTime = recoveryTime
+        var recovered = session.current()
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            retryTime = retryTime.plusSeconds(1)
+            recovered = session.tick(retryTime, null)
+            assertEquals(TrainerConnectionStatus.CONNECTED, recovered.trainerConnection)
+            assertEquals(listOf(200), recoveredPowerControl.targetPowers)
+        }
+
+        // then the session remains active and the rejected synchronization is retried on the same connection:
+        assertEquals(sessionId, recovered.sessionId)
+        assertEquals(listOf(200, 200), recoveredPowerControl.targetPowerAttempts)
+        assertEquals(1, trainingDevice.reconnectCalls)
+    }
+
+    @Test
+    fun `manual replacement is not force-reconnected after stale telemetry recovery fails`() {
+        // given a telemetry-capable manual session whose sample becomes stale during recovery:
+        val firstPowerControl = FakeIndoorBikePowerControl()
+        val manualPowerControl = FakeIndoorBikePowerControl()
+        val trainingDevice =
+            FakeTrainingDevice(
+                powerControl = firstPowerControl,
+                telemetryCapabilityAvailable = true,
+            )
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = clock,
+                ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
+            )
+        val sessionId = requireNotNull(session.start().sessionId)
+        val sample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(sample)
+        session.tick(now, sample)
+        trainingDevice.powerControl = null
+
+        // when automatic recovery fails after a manual replacement takes over:
+        val reconnecting = session.tick(now.plusSeconds(3), null)
+        trainingDevice.powerControl = manualPowerControl
+        val afterManualReplacement = session.tick(now.plusSeconds(3), null)
+        var recoveryTime = now.plusSeconds(3)
+        var recovered = session.current()
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            recovered = session.tick(recoveryTime, null)
+            assertEquals(TrainerConnectionStatus.CONNECTED, recovered.trainerConnection)
+        }
+
+        // then the manual connection remains authoritative and receives synchronization without another transport attempt:
+        assertEquals(TrainerConnectionStatus.RECONNECTING, reconnecting.trainerConnection)
+        assertEquals(true, trainingDevice.lastReconnectForce)
+        assertEquals(TrainerConnectionStatus.RECONNECTING, afterManualReplacement.trainerConnection)
+        assertEquals(sessionId, recovered.sessionId)
+        assertEquals(1, trainingDevice.reconnectCalls)
+        assertEquals(1, manualPowerControl.requestControlCalls)
+        assertEquals(1, manualPowerControl.freeRideCalls)
+    }
+
+    @Test
+    fun `paused sessions do not reconnect only because telemetry is stale`() {
+        // given a paused telemetry-capable session with an old but valid sample:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice =
+            FakeTrainingDevice(
+                powerControl = powerControl,
+                telemetryCapabilityAvailable = true,
+            )
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = clock,
+                ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
+            )
+        val sessionId = requireNotNull(session.start().sessionId)
+        val sample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(sample)
+        session.tick(now, sample)
+        session.pause(sessionId)
+
+        // when the paused scheduler ticks after the freshness window:
+        val pausedTick = session.tick(now.plusSeconds(3), null)
+
+        // then the intentional pause remains connected without starting transport recovery:
+        assertEquals(TrainingSessionPhase.PAUSED, pausedTick.phase)
+        assertEquals(TrainerConnectionStatus.CONNECTED, pausedTick.trainerConnection)
+        assertEquals(0, trainingDevice.reconnectCalls)
     }
 
     @Test
@@ -1215,6 +1496,54 @@ class TrainingSessionCoordinatorTest {
 
         // then the collected activity remains available despite the incomplete workout:
         assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+    }
+
+    @Test
+    fun `reconnection resolves unavailable ERG protection with a confirmed zero target`() {
+        // given a session whose protective zero command failed and left the trainer state unknown:
+        val powerControl = FakeIndoorBikePowerControl()
+        val recoveredPowerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val mutableClock = MutableTestClock(now)
+        val session =
+            TrainingSessionCoordinator(
+                trainingDevice = trainingDevice,
+                clock = mutableClock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                        recoveryDuration = Duration.ofSeconds(1),
+                    ),
+            )
+        val sessionId =
+            requireNotNull(
+                session
+                    .start(workout(timedStep("Hard", 10, 300, 300)))
+                    .sessionId,
+            )
+        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
+        trainingDevice.emitTelemetry(lowCadence)
+        session.tick(now, lowCadence)
+        session.tick(now.plusSeconds(1), lowCadence)
+        trainingDevice.powerControl = null
+        powerControl.targetPowerFailure = null
+        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+
+        // when the connection is recovered while ERG protection is still unavailable:
+        session.tick(now.plusSeconds(2), null)
+        var recoveryTime = now.plusSeconds(2)
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            session.tick(recoveryTime, null)
+            assertEquals(listOf(0), recoveredPowerControl.targetPowers)
+        }
+
+        // then the trainer has confirmed the safe target and protection is no longer unknown:
+        assertEquals(TrainingSessionPhase.ACTIVE, session.current().phase)
+        assertEquals(ErgProtectionStatus.BAILED_OUT, session.current().ergProtection.status)
+        assertEquals(0, session.current().ergTargetPowerWatts)
+        assertEquals(sessionId, session.current().sessionId)
     }
 
     @Test

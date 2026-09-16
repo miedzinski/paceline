@@ -278,6 +278,59 @@ class FitActivityFileEncoderTest {
         assertEquals(101L, events[1].getFieldLongValue(EventMesg.DataFieldNum))
     }
 
+    @Test
+    fun `activity file exports trainer connection events as neutral markers`() {
+        // given a ride with a telemetry gap and a successful target synchronization:
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.fromString("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
+                startedAt = Instant.parse("2026-09-14T12:00:00Z"),
+                stoppedAt = Instant.parse("2026-09-14T12:00:05Z"),
+                name = "Reconnected ride",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples = listOf(sample("2026-09-14T12:00:00Z", 1_000.0, 200)),
+                events =
+                    listOf(
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.TRAINER_CONNECTION_INTERRUPTED,
+                            occurredAt = Instant.parse("2026-09-14T12:00:01Z"),
+                        ),
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
+                            occurredAt = Instant.parse("2026-09-14T12:00:02Z"),
+                            retryAttempt = 2,
+                        ),
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.TRAINER_RECONNECTED,
+                            occurredAt = Instant.parse("2026-09-14T12:00:03Z"),
+                        ),
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
+                            occurredAt = Instant.parse("2026-09-14T12:00:04Z"),
+                            targetPowerWatts = 200,
+                        ),
+                    ),
+            )
+
+        // when the activity is encoded as FIT:
+        val events = decode(encoder.encode(activity)).filter { it.name == "event" }
+
+        // then connection lifecycle markers do not appear as false low-cadence alerts:
+        assertEquals(
+            listOf(EventType.START, EventType.MARKER, EventType.MARKER, EventType.MARKER, EventType.MARKER, EventType.STOP_ALL),
+            events.map { EventType.getByValue(it.getFieldShortValue(EventMesg.EventTypeFieldNum)) },
+        )
+        assertEquals(
+            listOf(Event.TIMER, Event.USER_MARKER, Event.USER_MARKER, Event.USER_MARKER, Event.USER_MARKER, Event.TIMER),
+            events.map { Event.getByValue(it.getFieldShortValue(EventMesg.EventFieldNum)) },
+        )
+        assertNull(events[1].getFieldIntegerValue(EventMesg.Data16FieldNum))
+        assertEquals(2, events[2].getFieldIntegerValue(EventMesg.Data16FieldNum))
+        assertNull(events[3].getFieldIntegerValue(EventMesg.Data16FieldNum))
+        assertEquals(200, events[4].getFieldIntegerValue(EventMesg.Data16FieldNum))
+    }
+
     private fun decode(file: ActivityFile): List<Mesg> {
         val messages = mutableListOf<Mesg>()
         val decoded =

@@ -7,17 +7,32 @@ import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.IndoorBikePowerControl
 import paceline.device.ports.IndoorBikeTelemetryListener
 import paceline.training.ports.TrainingDevice
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
 
 class FakeTrainingDevice(
     var powerControl: IndoorBikePowerControl? = null,
     var telemetry: IndoorBikeTelemetry? = null,
     var availableHeartRateSources: List<HeartRateSourceDescriptor> = emptyList(),
+    var telemetryCapabilityAvailable: Boolean = false,
 ) : TrainingDevice {
+    var reconnectPowerControlResult: IndoorBikePowerControl? = null
+    var lastReconnectForce: Boolean? = null
+    var reconnectCalls = 0
+        private set
     private val telemetryListeners = mutableListOf<IndoorBikeTelemetryListener>()
     private val heartRateListeners = mutableMapOf<String, MutableList<HeartRateTelemetryListener>>()
     private val heartRates = mutableMapOf<String, HeartRateTelemetry>()
 
     override fun currentPowerControl(): IndoorBikePowerControl? = powerControl
+
+    override fun reconnectPowerControl(force: Boolean): CompletionStage<IndoorBikePowerControl?> {
+        reconnectCalls += 1
+        lastReconnectForce = force
+        return CompletableFuture.completedFuture(reconnectPowerControlResult?.also { powerControl = it })
+    }
+
+    override fun hasTelemetryCapability(): Boolean = telemetryCapabilityAvailable
 
     override fun currentTelemetry(): IndoorBikeTelemetry? = telemetry
 

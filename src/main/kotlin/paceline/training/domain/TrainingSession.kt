@@ -20,6 +20,13 @@ enum class TrainingControlMode {
     FREE_RIDE,
 }
 
+enum class TrainerConnectionStatus {
+    NOT_ACTIVE,
+    CONNECTED,
+    INTERRUPTED,
+    RECONNECTING,
+}
+
 enum class TrainingActivityUploadPhase {
     UNAVAILABLE,
     AVAILABLE,
@@ -85,6 +92,9 @@ data class TrainingSessionState(
     /** The percentage of the prescribed target used for the active workout. */
     val workoutPowerTargetPercent: Long? = null,
     val ergProtection: ErgProtectionState = ErgProtectionState.inactive(),
+    val trainerConnection: TrainerConnectionStatus = TrainerConnectionStatus.NOT_ACTIVE,
+    val trainerConnectionRetryAttempt: Int? = null,
+    val trainerConnectionError: String? = null,
     val heartRateSourceId: String? = null,
     val heartRate: HeartRateTelemetry? = null,
     val workout: TrainingWorkoutProgress? = null,
@@ -107,6 +117,7 @@ data class TrainingSessionState(
                 sessionId = sessionId,
                 startedAt = now,
                 changedAt = now,
+                trainerConnection = TrainerConnectionStatus.CONNECTED,
                 workout = workout,
             )
     }

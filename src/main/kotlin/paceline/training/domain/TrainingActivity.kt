@@ -62,6 +62,10 @@ enum class TrainingActivityEventType {
     ERG_PROTECTION_ENDED,
     ERG_PROTECTION_FAILED,
     WORKOUT_TARGET_ADJUSTED,
+    TRAINER_CONNECTION_INTERRUPTED,
+    TRAINER_RECONNECT_ATTEMPTED,
+    TRAINER_RECONNECTED,
+    TRAINER_TARGET_SYNCHRONIZED,
 }
 
 data class TrainingActivityEvent(
@@ -70,6 +74,7 @@ data class TrainingActivityEvent(
     val cadenceRpm: Double? = null,
     val workoutPowerTargetPercent: Long? = null,
     val targetPowerWatts: Int? = null,
+    val retryAttempt: Int? = null,
 ) {
     init {
         require(cadenceRpm == null || (cadenceRpm.isFinite() && cadenceRpm >= 0.0)) {
@@ -77,6 +82,9 @@ data class TrainingActivityEvent(
         }
         require(targetPowerWatts == null || targetPowerWatts in 0..Short.MAX_VALUE.toInt()) {
             "An activity event target must fit the non-negative FTMS signed 16-bit watt field"
+        }
+        require(retryAttempt == null || retryAttempt > 0) {
+            "An activity event retry attempt must be positive"
         }
     }
 }

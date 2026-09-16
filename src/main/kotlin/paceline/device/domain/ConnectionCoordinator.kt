@@ -14,6 +14,10 @@ import paceline.device.ports.IndoorBikeTelemetrySource
 import paceline.device.ports.WifiDiscovery
 import java.time.Clock
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class NotDiscoveredException(
     val deviceId: String,
@@ -42,6 +46,21 @@ class ConnectionCoordinator(
     private val connections = linkedMapOf<String, ManagedConnection>()
     private var primaryTrainingConnectionId: String? = null
     private var lastConnectionState = discoveryStateMachine.current()
+    private val recoveryExecutor: ExecutorService =
+        Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "paceline-trainer-recovery").apply {
+                isDaemon = true
+            }
+        }
+    private var connectionRecoveryGeneration = 0L
+    private var primaryConnectionRecovery: PrimaryConnectionRecovery? = null
+
+    private data class PrimaryConnectionRecovery(
+        val connectionId: String,
+        val device: DeviceAdvertisement,
+        val generation: Long,
+        val future: CompletableFuture<IndoorBikePowerControl?>,
+    )
 
     @Synchronized
     fun current(): ConnectionState {
@@ -72,6 +91,13 @@ class ConnectionCoordinator(
             return null
         }
         return managed.session.capability<IndoorBikePowerControl>()
+    }
+
+    @Synchronized
+    fun hasPrimaryTrainingTelemetry(): Boolean {
+        refreshConnectionStates()
+        val managed = primaryTrainingConnection() ?: return false
+        return isConnected(managed) && managed.session.capability<IndoorBikeTelemetrySource>() != null
     }
 
     @Synchronized
@@ -240,17 +266,18 @@ class ConnectionCoordinator(
             discoveredDevices[deviceId]
                 ?: throw NotDiscoveredException(deviceId)
 
+        invalidateRecoveryFor(device)
         refreshConnectionStates()
         val existing =
             connections.values.firstOrNull {
-                it.session.connection.device == device && isConnected(it)
+                sameDevice(it.session.connection.device, device) && isConnected(it)
             }
         if (existing != null) {
             return existing.stateMachine.current()
         }
 
         connections
-            .filterValues { it.session.connection.device == device }
+            .filterValues { sameDevice(it.session.connection.device, device) }
             .values
             .toList()
             .forEach { managed ->
@@ -298,10 +325,117 @@ class ConnectionCoordinator(
     }
 
     @Synchronized
+    fun reconnectPrimaryTrainingConnection(force: Boolean = false): CompletionStage<IndoorBikePowerControl?> {
+        refreshConnectionStates()
+        val connectionId = primaryTrainingConnectionId ?: return CompletableFuture.completedFuture(null)
+        val inFlight = primaryConnectionRecovery
+        if (inFlight?.connectionId == connectionId) {
+            return inFlight.future
+        }
+
+        val managed = connections[connectionId] ?: return CompletableFuture.completedFuture(null)
+        val currentState = managed.stateMachine.current()
+        if (currentState.phase == ConnectionPhase.CONNECTED && managed.session.connection.isOpen()) {
+            val existingControl = managed.session.capability<IndoorBikePowerControl>()
+            if (existingControl != null && !force) {
+                return CompletableFuture.completedFuture(existingControl)
+            }
+            managed.stateMachine
+                .transition(
+                    ConnectionEvent.ConnectionLost(
+                        if (force) {
+                            "The trainer telemetry stream is stale"
+                        } else {
+                            "The connected device no longer exposes ERG control"
+                        },
+                    ),
+                ).also { lastConnectionState = it }
+        }
+
+        val device = currentState.device ?: managed.session.connection.device
+        closeConnection(managed.session)
+        managed.stateMachine.transition(ConnectionEvent.BeginConnection(device))
+
+        val generation = ++connectionRecoveryGeneration
+        val future = CompletableFuture<IndoorBikePowerControl?>()
+        primaryConnectionRecovery =
+            PrimaryConnectionRecovery(
+                connectionId = connectionId,
+                device = device,
+                generation = generation,
+                future = future,
+            )
+        try {
+            recoveryExecutor.execute {
+                val connectionResult = runCatching { communication.connect(device) }
+                synchronized(this) {
+                    val isCurrentAttempt =
+                        connectionRecoveryGeneration == generation &&
+                            primaryTrainingConnectionId == connectionId &&
+                            connections[connectionId]?.session === managed.session
+                    val session = connectionResult.getOrNull()
+                    if (!isCurrentAttempt) {
+                        session?.let(::closeConnection)
+                        future.complete(null)
+                    } else if (session == null) {
+                        val failure =
+                            connectionResult.exceptionOrNull()
+                                ?: IllegalStateException("Device reconnection failed")
+                        managed.stateMachine
+                            .transition(
+                                ConnectionEvent.ConnectionFailed(
+                                    failure.message ?: "Device reconnection failed",
+                                ),
+                            ).also { lastConnectionState = it }
+                        future.completeExceptionally(failure)
+                    } else {
+                        val powerControl = session.capability<IndoorBikePowerControl>()
+                        if (powerControl == null) {
+                            val failure = IllegalStateException("The reconnected device does not expose ERG power control")
+                            closeConnection(session)
+                            managed.stateMachine
+                                .transition(
+                                    ConnectionEvent.ConnectionFailed(
+                                        failure.message ?: "The reconnected device does not expose ERG power control",
+                                    ),
+                                ).also { lastConnectionState = it }
+                            future.completeExceptionally(failure)
+                        } else {
+                            val connectedState = managed.stateMachine.transition(ConnectionEvent.ConnectionEstablished)
+                            connections[connectionId] =
+                                ManagedConnection(
+                                    id = connectionId,
+                                    session = session,
+                                    stateMachine = managed.stateMachine,
+                                )
+                            lastConnectionState = connectedState
+                            future.complete(powerControl)
+                        }
+                    }
+                    if (primaryConnectionRecovery?.generation == generation) {
+                        primaryConnectionRecovery = null
+                    }
+                }
+            }
+        } catch (exception: Exception) {
+            managed.stateMachine
+                .transition(
+                    ConnectionEvent.ConnectionFailed(
+                        exception.message ?: "Device reconnection could not be scheduled",
+                    ),
+                ).also { lastConnectionState = it }
+            primaryConnectionRecovery = null
+            future.completeExceptionally(exception)
+        }
+        return future
+    }
+
+    @Synchronized
     fun disconnect(connectionId: String) {
         val managed =
             connections[connectionId]
                 ?: throw ConnectionNotFoundException(connectionId)
+        invalidateRecoveryFor(managed.session.connection.device, connectionId)
         val disconnectedState =
             if (managed.stateMachine.current().phase == ConnectionPhase.CONNECTED) {
                 managed.stateMachine.transition(ConnectionEvent.ConnectionLost("The device connection was closed"))
@@ -318,9 +452,12 @@ class ConnectionCoordinator(
 
     @Synchronized
     override fun close() {
+        connectionRecoveryGeneration += 1
+        primaryConnectionRecovery = null
         connections.values.forEach { managed -> closeConnection(managed.session) }
         connections.clear()
         primaryTrainingConnectionId = null
+        recoveryExecutor.shutdownNow()
     }
 
     private fun discoverFromSources(): DeviceDiscoveryResult {
@@ -389,6 +526,62 @@ class ConnectionCoordinator(
         } catch (exception: Exception) {
             logger.warn("Failed to close device connection", exception)
         }
+    }
+
+    private fun invalidateRecoveryFor(
+        device: DeviceAdvertisement,
+        connectionId: String? = null,
+    ) {
+        val recovery = primaryConnectionRecovery ?: return
+        if (sameDevice(recovery.device, device) && (connectionId == null || recovery.connectionId == connectionId)) {
+            connectionRecoveryGeneration += 1
+            primaryConnectionRecovery = null
+            recovery.future.complete(null)
+        }
+    }
+
+    private fun sameDevice(
+        first: DeviceAdvertisement,
+        second: DeviceAdvertisement,
+    ): Boolean {
+        if (first == second) {
+            return true
+        }
+        if (first.endpoint.transport != second.endpoint.transport) {
+            return false
+        }
+
+        if (first.name.equals(second.name, ignoreCase = true)) {
+            stableIdentityKeys.forEach { key ->
+                val firstIdentity = first.metadata[key]?.trim()
+                val secondIdentity = second.metadata[key]?.trim()
+                if (!firstIdentity.isNullOrEmpty() && firstIdentity.equals(secondIdentity, ignoreCase = true)) {
+                    return true
+                }
+            }
+        }
+
+        return when {
+            first.endpoint is DeviceEndpoint.Bluetooth && second.endpoint is DeviceEndpoint.Bluetooth -> {
+                first.endpoint.address.equals(second.endpoint.address, ignoreCase = true) &&
+                    first.endpoint.adapterAddress.equals(second.endpoint.adapterAddress, ignoreCase = true)
+            }
+
+            else -> {
+                false
+            }
+        }
+    }
+
+    private companion object {
+        val stableIdentityKeys =
+            listOf(
+                "serial-number",
+                "serial_number",
+                "mac-address",
+                "mac_address",
+                "bluetooth-address",
+            )
     }
 }
 

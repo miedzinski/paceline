@@ -1,5 +1,6 @@
 package paceline.device.domain
 
+import org.awaitility.Awaitility
 import paceline.device.domain.HeartRateTelemetry
 import paceline.device.ports.DeviceCapability
 import paceline.device.ports.DeviceCommunicationException
@@ -12,10 +13,14 @@ import paceline.testsupport.FakeHeartRateTelemetrySource
 import paceline.testsupport.FakeIndoorBikePowerControl
 import paceline.testsupport.FakeWifiDiscovery
 import paceline.testsupport.kickrCore2Candidate
+import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class ConnectionCoordinatorTest {
     private val candidate = kickrCore2Candidate()
@@ -180,6 +185,109 @@ class ConnectionCoordinatorTest {
         // then the existing connection is returned without opening another connection:
         assertEquals(firstResult, secondResult)
         assertEquals(listOf(device), communication.connectedDevices)
+    }
+
+    @Test
+    fun `reconnects the primary trainer connection while preserving its connection id`() {
+        // given a trainer connection that can be opened again after the first transport closes:
+        val firstControl = FakeIndoorBikePowerControl()
+        val secondControl = FakeIndoorBikePowerControl()
+        var connectionAttempt = 0
+        var firstConnection: FakeDeviceConnection? = null
+        val communication =
+            FakeDeviceCommunication { advertisement ->
+                connectionAttempt += 1
+                val connection = FakeDeviceConnection(advertisement)
+                if (connectionAttempt == 1) {
+                    firstConnection = connection
+                    DeviceConnectionSession(connection, listOf<DeviceCapability>(firstControl))
+                } else {
+                    DeviceConnectionSession(connection, listOf<DeviceCapability>(secondControl))
+                }
+            }
+        val coordinator = coordinator(communication = communication)
+        val deviceId =
+            coordinator
+                .discover()
+                .devices
+                .single()
+                .id
+        coordinator.connect(deviceId)
+        val connectionId = coordinator.connectedDevices().single().id
+        firstConnection?.loseConnection()
+
+        // when the active trainer connection is recovered:
+        assertEquals(ConnectionPhase.DISCONNECTED, coordinator.current().phase)
+        val recoveredControl = coordinator.reconnectPrimaryTrainingConnection().toCompletableFuture().join()
+
+        // then the replacement exposes the same logical connection and its new control capability:
+        assertEquals(secondControl, recoveredControl)
+        assertEquals(ConnectionPhase.CONNECTED, coordinator.current().phase)
+        assertEquals(connectionId, coordinator.connectedDevices().single().id)
+        assertEquals(2, communication.connectedDevices.size)
+    }
+
+    @Test
+    fun `manual connection wins over an in-flight automatic recovery`() {
+        // given an automatic recovery whose transport call is still blocked:
+        val firstControl = FakeIndoorBikePowerControl()
+        val automaticControl = FakeIndoorBikePowerControl()
+        val manualControl = FakeIndoorBikePowerControl()
+        val recoveryStarted = CountDownLatch(1)
+        val releaseRecovery = CountDownLatch(1)
+        var connectionAttempt = 0
+        val communication =
+            FakeDeviceCommunication { advertisement ->
+                connectionAttempt += 1
+                when (connectionAttempt) {
+                    1 -> {
+                        DeviceConnectionSession(FakeDeviceConnection(advertisement), listOf<DeviceCapability>(firstControl))
+                    }
+
+                    2 -> {
+                        recoveryStarted.countDown()
+                        releaseRecovery.await(1, TimeUnit.SECONDS)
+                        DeviceConnectionSession(FakeDeviceConnection(advertisement), listOf<DeviceCapability>(automaticControl))
+                    }
+
+                    else -> {
+                        DeviceConnectionSession(FakeDeviceConnection(advertisement), listOf<DeviceCapability>(manualControl))
+                    }
+                }
+            }
+        val coordinator = coordinator(communication = communication)
+        val deviceId =
+            coordinator
+                .discover()
+                .devices
+                .single()
+                .id
+        coordinator.connect(deviceId)
+        val connectionId = coordinator.connectedDevices().single().id
+        communication.connections.single().connection.let { connection ->
+            (connection as FakeDeviceConnection).loseConnection()
+        }
+        val recovery = coordinator.reconnectPrimaryTrainingConnection()
+        assertTrue(recoveryStarted.await(1, TimeUnit.SECONDS))
+
+        // when the rider scans and connects manually before automatic recovery returns:
+        val manualState = coordinator.connect(deviceId)
+        releaseRecovery.countDown()
+        recovery.toCompletableFuture().join()
+
+        // then the manual connection remains primary and the stale automatic result is closed:
+        assertEquals(ConnectionPhase.CONNECTED, manualState.phase)
+        assertTrue(connectionId != coordinator.connectedDevices().single().id)
+        assertEquals(manualControl, coordinator.currentPowerControl())
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            assertEquals(
+                false,
+                communication.connections
+                    .last()
+                    .connection
+                    .isOpen(),
+            )
+        }
     }
 
     @Test

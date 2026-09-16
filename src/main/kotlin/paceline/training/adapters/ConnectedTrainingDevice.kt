@@ -9,12 +9,18 @@ import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.IndoorBikePowerControl
 import paceline.device.ports.IndoorBikeTelemetryListener
 import paceline.training.ports.TrainingDevice
+import java.util.concurrent.CompletionStage
 
 @Component
 class ConnectedTrainingDevice(
     private val connectionCoordinator: ConnectionCoordinator,
 ) : TrainingDevice {
     override fun currentPowerControl(): IndoorBikePowerControl? = connectionCoordinator.currentPowerControl()
+
+    override fun reconnectPowerControl(force: Boolean): CompletionStage<IndoorBikePowerControl?> =
+        connectionCoordinator.reconnectPrimaryTrainingConnection(force)
+
+    override fun hasTelemetryCapability(): Boolean = connectionCoordinator.hasPrimaryTrainingTelemetry()
 
     override fun currentTelemetry(): IndoorBikeTelemetry? = connectionCoordinator.currentTelemetry()
 

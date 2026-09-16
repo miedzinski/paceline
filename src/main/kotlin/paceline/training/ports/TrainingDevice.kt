@@ -6,9 +6,15 @@ import paceline.device.domain.IndoorBikeTelemetry
 import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.IndoorBikePowerControl
 import paceline.device.ports.IndoorBikeTelemetryListener
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
 
 interface TrainingDevice {
     fun currentPowerControl(): IndoorBikePowerControl?
+
+    fun reconnectPowerControl(force: Boolean = false): CompletionStage<IndoorBikePowerControl?> = CompletableFuture.completedFuture(null)
+
+    fun hasTelemetryCapability(): Boolean = false
 
     fun currentTelemetry(): IndoorBikeTelemetry? = null
 

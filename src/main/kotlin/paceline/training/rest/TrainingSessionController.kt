@@ -261,6 +261,9 @@ data class TrainingSessionResponse(
     val ergTargetPowerWatts: Int?,
     val workoutPowerTargetPercent: Long?,
     val ergProtection: ErgProtectionResponse,
+    val trainerConnection: String,
+    val trainerConnectionRetryAttempt: Int?,
+    val trainerConnectionError: String?,
     val heartRateSourceId: String?,
     val heartRate: HeartRateResponse?,
     val workout: TrainingWorkoutResponse?,
@@ -330,6 +333,9 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
         ergTargetPowerWatts = ergTargetPowerWatts,
         workoutPowerTargetPercent = workoutPowerTargetPercent,
         ergProtection = ergProtection.toResponse(),
+        trainerConnection = trainerConnection.name,
+        trainerConnectionRetryAttempt = trainerConnectionRetryAttempt,
+        trainerConnectionError = trainerConnectionError,
         heartRateSourceId = heartRateSourceId,
         heartRate =
             heartRate?.let { telemetry ->
