@@ -171,6 +171,42 @@ class WorkoutExecutionPlanTest {
     }
 
     @Test
+    fun `executes direct percentage and watt ranges as fixed power ranges`() {
+        // given a cycling plan with provider ranges expressed as FTP percentage and watts:
+        val scheduled =
+            scheduledWorkout(
+                WorkoutPlanSummary(
+                    description = null,
+                    durationSeconds = 1_200,
+                    distanceMeters = null,
+                    ftpWatts = 200,
+                    thresholdHeartRateBpm = null,
+                    target = "POWER",
+                    steps =
+                        listOf(
+                            leafStep(
+                                text = "Percentage range",
+                                durationSeconds = 600,
+                                power = WorkoutTargetSummary(start = 60.0, end = 75.0, units = "%ftp"),
+                            ),
+                            leafStep(
+                                text = "Watt range",
+                                durationSeconds = 600,
+                                power = WorkoutTargetSummary(start = 100.0, end = 120.0, units = "w"),
+                            ),
+                        ),
+                ),
+            )
+
+        // when the plan is normalized for trainer execution:
+        val result = ExecutableWorkoutFactory.from(scheduled)
+
+        // then both direct ranges become fixed executable watt ranges:
+        assertEquals(WorkoutStepTarget.Power(120, 150), result.steps[0].target)
+        assertEquals(WorkoutStepTarget.Power(100, 120), result.steps[1].target)
+    }
+
+    @Test
     fun `rejects a step with ambiguous time and distance completion`() {
         // given a step carrying both time and distance completion values:
         val scheduled =

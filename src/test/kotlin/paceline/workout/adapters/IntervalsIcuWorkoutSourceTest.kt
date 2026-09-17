@@ -22,6 +22,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 
 class IntervalsIcuWorkoutSourceTest {
     @Test
@@ -303,6 +304,51 @@ class IntervalsIcuWorkoutSourceTest {
         assertEquals(138.0, step?.resolvedPower?.start)
         assertEquals(187.0, step?.resolvedPower?.end)
         assertEquals("W", step?.resolvedPower?.units)
+    }
+
+    @Test
+    fun `preserves absolute watt ranges from provider workout steps`() {
+        // given a saved workout whose provider target is an absolute watt range:
+        val (client, server) = createClient()
+        val source = IntervalsIcuWorkoutSource(client)
+        server
+            .expect(
+                requestTo("http://intervals.test/api/v1/athlete/0/workouts/89"),
+            ).andRespond(
+                withSuccess(
+                    """
+                    {
+                      "id":89,
+                      "name":"Watt range",
+                      "type":"Ride",
+                      "workout_doc":{
+                        "steps":[
+                          {
+                            "duration":600,
+                            "power":{"start":100,"end":120,"units":"w"}
+                          }
+                        ]
+                      }
+                    }
+                    """.trimIndent(),
+                    MediaType.APPLICATION_JSON,
+                ),
+            )
+
+        // when the saved workout is read through the provider adapter:
+        val step =
+            source
+                .find("89")
+                ?.workout
+                ?.steps
+                ?.single()
+
+        // then the raw absolute range remains available for execution without an FTP lookup:
+        server.verify()
+        assertEquals(100.0, step?.power?.start)
+        assertEquals(120.0, step?.power?.end)
+        assertEquals("w", step?.power?.units)
+        assertNull(step?.resolvedPower)
     }
 
     private fun createClient(): Pair<IntervalsIcuClient, MockRestServiceServer> {
