@@ -17,7 +17,7 @@ export function PreRideView({
     selectedWorkout,
     athleteProfile,
     error,
-    onBack,
+    onLogoClick,
     onOpenEquipment,
     onSelectHeartRateSource,
     onStart,
@@ -30,7 +30,7 @@ export function PreRideView({
     selectedWorkout: WorkoutItem | null;
     athleteProfile: AppShellContextValue["profile"];
     error: string | null;
-    onBack: () => void;
+    onLogoClick: () => void;
     onOpenEquipment: () => void;
     onSelectHeartRateSource: (sourceId: string) => void;
     onStart: () => void;
@@ -45,10 +45,8 @@ export function PreRideView({
         <div className="min-h-[100svh] bg-[#090c12] px-4 pt-[calc(0.9rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))] text-[#f5f6fb] sm:px-6 lg:px-8">
             <div className="mx-auto max-w-[1250px]">
                 <RideHeader
-                    eyebrow="Ready to ride"
-                    title={selectedWorkout?.name?.trim() || "Free ride"}
-                    trainerName={trainer?.device.name ?? null}
-                    onBack={onBack}
+                    connection={connection}
+                    onLogoClick={onLogoClick}
                     onOpenEquipment={onOpenEquipment}
                 />
 

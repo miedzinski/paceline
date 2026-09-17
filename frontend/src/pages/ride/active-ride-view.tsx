@@ -18,6 +18,7 @@ import { PostRideSheet, StopPrompt } from "./ride-sheets";
 
 export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
     const {
+        connection,
         openEquipment,
         profile,
         session,
@@ -47,7 +48,6 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         requestedTarget,
         appliedTarget,
         powerProgress,
-        rideName,
         navigateHome,
         pauseSession,
         resumeSession,
@@ -63,16 +63,8 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         <div className="min-h-[100svh] bg-[#090c12] px-4 pt-[calc(0.9rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))] text-[#f5f6fb] sm:px-6 lg:px-8">
             <div className="mx-auto max-w-[1200px]">
                 <RideHeader
-                    eyebrow={
-                        isStopped
-                            ? "Ride ended"
-                            : isPaused
-                              ? "Ride paused"
-                              : "Live ride"
-                    }
-                    title={rideName}
-                    trainerName={trainer?.device.name ?? null}
-                    onBack={navigateHome}
+                    connection={connection}
+                    onLogoClick={navigateHome}
                     onOpenEquipment={openEquipment}
                 />
 

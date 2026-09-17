@@ -20,7 +20,7 @@ export function RidePage() {
                 selectedWorkout={ride.selectedWorkout}
                 athleteProfile={ride.profile}
                 error={ride.error}
-                onBack={ride.navigateHome}
+                onLogoClick={ride.navigateHome}
                 onOpenEquipment={ride.openEquipment}
                 onSelectHeartRateSource={(sourceId) =>
                     void ride.selectHeartRateSource(sourceId)

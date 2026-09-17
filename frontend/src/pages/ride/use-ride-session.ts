@@ -531,9 +531,6 @@ export function useRideSession() {
         }
     }, [navigateHome, session.sessionId]);
 
-    const rideName =
-        selectedWorkout?.name?.trim() || session.workout?.name || "Free ride";
-
     return {
         connection,
         openEquipment,
@@ -572,7 +569,6 @@ export function useRideSession() {
         requestedTarget,
         appliedTarget,
         powerProgress,
-        rideName,
         navigateHome,
         startSession,
         pauseSession,
