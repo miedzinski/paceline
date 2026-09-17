@@ -16,6 +16,7 @@ import paceline.workout.domain.WorkoutNotFoundException
 import paceline.workout.domain.WorkoutPlanSummary
 import paceline.workout.domain.WorkoutStepSummary
 import paceline.workout.domain.WorkoutTargetSummary
+import paceline.workout.domain.WorkoutZoneDistribution
 import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.Instant
 import java.time.LocalDate
@@ -78,6 +79,7 @@ data class ScheduledWorkoutResponse(
     val durationSeconds: Int?,
     val distanceMeters: Double?,
     val trainingLoad: Double?,
+    val plannedZoneDistribution: List<WorkoutZoneDistributionResponse>?,
     val target: String?,
     val workout: WorkoutDefinitionResponse?,
 )
@@ -92,6 +94,7 @@ data class LibraryWorkoutResponse(
     val durationSeconds: Int?,
     val distanceMeters: Double?,
     val trainingLoad: Double?,
+    val plannedZoneDistribution: List<WorkoutZoneDistributionResponse>?,
     val intensity: Double?,
     val target: String?,
     val targets: List<String>,
@@ -107,6 +110,11 @@ data class WorkoutDefinitionResponse(
     val thresholdHeartRateBpm: Int?,
     val target: String?,
     val steps: List<WorkoutStepResponse>,
+)
+
+data class WorkoutZoneDistributionResponse(
+    val zone: String,
+    val durationSeconds: Int,
 )
 
 data class WorkoutStepResponse(
@@ -160,6 +168,7 @@ private fun ScheduledWorkout.toResponse(): ScheduledWorkoutResponse =
         durationSeconds = durationSeconds,
         distanceMeters = distanceMeters,
         trainingLoad = trainingLoad,
+        plannedZoneDistribution = workout?.plannedZoneDistribution?.map(WorkoutZoneDistribution::toResponse),
         target = target,
         workout = workout?.toResponse(),
     )
@@ -175,6 +184,7 @@ private fun LibraryWorkout.toResponse(): LibraryWorkoutResponse =
         durationSeconds = durationSeconds,
         distanceMeters = distanceMeters,
         trainingLoad = trainingLoad,
+        plannedZoneDistribution = workout?.plannedZoneDistribution?.map(WorkoutZoneDistribution::toResponse),
         intensity = intensity,
         target = target,
         targets = targets,
@@ -191,6 +201,12 @@ private fun WorkoutPlanSummary.toResponse(): WorkoutDefinitionResponse =
         thresholdHeartRateBpm = thresholdHeartRateBpm,
         target = target,
         steps = steps.map(WorkoutStepSummary::toResponse),
+    )
+
+private fun WorkoutZoneDistribution.toResponse(): WorkoutZoneDistributionResponse =
+    WorkoutZoneDistributionResponse(
+        zone = zone,
+        durationSeconds = durationSeconds,
     )
 
 private fun WorkoutStepSummary.toResponse(): WorkoutStepResponse =

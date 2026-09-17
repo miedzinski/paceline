@@ -2,6 +2,7 @@ package paceline.intervals.adapters
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
+import tools.jackson.databind.JsonNode
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class IntervalsAthleteProfileDto(
@@ -77,6 +78,7 @@ data class IntervalsWorkoutDocumentDto(
     val distance: Double? = null,
     val ftp: Int? = null,
     val lthr: Int? = null,
+    @JsonProperty("zoneTimes") val zoneTimes: JsonNode? = null,
     val target: String? = null,
     val steps: List<IntervalsWorkoutStepDto>? = null,
 )

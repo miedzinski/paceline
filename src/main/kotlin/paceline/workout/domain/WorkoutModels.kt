@@ -48,6 +48,12 @@ data class WorkoutPlanSummary(
     val thresholdHeartRateBpm: Int?,
     val target: String?,
     val steps: List<WorkoutStepSummary>,
+    val plannedZoneDistribution: List<WorkoutZoneDistribution>? = null,
+)
+
+data class WorkoutZoneDistribution(
+    val zone: String,
+    val durationSeconds: Int,
 )
 
 data class WorkoutStepSummary(

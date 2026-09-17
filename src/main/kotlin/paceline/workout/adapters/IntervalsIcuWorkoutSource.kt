@@ -15,9 +15,11 @@ import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutStepSummary
 import paceline.workout.domain.WorkoutTargetNormalizer
 import paceline.workout.domain.WorkoutTargetSummary
+import paceline.workout.domain.WorkoutZoneDistribution
 import paceline.workout.ports.PlannedWorkoutCalendar
 import paceline.workout.ports.WorkoutLibrary
 import paceline.workout.ports.WorkoutProviderUnavailableException
+import tools.jackson.databind.JsonNode
 import java.time.LocalDate
 import java.time.LocalDateTime
 
@@ -137,7 +139,40 @@ class IntervalsIcuWorkoutSource(
             thresholdHeartRateBpm = document.lthr,
             target = document.target,
             steps = document.steps.orEmpty().map { step -> toWorkoutStepSummary(step, effectiveFtpWatts) },
+            plannedZoneDistribution = document.zoneTimes?.let(::toZoneDistribution),
         )
+    }
+
+    private fun toZoneDistribution(zoneTimes: JsonNode): List<WorkoutZoneDistribution>? {
+        if (!zoneTimes.isArray) {
+            return null
+        }
+
+        return zoneTimes.mapIndexed { index, zoneTime ->
+            when {
+                zoneTime.isIntegralNumber && zoneTime.canConvertToInt() && zoneTime.intValue() >= 0 -> {
+                    WorkoutZoneDistribution(
+                        zone = "Z${index + 1}",
+                        durationSeconds = zoneTime.intValue(),
+                    )
+                }
+
+                zoneTime.isObject -> {
+                    val seconds = zoneTime.get("secs")
+                    if (seconds == null || !seconds.isIntegralNumber || !seconds.canConvertToInt() || seconds.intValue() < 0) {
+                        return null
+                    }
+                    WorkoutZoneDistribution(
+                        zone = zoneTime.get("id")?.takeIf { it.isString }?.asString() ?: "Z${index + 1}",
+                        durationSeconds = seconds.intValue(),
+                    )
+                }
+
+                else -> {
+                    return null
+                }
+            }
+        }
     }
 
     private fun toWorkoutStepSummary(

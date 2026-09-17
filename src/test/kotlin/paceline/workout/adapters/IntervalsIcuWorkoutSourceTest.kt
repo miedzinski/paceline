@@ -14,6 +14,7 @@ import org.springframework.web.client.RestClient
 import paceline.intervals.adapters.IntervalsIcuClient
 import paceline.intervals.adapters.IntervalsIcuException
 import paceline.intervals.config.IntervalsIcuProperties
+import paceline.workout.domain.WorkoutZoneDistribution
 import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.LocalDate
 import java.util.Base64
@@ -93,9 +94,10 @@ class IntervalsIcuWorkoutSourceTest {
                         "category":"WORKOUT",
                         "name":"Threshold",
                         "type":"Ride",
+                        "icu_training_load":33,
                         "start_date_local":"2026-09-14T07:00:00",
                         "moving_time":1800,
-                        "workout_doc":{"target":"POWER","ftp":0,"steps":[{"duration":900,"power":{"value":95,"units":"%ftp"}}]}
+                        "workout_doc":{"target":"POWER","ftp":0,"zoneTimes":[900,780,120,0,0,0,0],"steps":[{"duration":900,"power":{"value":95,"units":"%ftp"}}]}
                       }
                     ]
                     """.trimIndent(),
@@ -121,7 +123,20 @@ class IntervalsIcuWorkoutSourceTest {
         server.verify()
         assertEquals(listOf("102"), result.map { it.reference.id })
         assertEquals("intervals.icu", result.single().reference.provider)
+        assertEquals(33.0, result.single().trainingLoad)
         assertEquals(250, result.single().workout?.ftpWatts)
+        assertEquals(
+            listOf(
+                WorkoutZoneDistribution("Z1", 900),
+                WorkoutZoneDistribution("Z2", 780),
+                WorkoutZoneDistribution("Z3", 120),
+                WorkoutZoneDistribution("Z4", 0),
+                WorkoutZoneDistribution("Z5", 0),
+                WorkoutZoneDistribution("Z6", 0),
+                WorkoutZoneDistribution("Z7", 0),
+            ),
+            result.single().workout?.plannedZoneDistribution,
+        )
         assertEquals(
             238.0,
             result
@@ -161,7 +176,7 @@ class IntervalsIcuWorkoutSourceTest {
             .andRespond(
                 withSuccess(
                     """
-                    {"id":77,"name":"Saved tempo","type":"Ride","workout_doc":{"steps":[{"duration":300,"ramp":true,"power":{"start":60,"end":75,"units":"%ftp"}}]}}
+                    {"id":77,"name":"Saved tempo","type":"Ride","workout_doc":{"zoneTimes":[{"id":"Z1","secs":240},{"id":"Z2","secs":60}],"steps":[{"duration":300,"ramp":true,"power":{"start":60,"end":75,"units":"%ftp"}}]}}
                     """.trimIndent(),
                     MediaType.APPLICATION_JSON,
                 ),
@@ -202,6 +217,13 @@ class IntervalsIcuWorkoutSourceTest {
                 ?.steps
                 ?.single()
                 ?.ramp,
+        )
+        assertEquals(
+            listOf(
+                WorkoutZoneDistribution("Z1", 240),
+                WorkoutZoneDistribution("Z2", 60),
+            ),
+            detail?.workout?.plannedZoneDistribution,
         )
         assertEquals(
             150.0,

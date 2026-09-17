@@ -70,6 +70,7 @@ class WorkoutIntegrationTest {
         assertTrue(response.contains("\"sourceEventId\":\"102\""))
         assertTrue(response.contains("\"name\":\"Threshold intervals\""))
         assertFalse(response.contains("Completed intervals"))
+        assertTrue(response.contains("\"plannedZoneDistribution\":[{\"zone\":\"Z1\",\"durationSeconds\":900}"))
         assertTrue(response.contains("\"resolvedPower\":{\"value\":238.0"))
         mockIntervalsServer.verify()
     }
@@ -193,6 +194,7 @@ class WorkoutIntegrationTest {
                 "workout_doc":{
                   "target":"POWER",
                   "ftp":250,
+                  "zoneTimes":[900,2400,0,0,0,0,0],
                   "steps":[
                     {"duration":900,"power":{"value":95,"units":"%ftp"}},
                     {"duration":60,"freeride":true}
