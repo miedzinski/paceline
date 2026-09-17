@@ -210,7 +210,7 @@ function WorkoutCarousel({
                         role="group"
                         aria-label={`Workout ${index + 1} of ${workouts.length}`}
                         aria-roledescription="slide"
-                        className="flex min-w-0 shrink-0 basis-[calc(100%-1.5rem)] snap-start sm:basis-[calc(50%-0.5rem)] lg:basis-[calc(100%-1.5rem)]"
+                        className="flex min-w-0 shrink-0 basis-full snap-start lg:basis-[calc(100%-1.5rem)]"
                     >
                         <WorkoutCard
                             workout={workout}

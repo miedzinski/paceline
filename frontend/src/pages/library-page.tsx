@@ -150,7 +150,7 @@ export function LibraryPage() {
                     </div>
                 </div>
             ) : isLoading ? (
-                <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <div className="mt-8 grid gap-4 md:grid-cols-2">
                     {Array.from({ length: 6 }, (_, index) => (
                         <div
                             key={index}
@@ -159,7 +159,7 @@ export function LibraryPage() {
                     ))}
                 </div>
             ) : filteredWorkouts.length > 0 ? (
-                <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <div className="mt-8 grid gap-4 md:grid-cols-2">
                     {filteredWorkouts.map((workout) => (
                         <WorkoutCard
                             key={`${workout.provider}-${workout.sourceWorkoutId}`}
