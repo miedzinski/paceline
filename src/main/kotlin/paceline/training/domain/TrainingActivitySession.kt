@@ -192,6 +192,13 @@ class TrainingActivitySession(
     @Synchronized
     fun completedActivity(): RecordedTrainingActivity? = completedActivity
 
+    @Synchronized
+    fun discard(sessionId: UUID) {
+        if (completedActivity?.sessionId == sessionId) {
+            completedActivity = null
+        }
+    }
+
     private fun registerTelemetry(sessionId: UUID) {
         telemetryRegistration =
             trainingDevice.addTelemetryListener { telemetry ->

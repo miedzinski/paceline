@@ -18,6 +18,7 @@ import paceline.training.domain.TrainingSessionAlreadyActiveException
 import paceline.training.domain.TrainingSessionCoordinator
 import paceline.training.domain.TrainingSessionMismatchException
 import paceline.training.domain.TrainingSessionNotActiveException
+import paceline.training.domain.TrainingSessionNotStoppedException
 import paceline.training.domain.TrainingSessionPauseNotAllowedException
 import paceline.training.domain.TrainingSessionResumeNotAllowedException
 import paceline.training.domain.TrainingSessionState
@@ -211,6 +212,25 @@ class TrainingSessionController(
         }
 
     @PostMapping(
+        "/{sessionId}/discard",
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun discardTrainingSession(
+        @PathVariable sessionId: UUID,
+    ): TrainingSessionResponse =
+        try {
+            coordinator.discard(sessionId).toResponse()
+        } catch (exception: TrainingSessionNotActiveException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionMismatchException) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: TrainingSessionNotStoppedException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        }
+
+    @PostMapping(
         "/{sessionId}/upload",
         produces = [MediaType.APPLICATION_JSON_VALUE],
     )
@@ -221,7 +241,11 @@ class TrainingSessionController(
             coordinator.upload(sessionId).toResponse()
         } catch (exception: TrainingSessionMismatchException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: TrainingSessionNotStoppedException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         } catch (exception: TrainingActivityUploadUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: TrainingSessionUnavailableException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         } catch (exception: ActivityUploadException) {
             throw ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, exception.message, exception)

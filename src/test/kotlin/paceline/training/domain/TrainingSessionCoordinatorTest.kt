@@ -26,6 +26,7 @@ import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 
 class TrainingSessionCoordinatorTest {
     private val now = Instant.parse("2026-09-12T12:00:00Z")
@@ -99,12 +100,12 @@ class TrainingSessionCoordinatorTest {
         session.selectHeartRateSource(sessionId, "strap")
         trainingDevice.emitHeartRate("bridge", heartRate(145))
         trainingDevice.emitHeartRate("strap", heartRate(155))
-        session.stop(sessionId)
+        val stopped = session.stop(sessionId)
         session.upload(sessionId)
 
         // then the session state and raw activity preserve the selected-source sequence:
-        assertEquals("strap", session.current().heartRateSourceId)
-        assertEquals(155, session.current().heartRate?.heartRateBpm)
+        assertEquals("strap", stopped.heartRateSourceId)
+        assertEquals(155, stopped.heartRate?.heartRateBpm)
         assertEquals(
             listOf(140, 155),
             uploader.uploads
@@ -316,6 +317,63 @@ class TrainingSessionCoordinatorTest {
         assertEquals(180, continued.ergTargetPowerWatts)
         assertEquals(listOf(250, 100, 180), powerControl.targetPowers)
         assertEquals(TrainingControlMode.ERG, continued.controlMode)
+    }
+
+    @Test
+    fun `starting another workout after stopping the previous one starts from its first step`() {
+        // given a completed and stopped workout followed by a different executable workout:
+        val powerControl = FakeIndoorBikePowerControl()
+        val mutableClock = MutableTestClock(now)
+        val session = coordinator(FakeTrainingDevice(powerControl), mutableClock)
+        val firstWorkout =
+            workout(timedStep("First", seconds = 1, lowWatts = 200, highWatts = 200)).copy(
+                source = WorkoutSourceReference("intervals.icu", "first-workout"),
+                name = "First workout",
+            )
+        val secondWorkout =
+            workout(timedStep("Second", seconds = 20, lowWatts = 300, highWatts = 300)).copy(
+                source = WorkoutSourceReference("intervals.icu", "second-workout"),
+                name = "Second workout",
+            )
+        val firstSessionId = requireNotNull(session.start(firstWorkout).sessionId)
+        session.tick(now.plusSeconds(1))
+        mutableClock.currentTime = now.plusSeconds(1)
+        val stopped = session.stop(firstSessionId)
+
+        // when the second workout is started:
+        val second = session.start(secondWorkout)
+
+        // then a new active session owns the new workout at its first step:
+        assertEquals(null, stopped.workout)
+        assertNotEquals(firstSessionId, second.sessionId)
+        assertEquals(TrainingSessionPhase.ACTIVE, second.phase)
+        assertEquals("second-workout", second.workout?.source?.id)
+        assertEquals("Second workout", second.workout?.name)
+        assertEquals(1, second.workout?.currentStepNumber)
+        assertEquals(false, second.workout?.completed)
+        assertEquals(300, second.ergRequestedTargetPowerWatts)
+        assertEquals(300, second.ergTargetPowerWatts)
+        assertEquals(listOf(200, 0, 300), powerControl.targetPowers)
+    }
+
+    @Test
+    fun `discarding a stopped session forgets its recording and resets the session`() {
+        // given a stopped session with a recorded activity:
+        val powerControl = FakeIndoorBikePowerControl()
+        val trainingDevice = FakeTrainingDevice(powerControl)
+        val session = coordinator(trainingDevice, clock)
+        val sessionId = requireNotNull(session.start().sessionId)
+        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        session.stop(sessionId)
+
+        // when the stopped activity is discarded:
+        val discarded = session.discard(sessionId)
+
+        // then the runtime returns to its initial state and the old session cannot be uploaded:
+        assertEquals(TrainingSessionPhase.NOT_STARTED, discarded.phase)
+        assertEquals(null, discarded.sessionId)
+        assertEquals(discarded, session.current())
+        assertFailsWith<TrainingSessionMismatchException> { session.upload(sessionId) }
     }
 
     @Test
@@ -786,9 +844,12 @@ class TrainingSessionCoordinatorTest {
         val stopped = session.stop(requireNotNull(started.sessionId))
         val uploaded = session.upload(requireNotNull(started.sessionId))
 
-        // then the upload is optional after stop and contains each notification timestamp once:
+        // then the upload contains each notification timestamp once and clears the stopped session:
         assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
-        assertEquals(TrainingActivityUploadPhase.UPLOADED, uploaded.activityUpload.phase)
+        assertEquals(TrainingSessionPhase.NOT_STARTED, uploaded.phase)
+        assertEquals(null, uploaded.sessionId)
+        assertEquals(null, uploaded.workout)
+        assertEquals(TrainingActivityUploadPhase.UNAVAILABLE, uploaded.activityUpload.phase)
         assertEquals(
             listOf(firstSample.receivedAt, secondSample.receivedAt),
             uploader.uploads
@@ -796,6 +857,7 @@ class TrainingSessionCoordinatorTest {
                 .samples
                 .map { it.receivedAt },
         )
+        assertFailsWith<TrainingSessionMismatchException> { session.upload(requireNotNull(started.sessionId)) }
     }
 
     @Test

@@ -507,6 +507,7 @@ class TrainingSessionCoordinator(
                 ergTargetPowerWatts = if (commandApplied) 0 else null,
                 workoutPowerTargetPercent = null,
                 ergProtection = ErgProtectionState.inactive(),
+                workout = null,
                 activityUpload =
                     if (completedActivity.samples.isNotEmpty()) {
                         TrainingActivityUploadState.available()
@@ -520,8 +521,25 @@ class TrainingSessionCoordinator(
     }
 
     @Synchronized
+    fun discard(sessionId: UUID): TrainingSessionState {
+        requireStoppedSession(sessionId)
+        if (trainerConnection.hasPendingZeroPowerCommand()) {
+            throw TrainingSessionUnavailableException(
+                "The stopped session cannot be discarded until the trainer confirms a 0 W command",
+            )
+        }
+
+        return clearStoppedSession(sessionId, clock.instant())
+    }
+
+    @Synchronized
     fun upload(sessionId: UUID): TrainingSessionState {
         val stoppedState = requireStoppedSession(sessionId)
+        if (trainerConnection.hasPendingZeroPowerCommand()) {
+            throw TrainingSessionUnavailableException(
+                "The stopped session cannot be uploaded until the trainer confirms a 0 W command",
+            )
+        }
         val activity =
             activitySession.completedActivity()
                 ?: throw TrainingActivityUploadUnavailableException(
@@ -532,32 +550,19 @@ class TrainingSessionCoordinator(
                 "The stopped session has no telemetry to upload",
             )
         }
-        if (stoppedState.activityUpload.phase == TrainingActivityUploadPhase.UPLOADED) {
-            return stoppedState
-        }
-
         state =
             stoppedState.copy(
                 activityUpload = TrainingActivityUploadState(TrainingActivityUploadPhase.UPLOADING),
             )
         return try {
-            val receipt =
-                try {
-                    activityUploader.upload(activity)
-                } catch (exception: ActivityUploadException) {
-                    throw exception
-                } catch (exception: Exception) {
-                    throw ActivityUploadException("The training activity could not be uploaded", exception)
-                }
-            state =
-                state.copy(
-                    activityUpload =
-                        TrainingActivityUploadState(
-                            phase = TrainingActivityUploadPhase.UPLOADED,
-                            remoteActivityId = receipt.remoteActivityId,
-                        ),
-                )
-            state
+            try {
+                activityUploader.upload(activity)
+            } catch (exception: ActivityUploadException) {
+                throw exception
+            } catch (exception: Exception) {
+                throw ActivityUploadException("The training activity could not be uploaded", exception)
+            }
+            clearStoppedSession(sessionId, clock.instant())
         } catch (exception: ActivityUploadException) {
             state =
                 state.copy(
@@ -569,6 +574,17 @@ class TrainingSessionCoordinator(
                 )
             throw exception
         }
+    }
+
+    private fun clearStoppedSession(
+        sessionId: UUID,
+        clearedAt: Instant,
+    ): TrainingSessionState {
+        activitySession.discard(sessionId)
+        workoutExecution.clear()
+        trainerConnection.clear()
+        state = TrainingSessionState.notStarted(clearedAt)
+        return state
     }
 
     private fun advanceFrom(
@@ -827,9 +843,7 @@ class TrainingSessionCoordinator(
             }
 
             state.phase != TrainingSessionPhase.STOPPED -> {
-                throw TrainingActivityUploadUnavailableException(
-                    "A training activity can be uploaded only after the session is stopped",
-                )
+                throw TrainingSessionNotStoppedException()
             }
 
             else -> {

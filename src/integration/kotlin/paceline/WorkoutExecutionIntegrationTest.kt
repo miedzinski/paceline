@@ -9,6 +9,7 @@ import org.springframework.boot.test.web.server.LocalServerPort
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
+import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
@@ -233,11 +234,86 @@ class WorkoutExecutionIntegrationTest {
                 .returnResult()
                 .responseBody!!
 
-        // then stop only makes the upload available and the explicit action performs exactly one upload:
+        // then stop makes the upload available and a successful upload clears the session:
         assertTrue(stopped.contains("\"state\":\"STOPPED\""))
         assertTrue(stopped.contains("\"activityUpload\":{\"state\":\"AVAILABLE\""))
-        assertTrue(uploaded.contains("\"activityUpload\":{\"state\":\"UPLOADED\""))
+        assertTrue(uploaded.contains("\"state\":\"NOT_STARTED\""))
+        assertTrue(uploaded.contains("\"sessionId\":null"))
         assertEquals(1, activityUploader.uploads.size)
+    }
+
+    @Test
+    fun `discarding a stopped session clears the current session`() {
+        // given a manually started session that has been stopped:
+        val started =
+            restClient
+                .post()
+                .uri("/training-sessions")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val sessionId =
+            Regex("\"sessionId\":\"([^\"]+)\"")
+                .find(started)
+                ?.groupValues
+                ?.get(1)
+                ?: error("No session id in response: $started")
+        restClient
+            .post()
+            .uri("/training-sessions/$sessionId/stop")
+            .exchange()
+            .expectStatus()
+            .isOk()
+
+        // when the stopped session is discarded:
+        val discarded =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/discard")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+
+        // then no stopped session remains in the runtime:
+        assertTrue(discarded.contains("\"state\":\"NOT_STARTED\""))
+        assertTrue(discarded.contains("\"sessionId\":null"))
+    }
+
+    @Test
+    fun `discarding an active session returns a conflict`() {
+        // given an active manually started session:
+        val started =
+            restClient
+                .post()
+                .uri("/training-sessions")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+        val sessionId =
+            Regex("\"sessionId\":\"([^\"]+)\"")
+                .find(started)
+                ?.groupValues
+                ?.get(1)
+                ?: error("No session id in response: $started")
+
+        // when discard is requested before the session is stopped:
+        val response =
+            restClient
+                .post()
+                .uri("/training-sessions/$sessionId/discard")
+                .exchange()
+
+        // then the endpoint reports a client conflict:
+        response.expectStatus().isEqualTo(HttpStatus.CONFLICT)
     }
 
     @Test

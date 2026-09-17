@@ -31,7 +31,6 @@ enum class TrainingActivityUploadPhase {
     UNAVAILABLE,
     AVAILABLE,
     UPLOADING,
-    UPLOADED,
     FAILED,
 }
 
@@ -123,6 +122,8 @@ data class TrainingSessionState(
 class TrainingSessionAlreadyActiveException : IllegalStateException("A training session is already active")
 
 class TrainingSessionNotActiveException : IllegalStateException("No active training session exists")
+
+class TrainingSessionNotStoppedException : IllegalStateException("The training session must be stopped first")
 
 class TrainingSessionUnavailableException(
     message: String,
