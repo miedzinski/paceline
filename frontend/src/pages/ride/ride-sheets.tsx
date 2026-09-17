@@ -113,7 +113,7 @@ export function PostRideSheet({
     const canUpload = upload.state === "AVAILABLE" || upload.state === "FAILED";
 
     return (
-        <ModalBackdrop onClose={onDiscard}>
+        <ModalBackdrop>
             <div className="w-full max-w-lg rounded-[2rem] border border-white/[0.1] bg-[#151a24] p-5 text-white shadow-[0_28px_80px_rgba(0,0,0,0.5)] sm:p-7">
                 <div className="flex items-start justify-between gap-4">
                     <div>
@@ -127,14 +127,6 @@ export function PostRideSheet({
                             Nice work.
                         </h2>
                     </div>
-                    <button
-                        type="button"
-                        onClick={onDiscard}
-                        aria-label="Close ride summary"
-                        className="grid size-9 place-items-center rounded-xl text-white/35 hover:bg-white/[0.08] hover:text-white focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none"
-                    >
-                        <X aria-hidden="true" className="size-5" />
-                    </button>
                 </div>
 
                 <div className="mt-6 grid grid-cols-2 gap-2.5">
@@ -246,12 +238,12 @@ function ModalBackdrop({
     onClose,
 }: {
     children: ReactNode;
-    onClose: () => void;
+    onClose?: () => void;
 }) {
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key === "Escape") {
-                onClose();
+                onClose?.();
             }
         };
         const previousOverflow = document.body.style.overflow;
@@ -269,7 +261,7 @@ function ModalBackdrop({
             role="presentation"
             onMouseDown={(event) => {
                 if (event.target === event.currentTarget) {
-                    onClose();
+                    onClose?.();
                 }
             }}
         >
