@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <title>Paceline</title>
+    <defs>
+        <linearGradient
+            id="icon-stroke"
+            gradientUnits="userSpaceOnUse"
+            x1="4"
+            y1="20"
+            x2="20"
+            y2="4"
+        >
+            <stop offset="0" stop-color="#8ca8ff" />
+            <stop offset="0.52" stop-color="#8b68ff" />
+            <stop offset="1" stop-color="#d184ff" />
+        </linearGradient>
+    </defs>
+    <rect width="24" height="24" rx="6.3" fill="#080d19" />
+    <g
+        transform="translate(12 12) scale(0.7) translate(-12 -12)"
+        fill="none"
+        stroke="url(#icon-stroke)"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="1.5"
+    >
+        <circle cx="18.5" cy="17.5" r="3.5" />
+        <circle cx="5.5" cy="17.5" r="3.5" />
+        <circle cx="15" cy="5" r="1" />
+        <path d="M12 17.5V14l-3-3 4-3 2 3h2" />
+    </g>
+</svg>

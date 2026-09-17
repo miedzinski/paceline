@@ -1,0 +1,121 @@
+import type { ConnectedDevice, Device, DeviceEndpoint } from "@/types";
+
+const phaseLabels: Record<string, string> = {
+    READY: "Ready",
+    DISCOVERING: "Scanning",
+    DISCOVERED: "Devices found",
+    CONNECTING: "Connecting",
+    CONNECTED: "Connected",
+    NOT_STARTED: "Not started",
+    ACTIVE: "Live",
+    PAUSED: "Paused",
+    STOPPED: "Stopped",
+    COMPLETED: "Completed",
+    UNAVAILABLE: "Unavailable",
+    FAILED: "Needs attention",
+    DISCONNECTED: "Disconnected",
+};
+
+export function phaseLabel(phase: string): string {
+    return phaseLabels[phase] ?? phase.replaceAll("_", " ");
+}
+
+export function phaseHasPulse(phase: string): boolean {
+    return ["DISCOVERING", "CONNECTING"].includes(phase);
+}
+
+export function formatTimestamp(timestamp: string): string {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+        return "Unknown time";
+    }
+
+    return new Intl.DateTimeFormat(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+    }).format(date);
+}
+
+export function formatTimeOfDay(timestamp: string | null): string | null {
+    if (timestamp === null) {
+        return null;
+    }
+
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+        return null;
+    }
+
+    return new Intl.DateTimeFormat(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+    }).format(date);
+}
+
+export function transportLabel(transport: DeviceEndpoint["transport"]): string {
+    return transport === "BLUETOOTH" ? "Bluetooth LE" : "Wi-Fi";
+}
+
+export function deviceEndpointLabel(endpoint: DeviceEndpoint): string {
+    if (endpoint.transport === "BLUETOOTH") {
+        return endpoint.address ?? "Bluetooth address unavailable";
+    }
+
+    if (endpoint.host !== null && endpoint.port !== null) {
+        return `${endpoint.host}:${endpoint.port}`;
+    }
+
+    return "Wi-Fi endpoint unavailable";
+}
+
+export function sameDevice(
+    connectedDevice: ConnectedDevice | null,
+    discoveredDevice: Device,
+): boolean {
+    if (
+        connectedDevice === null ||
+        connectedDevice.transport !== discoveredDevice.transport
+    ) {
+        return false;
+    }
+
+    if (connectedDevice.transport === "BLUETOOTH") {
+        return (
+            connectedDevice.address !== null &&
+            connectedDevice.address === discoveredDevice.address
+        );
+    }
+
+    return (
+        connectedDevice.host !== null &&
+        connectedDevice.port !== null &&
+        connectedDevice.host === discoveredDevice.host &&
+        connectedDevice.port === discoveredDevice.port
+    );
+}
+
+export function formatElapsed(
+    startedAt: string | null,
+    now = Date.now(),
+): string {
+    if (startedAt === null) {
+        return "00:00";
+    }
+
+    const start = new Date(startedAt).getTime();
+    if (Number.isNaN(start)) {
+        return "00:00";
+    }
+
+    const elapsedSeconds = Math.max(0, Math.floor((now - start) / 1000));
+    const hours = Math.floor(elapsedSeconds / 3600);
+    const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+    const seconds = elapsedSeconds % 60;
+
+    if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    }
+
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}

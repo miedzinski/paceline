@@ -1,0 +1,21 @@
+{
+    "name": "Paceline indoor cycling",
+    "short_name": "Paceline",
+    "start_url": "/",
+    "icons": [
+        {
+            "src": "/pwa-icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        },
+        {
+            "src": "/pwa-icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        }
+    ],
+    "display": "standalone",
+    "background_color": "#f2f4ef",
+    "theme_color": "#1a211c",
+    "description": "A focused indoor cycling companion."
+}
