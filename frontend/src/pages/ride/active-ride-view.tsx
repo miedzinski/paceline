@@ -2,11 +2,7 @@ import { TelemetryChart } from "@/components/telemetry-chart";
 import { WorkoutTimeline } from "@/components/workout-timeline";
 import { formatElapsed } from "@/lib/connection";
 import type { RideSessionModel } from "./use-ride-session";
-import {
-    RideControls,
-    ManualTargetForm,
-    WorkoutTargetAdjustment,
-} from "./ride-controls";
+import { RideControls, ManualTargetForm } from "./ride-controls";
 import {
     ConnectionBanner,
     ErgProtectionBanner,
@@ -43,7 +39,6 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         definition,
         isActive,
         isPaused,
-        isStopped,
         currentPower,
         requestedTarget,
         appliedTarget,
@@ -58,6 +53,22 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         uploadActivity,
         discardActivity,
     } = ride;
+
+    const workoutTargetAdjustment =
+        session.workout !== null && !session.workout.completed
+            ? {
+                  disabled:
+                      !isActive ||
+                      isAdjustingWorkoutTarget ||
+                      isStopping ||
+                      session.ergProtection.state === "UNAVAILABLE" ||
+                      session.ergProtection.state === "RECOVERY_FAILED",
+                  isAdjusting: isAdjustingWorkoutTarget,
+                  percent: session.workoutPowerTargetPercent ?? 100,
+                  onAdjust: (deltaPercent: number) =>
+                      void adjustWorkoutTarget(deltaPercent),
+              }
+            : null;
 
     return (
         <div className="min-h-[100svh] bg-[#090c12] px-4 pt-[calc(0.9rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))] text-[#f5f6fb] sm:px-6 lg:px-8">
@@ -119,27 +130,6 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                     </div>
 
                     <div className="space-y-4 xl:col-span-5">
-                        {session.workout !== null &&
-                        !session.workout.completed ? (
-                            <WorkoutTargetAdjustment
-                                disabled={
-                                    !isActive ||
-                                    isAdjustingWorkoutTarget ||
-                                    isStopping ||
-                                    session.ergProtection.state ===
-                                        "UNAVAILABLE" ||
-                                    session.ergProtection.state ===
-                                        "RECOVERY_FAILED"
-                                }
-                                isAdjusting={isAdjustingWorkoutTarget}
-                                percent={
-                                    session.workoutPowerTargetPercent ?? 100
-                                }
-                                onAdjust={(deltaPercent) =>
-                                    void adjustWorkoutTarget(deltaPercent)
-                                }
-                            />
-                        ) : null}
                         {isActive &&
                         (session.workout === null ||
                             session.workout.completed) ? (
@@ -159,7 +149,6 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                         <RideControls
                             isActive={isActive}
                             isPaused={isPaused}
-                            isStopped={isStopped}
                             isPausing={isPausing}
                             isResuming={isResuming}
                             isStopping={isStopping}
@@ -170,10 +159,10 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                             }
                             onAdvance={() => void advanceStep()}
                             onBack={navigateHome}
-                            onOpenEquipment={openEquipment}
                             onPause={() => void pauseSession()}
                             onResume={() => void resumeSession()}
                             onStop={() => setStopPromptOpen(true)}
+                            workoutTargetAdjustment={workoutTargetAdjustment}
                         />
                     </div>
                 </div>
