@@ -1,5 +1,6 @@
 package paceline.workout.domain
 
+import paceline.profile.domain.PowerZoneCalculator
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -43,5 +44,26 @@ class WorkoutTargetNormalizationTest {
 
         // then the target remains unresolved for the execution boundary to reject:
         assertNull(result)
+    }
+
+    @Test
+    fun `resolves a power zone target into the configured watt range`() {
+        // given a power zone target and the athlete's configured cycling zones:
+        val target = WorkoutTargetSummary(value = 2.0, units = "power_zone")
+        val powerZones = PowerZoneCalculator.calculate(250, listOf(55, 75, 90), null)
+
+        // when the backend resolves the target for trainer execution:
+        val result = WorkoutTargetNormalizer.resolvePowerZone(target, powerZones)
+
+        // then the zone becomes its absolute lower and upper watt boundaries:
+        assertEquals(
+            WorkoutTargetSummary(
+                value = null,
+                start = 138.0,
+                end = 187.0,
+                units = "W",
+            ),
+            result,
+        )
     }
 }

@@ -8,6 +8,8 @@ import paceline.intervals.adapters.IntervalsLibraryWorkoutDto
 import paceline.intervals.adapters.IntervalsWorkoutDocumentDto
 import paceline.intervals.adapters.IntervalsWorkoutStepDto
 import paceline.intervals.adapters.IntervalsWorkoutValueDto
+import paceline.profile.domain.PowerZone
+import paceline.profile.domain.PowerZoneCalculator
 import paceline.workout.domain.LibraryWorkout
 import paceline.workout.domain.ScheduledWorkout
 import paceline.workout.domain.WorkoutPlanSummary
@@ -42,8 +44,8 @@ class IntervalsIcuWorkoutSource(
                     .calendarEvents(date)
                     .filter { it.category.equals("WORKOUT", ignoreCase = true) }
                     .filterNot { it.id.toString() in completedEventIds }
-            val fallbackFtpWatts = fallbackFtpWatts(workouts.mapNotNull { it.workoutDocument })
-            return workouts.map { toScheduledWorkout(it, fallbackFtpWatts) }
+            val resolution = workoutResolution(workouts.mapNotNull { it.workoutDocument })
+            return workouts.map { toScheduledWorkout(it, resolution) }
         } catch (exception: IntervalsIcuException) {
             throw WorkoutProviderUnavailableException(
                 exception.message ?: "Intervals.icu workouts could not be read",
@@ -55,8 +57,8 @@ class IntervalsIcuWorkoutSource(
     override fun list(): List<LibraryWorkout> {
         try {
             val workouts = client.libraryWorkouts()
-            val fallbackFtpWatts = fallbackFtpWatts(workouts.mapNotNull { it.workoutDocument })
-            return workouts.map { toLibraryWorkout(it, fallbackFtpWatts) }
+            val resolution = workoutResolution(workouts.mapNotNull { it.workoutDocument })
+            return workouts.map { toLibraryWorkout(it, resolution) }
         } catch (exception: IntervalsIcuException) {
             throw WorkoutProviderUnavailableException(
                 exception.message ?: "Intervals.icu workout library could not be read",
@@ -68,8 +70,8 @@ class IntervalsIcuWorkoutSource(
     override fun find(workoutId: String): LibraryWorkout? {
         try {
             val workout = client.libraryWorkout(workoutId) ?: return null
-            val fallbackFtpWatts = fallbackFtpWatts(listOfNotNull(workout.workoutDocument))
-            return toLibraryWorkout(workout, fallbackFtpWatts)
+            val resolution = workoutResolution(listOfNotNull(workout.workoutDocument))
+            return toLibraryWorkout(workout, resolution)
         } catch (exception: IntervalsIcuException) {
             throw WorkoutProviderUnavailableException(
                 exception.message ?: "Intervals.icu workout could not be read",
@@ -80,7 +82,7 @@ class IntervalsIcuWorkoutSource(
 
     private fun toScheduledWorkout(
         event: IntervalsCalendarEventDto,
-        fallbackFtpWatts: Int?,
+        resolution: WorkoutResolution,
     ): ScheduledWorkout =
         ScheduledWorkout(
             reference = WorkoutSourceReference(PROVIDER, event.id.toString()),
@@ -98,14 +100,15 @@ class IntervalsIcuWorkoutSource(
                 event.workoutDocument?.let { document ->
                     toWorkoutPlanSummary(
                         document,
-                        firstUsableFtpWatts(document.ftp, event.ftpWatts, fallbackFtpWatts),
+                        firstUsableFtpWatts(document.ftp, event.ftpWatts, resolution.fallbackFtpWatts),
+                        resolution.powerZones,
                     )
                 },
         )
 
     private fun toLibraryWorkout(
         workout: IntervalsLibraryWorkoutDto,
-        fallbackFtpWatts: Int?,
+        resolution: WorkoutResolution,
     ): LibraryWorkout =
         LibraryWorkout(
             reference = WorkoutSourceReference(PROVIDER, workout.id.toString()),
@@ -122,13 +125,18 @@ class IntervalsIcuWorkoutSource(
             folderId = workout.folderId,
             workout =
                 workout.workoutDocument?.let { document ->
-                    toWorkoutPlanSummary(document, firstUsableFtpWatts(document.ftp, fallbackFtpWatts))
+                    toWorkoutPlanSummary(
+                        document,
+                        firstUsableFtpWatts(document.ftp, resolution.fallbackFtpWatts),
+                        resolution.powerZones,
+                    )
                 },
         )
 
     private fun toWorkoutPlanSummary(
         document: IntervalsWorkoutDocumentDto,
         ftpWatts: Int?,
+        powerZones: List<PowerZone>?,
     ): WorkoutPlanSummary {
         val effectiveFtpWatts = ftpWatts?.takeIf { it > 0 }
         return WorkoutPlanSummary(
@@ -138,7 +146,7 @@ class IntervalsIcuWorkoutSource(
             ftpWatts = effectiveFtpWatts,
             thresholdHeartRateBpm = document.lthr,
             target = document.target,
-            steps = document.steps.orEmpty().map { step -> toWorkoutStepSummary(step, effectiveFtpWatts) },
+            steps = document.steps.orEmpty().map { step -> toWorkoutStepSummary(step, effectiveFtpWatts, powerZones) },
             plannedZoneDistribution = document.zoneTimes?.let(::toZoneDistribution),
         )
     }
@@ -178,8 +186,17 @@ class IntervalsIcuWorkoutSource(
     private fun toWorkoutStepSummary(
         step: IntervalsWorkoutStepDto,
         ftpWatts: Int?,
+        powerZones: List<PowerZone>?,
     ): WorkoutStepSummary {
         val power = step.power?.let(::toWorkoutTargetSummary)
+        val resolvedPower =
+            power?.let {
+                if (WorkoutTargetNormalizer.isPowerZone(it)) {
+                    WorkoutTargetNormalizer.resolvePowerZone(it, powerZones)
+                } else {
+                    WorkoutTargetNormalizer.resolveFtpPower(it, ftpWatts)
+                }
+            }
         return WorkoutStepSummary(
             text = step.text,
             durationSeconds = step.duration,
@@ -194,24 +211,38 @@ class IntervalsIcuWorkoutSource(
             maxEffort = step.maxEffort,
             hidePower = step.hidePower,
             power = power,
-            resolvedPower = power?.let { WorkoutTargetNormalizer.resolveFtpPower(it, ftpWatts) },
+            resolvedPower = resolvedPower,
             heartRate = step.hr?.let(::toWorkoutTargetSummary),
             resolvedHeartRate = step.resolvedHeartRate?.let(::toWorkoutTargetSummary),
             pace = step.pace?.let(::toWorkoutTargetSummary),
             resolvedPace = step.resolvedPace?.let(::toWorkoutTargetSummary),
             cadence = step.cadence?.let(::toWorkoutTargetSummary),
             resolvedDistanceMeters = step.resolvedDistanceMeters,
-            steps = step.steps.orEmpty().map { child -> toWorkoutStepSummary(child, ftpWatts) },
+            steps = step.steps.orEmpty().map { child -> toWorkoutStepSummary(child, ftpWatts, powerZones) },
         )
     }
 
-    private fun fallbackFtpWatts(documents: List<IntervalsWorkoutDocumentDto>): Int? {
-        if (documents.none { it.requiresFtpResolution() && it.ftp?.takeIf { ftp -> ftp > 0 } == null }) {
-            return null
+    private fun workoutResolution(documents: List<IntervalsWorkoutDocumentDto>): WorkoutResolution {
+        val needsFtpResolution = documents.any { it.requiresFtpResolution() && it.ftp?.takeIf { ftp -> ftp > 0 } == null }
+        val needsPowerZoneResolution = documents.any { it.requiresPowerZoneResolution() }
+        if (!needsFtpResolution && !needsPowerZoneResolution) {
+            return WorkoutResolution()
         }
 
         val settings = client.sportSettings(CYCLING_SPORT)
-        return settings.indoorFtp?.takeIf { it > 0 } ?: settings.ftp?.takeIf { it > 0 }
+        val configuredFtpWatts = settings.indoorFtp?.takeIf { it > 0 } ?: settings.ftp?.takeIf { it > 0 }
+        return WorkoutResolution(
+            fallbackFtpWatts = configuredFtpWatts.takeIf { needsFtpResolution },
+            powerZones =
+                configuredFtpWatts
+                    ?.let {
+                        PowerZoneCalculator.calculate(
+                            ftpWatts = it,
+                            upperBoundsPercent = settings.powerZones,
+                            names = settings.powerZoneNames,
+                        )
+                    }.takeIf { needsPowerZoneResolution },
+        )
     }
 
     private fun firstUsableFtpWatts(vararg candidates: Int?): Int? =
@@ -224,6 +255,15 @@ class IntervalsIcuWorkoutSource(
             ?.let(::toWorkoutTargetSummary)
             ?.let(WorkoutTargetNormalizer::isFtpRelativePower) == true ||
             steps.orEmpty().any { it.requiresFtpResolution() }
+
+    private fun IntervalsWorkoutDocumentDto.requiresPowerZoneResolution(): Boolean =
+        steps.orEmpty().any { it.requiresPowerZoneResolution() }
+
+    private fun IntervalsWorkoutStepDto.requiresPowerZoneResolution(): Boolean =
+        power
+            ?.let(::toWorkoutTargetSummary)
+            ?.let(WorkoutTargetNormalizer::isPowerZone) == true ||
+            steps.orEmpty().any { it.requiresPowerZoneResolution() }
 
     private fun toWorkoutTargetSummary(value: IntervalsWorkoutValueDto): WorkoutTargetSummary =
         WorkoutTargetSummary(
@@ -244,4 +284,9 @@ class IntervalsIcuWorkoutSource(
         const val CYCLING_SPORT = "Ride"
         const val PROVIDER = "intervals.icu"
     }
+
+    private data class WorkoutResolution(
+        val fallbackFtpWatts: Int? = null,
+        val powerZones: List<PowerZone>? = null,
+    )
 }

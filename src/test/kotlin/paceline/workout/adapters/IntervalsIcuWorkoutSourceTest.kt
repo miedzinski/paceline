@@ -245,6 +245,57 @@ class IntervalsIcuWorkoutSourceTest {
         )
     }
 
+    @Test
+    fun `resolves provider power zone steps using the configured backend zones`() {
+        // given a saved workout whose provider target is a power zone:
+        val (client, server) = createClient()
+        val source = IntervalsIcuWorkoutSource(client)
+        server
+            .expect(
+                requestTo("http://intervals.test/api/v1/athlete/0/workouts/88"),
+            ).andRespond(
+                withSuccess(
+                    """
+                    {
+                      "id":88,
+                      "name":"Endurance",
+                      "type":"Ride",
+                      "workout_doc":{
+                        "steps":[
+                          {
+                            "duration":600,
+                            "power":{"value":2,"units":"power_zone"}
+                          }
+                        ]
+                      }
+                    }
+                    """.trimIndent(),
+                    MediaType.APPLICATION_JSON,
+                ),
+            )
+        server
+            .expect(
+                requestTo("http://intervals.test/api/v1/athlete/0/sport-settings/Ride"),
+            ).andRespond(
+                withSuccess(
+                    """{"ftp":250,"power_zones":[55,75,90],"power_zone_names":["Recovery","Endurance","Tempo"]}""",
+                    MediaType.APPLICATION_JSON,
+                ),
+            )
+
+        // when the saved workout is read through the provider adapter:
+        val workout = source.find("88")
+        val step = workout?.workout?.steps?.single()
+
+        // then the raw zone remains visible while execution receives the backend-resolved watt range:
+        server.verify()
+        assertEquals(2.0, step?.power?.value)
+        assertEquals("power_zone", step?.power?.units)
+        assertEquals(138.0, step?.resolvedPower?.start)
+        assertEquals(187.0, step?.resolvedPower?.end)
+        assertEquals("W", step?.resolvedPower?.units)
+    }
+
     private fun createClient(): Pair<IntervalsIcuClient, MockRestServiceServer> {
         val builder = RestClient.builder().baseUrl("http://intervals.test")
         val server = MockRestServiceServer.bindTo(builder).build()

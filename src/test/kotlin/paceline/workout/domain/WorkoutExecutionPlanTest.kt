@@ -135,6 +135,42 @@ class WorkoutExecutionPlanTest {
     }
 
     @Test
+    fun `executes a backend-resolved power zone as a fixed watt range`() {
+        // given a zone target with the backend's resolved absolute watt range:
+        val scheduled =
+            scheduledWorkout(
+                WorkoutPlanSummary(
+                    description = null,
+                    durationSeconds = 600,
+                    distanceMeters = null,
+                    ftpWatts = 250,
+                    thresholdHeartRateBpm = null,
+                    target = "POWER",
+                    steps =
+                        listOf(
+                            leafStep(
+                                text = "Endurance",
+                                durationSeconds = 600,
+                                power = WorkoutTargetSummary(value = 2.0, units = "power_zone"),
+                                resolvedPower =
+                                    WorkoutTargetSummary(
+                                        start = 138.0,
+                                        end = 187.0,
+                                        units = "W",
+                                    ),
+                            ),
+                        ),
+                ),
+            )
+
+        // when the plan is normalized for trainer execution:
+        val result = ExecutableWorkoutFactory.from(scheduled)
+
+        // then the trainer receives the concrete range and the session can use its midpoint:
+        assertEquals(WorkoutStepTarget.Power(138, 187), result.steps.single().target)
+    }
+
+    @Test
     fun `rejects a step with ambiguous time and distance completion`() {
         // given a step carrying both time and distance completion values:
         val scheduled =
