@@ -1,5 +1,5 @@
 import { TelemetryChart } from "@/components/telemetry-chart";
-import { WorkoutTimeline } from "@/components/workout-timeline";
+import { WorkoutProgressTile } from "@/components/workout-progress-tile";
 import { formatElapsed } from "@/lib/connection";
 import type { RideSessionModel } from "./use-ride-session";
 import { RideControls, ManualTargetForm } from "./ride-controls";
@@ -92,7 +92,7 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
 
                 <div className="mt-6 grid gap-4 xl:grid-cols-12">
                     <div className="xl:col-span-7">
-                        <WorkoutTimeline
+                        <WorkoutProgressTile
                             now={now}
                             definition={definition}
                             workout={session.workout}

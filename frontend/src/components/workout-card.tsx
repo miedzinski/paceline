@@ -1,21 +1,13 @@
 import { ChevronRight, Gauge, Route, Zap } from "lucide-react";
 import type { AthleteProfile, WorkoutDefinition } from "@/types";
+import { WorkoutStructureGraph } from "@/components/workout-structure-graph";
 import { WorkoutOverview } from "@/components/workout-overview";
 import {
     flattenWorkoutSteps,
     isWorkoutDefinition,
-    stepDuration,
-    stepLabel,
-    stepSummary,
-    workoutStepColor,
     workoutMetaItems,
     workoutName,
     workoutSteps,
-    workoutStepBackground,
-    workoutIntensityScalePercent,
-    workoutStepHeight,
-    workoutStepFreeRidePath,
-    workoutStepRampPath,
     type WorkoutItem,
 } from "@/lib/workouts";
 import { cn } from "@/lib/utils";
@@ -36,13 +28,6 @@ export function WorkoutProfile({
               ? flattenWorkoutSteps(workout.steps)
               : workoutSteps(workout);
 
-    const weights = steps.map((step) => stepDuration(step) ?? 1);
-    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-    const intensityScalePercent = workoutIntensityScalePercent(
-        steps,
-        athleteProfile,
-    );
-
     if (steps.length === 0) {
         return (
             <div
@@ -58,56 +43,7 @@ export function WorkoutProfile({
     }
 
     return (
-        <div
-            className={cn(
-                "flex w-full items-end gap-px overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0d1017] p-2",
-                "h-20",
-            )}
-            aria-label="Workout structure preview"
-        >
-            {steps.map((step, index) => {
-                const rampPath = workoutStepRampPath(step, athleteProfile);
-                const freeRidePath = workoutStepFreeRidePath(step);
-                const shapePath = rampPath ?? freeRidePath;
-                const stepColor = workoutStepColor(step, index, athleteProfile);
-                const label = stepLabel(step);
-                const summary = stepSummary(step);
-                return (
-                    <span
-                        key={`${label ?? "step"}-${index}`}
-                        title={
-                            label && summary
-                                ? `${label} · ${summary}`
-                                : (label ?? summary ?? `Step ${index + 1}`)
-                        }
-                        className="block min-w-0 rounded-[0.35rem] opacity-95 transition-opacity hover:opacity-70"
-                        style={{
-                            width: `${(weights[index] / Math.max(1, totalWeight)) * 100}%`,
-                            height: `${workoutStepHeight(step, athleteProfile, intensityScalePercent)}%`,
-                            background:
-                                shapePath === null
-                                    ? (workoutStepBackground(
-                                          step,
-                                          athleteProfile,
-                                          stepColor,
-                                      ) ?? stepColor)
-                                    : "transparent",
-                        }}
-                    >
-                        {shapePath !== null ? (
-                            <svg
-                                aria-hidden="true"
-                                className="block size-full"
-                                preserveAspectRatio="none"
-                                viewBox="0 0 100 100"
-                            >
-                                <path d={shapePath} fill={stepColor} />
-                            </svg>
-                        ) : null}
-                    </span>
-                );
-            })}
-        </div>
+        <WorkoutStructureGraph steps={steps} athleteProfile={athleteProfile} />
     );
 }
 
