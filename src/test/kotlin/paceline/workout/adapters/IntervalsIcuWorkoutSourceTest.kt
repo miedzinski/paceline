@@ -97,7 +97,7 @@ class IntervalsIcuWorkoutSourceTest {
                         "icu_training_load":33,
                         "start_date_local":"2026-09-14T07:00:00",
                         "moving_time":1800,
-                        "workout_doc":{"target":"POWER","ftp":0,"zoneTimes":[900,780,120,0,0,0,0],"steps":[{"duration":900,"power":{"value":95,"units":"%ftp"}}]}
+                        "workout_doc":{"target":"POWER","ftp":0,"zoneTimes":[900,780,120,0,0,0,0],"steps":[{"duration":900,"power":{"value":95,"units":"%ftp"}},{"duration":60,"freeride":true}]}
                       }
                     ]
                     """.trimIndent(),
@@ -143,9 +143,18 @@ class IntervalsIcuWorkoutSourceTest {
                 .single()
                 .workout
                 ?.steps
-                ?.single()
+                ?.first()
                 ?.resolvedPower
                 ?.value,
+        )
+        assertEquals(
+            true,
+            result
+                .single()
+                .workout
+                ?.steps
+                ?.get(1)
+                ?.freeRide,
         )
     }
 
