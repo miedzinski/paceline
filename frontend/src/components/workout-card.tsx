@@ -1,4 +1,4 @@
-import { ChevronRight, Gauge, Route, Zap } from "lucide-react";
+import { Gauge, Route, Zap } from "lucide-react";
 import type { AthleteProfile, WorkoutDefinition } from "@/types";
 import { WorkoutStructureGraph } from "@/components/workout-structure-graph";
 import { WorkoutOverview } from "@/components/workout-overview";
@@ -59,6 +59,8 @@ export function WorkoutCard({
     athleteProfile?: AthleteProfile | null;
 }) {
     const meta = workoutMetaItems(workout);
+    const workoutType = meta.find(({ kind }) => kind === "type");
+    const secondaryMeta = meta.filter(({ kind }) => kind !== "type");
     const label = "sourceEventId" in workout ? "Scheduled" : "Library";
 
     return (
@@ -74,7 +76,7 @@ export function WorkoutCard({
         >
             <div className="pointer-events-none absolute -top-20 -right-14 size-48 rounded-full bg-[#6978ff]/10 blur-3xl transition-opacity group-hover:opacity-80" />
             <div className="relative flex items-start justify-between gap-4">
-                <div>
+                <div className="min-w-0">
                     <p className="text-[0.6rem] font-bold tracking-[0.2em] text-white/40 uppercase">
                         {label}
                     </p>
@@ -82,9 +84,12 @@ export function WorkoutCard({
                         {workoutName(workout)}
                     </h3>
                 </div>
-                <span className="grid size-10 shrink-0 place-items-center rounded-2xl border border-white/[0.1] bg-white/[0.07] text-white/55 transition-all group-hover:border-[#8b92ff]/50 group-hover:bg-[#7e87ff] group-hover:text-[#0b0d14]">
-                    <ChevronRight aria-hidden="true" className="size-4" />
-                </span>
+                {workoutType ? (
+                    <span className="mt-0.5 inline-flex max-w-[45%] shrink-0 items-center gap-1.5 rounded-xl border border-white/[0.1] bg-white/[0.05] px-2.5 py-1 text-xs font-bold text-white/55">
+                        <Gauge aria-hidden="true" className="size-3.5" />
+                        <span className="truncate">{workoutType.label}</span>
+                    </span>
+                ) : null}
             </div>
 
             <div
@@ -93,14 +98,13 @@ export function WorkoutCard({
                     compact ? "mt-4" : "mt-5",
                 )}
             >
-                {meta.map(({ label: item, kind }) => {
-                    const Icon = kind === "type" ? Gauge : Route;
+                {secondaryMeta.map(({ label: item }) => {
                     return (
                         <span
                             key={item}
                             className="inline-flex items-center gap-1.5 text-xs font-semibold text-white/48"
                         >
-                            <Icon
+                            <Route
                                 aria-hidden="true"
                                 className="size-3.5 text-white/30"
                             />
