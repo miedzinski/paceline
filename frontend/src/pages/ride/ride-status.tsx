@@ -18,57 +18,26 @@ export function MetricsPanel({
     cadence,
     heartRate,
     speed,
-    elapsed,
-    target,
-    appliedTarget,
-    controlMode,
-    protectionState,
-    step,
-    powerProgress,
 }: {
     currentPower: number | null;
     cadence: number | null;
     heartRate: number | null;
     speed: number | null;
-    elapsed: string;
-    target: number | null;
-    appliedTarget: number | null;
-    controlMode: TrainingSessionResponse["controlMode"];
-    protectionState: TrainingSessionResponse["ergProtection"]["state"];
-    step: string;
-    powerProgress: number;
 }) {
-    const protectionActive =
-        protectionState === "BAILED_OUT" ||
-        protectionState === "RECOVERY_RETRYING" ||
-        protectionState === "RECOVERY_FAILED";
-    const targetDetail = protectionActive
-        ? `ERG released · ${appliedTarget ?? 0} W applied`
-        : controlMode === "FREE_RIDE"
-          ? "Free Ride · manual resistance"
-          : protectionState === "UNAVAILABLE"
-            ? "ERG target unavailable"
-            : target === null
-              ? "No target"
-              : `target ${target} W`;
-
     return (
-        <section className="rounded-[2rem] border border-white/[0.1] bg-[#141821] p-4 sm:p-5">
+        <section className="rounded-[2rem] border border-white/[0.1] bg-[#141821] p-3 sm:p-4">
             <div className="grid grid-cols-2 gap-2.5">
                 <MetricTile
                     label="Power"
                     value={formatMetric(currentPower)}
                     unit="W"
-                    detail={targetDetail}
                     accent="white"
-                    progress={powerProgress}
                     prominent
                 />
                 <MetricTile
                     label="Cadence"
-                    value={formatMetric(cadence, 1)}
+                    value={formatMetric(cadence)}
                     unit="rpm"
-                    detail="live reading"
                     accent="amber"
                     prominent
                 />
@@ -76,28 +45,14 @@ export function MetricsPanel({
                     label="Heart rate"
                     value={formatMetric(heartRate)}
                     unit="bpm"
-                    detail="selected source"
                     accent="coral"
                 />
                 <MetricTile
                     label="Speed"
                     value={formatMetric(speed, 1)}
                     unit="km/h"
-                    detail="live reading"
                     accent="blue"
                 />
-            </div>
-            <div className="mt-2.5 grid grid-cols-4 gap-2 rounded-2xl border border-white/[0.07] bg-[#0d1017] px-2 py-3 sm:px-3">
-                <MiniStat label="Elapsed" value={elapsed} />
-                <MiniStat
-                    label="Target"
-                    value={target === null ? "—" : `${target} W`}
-                />
-                <MiniStat
-                    label="Applied"
-                    value={appliedTarget === null ? "—" : `${appliedTarget} W`}
-                />
-                <MiniStat label="Step" value={step} />
             </div>
         </section>
     );
@@ -105,8 +60,10 @@ export function MetricsPanel({
 
 export function ErgProtectionBanner({
     protection,
+    overlay = false,
 }: {
     protection: TrainingSessionResponse["ergProtection"];
+    overlay?: boolean;
 }) {
     if (protection.state === "INACTIVE") {
         return null;
@@ -119,7 +76,10 @@ export function ErgProtectionBanner({
     return (
         <div
             className={cn(
-                "mt-5 flex items-start gap-3 rounded-2xl border p-4 text-sm leading-6",
+                overlay
+                    ? "pointer-events-none absolute inset-x-3 top-3 z-30 shadow-[0_18px_45px_rgba(0,0,0,0.35)] backdrop-blur-xl sm:inset-x-5"
+                    : "mt-5",
+                "flex items-start gap-3 rounded-2xl border p-4 text-sm leading-6",
                 isFailure
                     ? "border-[#703e49] bg-[#2a1821] text-[#ffc4c5]"
                     : "border-[#806335] bg-[#2b2418] text-[#f5d28c]",
@@ -148,7 +108,7 @@ export function ErgProtectionBanner({
                           : isRecoveryFailed
                             ? (protection.error ??
                               "The trainer did not accept the recovery target after the configured retries. The workout continues recording at 0 W.")
-                            : `Resistance was released at ${formatMetric(protection.cadenceRpm, 1)} rpm. ERG will resume automatically when cadence recovers.`}
+                            : `Resistance was released at ${formatMetric(protection.cadenceRpm)} rpm. ERG will resume automatically when cadence recovers.`}
                 </p>
             </div>
         </div>
@@ -159,17 +119,13 @@ function MetricTile({
     label,
     value,
     unit,
-    detail,
     accent,
-    progress,
     prominent = false,
 }: {
     label: string;
     value: string;
     unit: string;
-    detail: string;
     accent: "white" | "amber" | "coral" | "blue";
-    progress?: number;
     prominent?: boolean;
 }) {
     const accentClass = {
@@ -180,57 +136,26 @@ function MetricTile({
     }[accent];
 
     return (
-        <div className="min-h-[8.4rem] rounded-[1.35rem] border border-white/[0.08] bg-[#1b202a] p-4 sm:p-5">
-            <p className="truncate text-[0.58rem] font-bold tracking-[0.18em] text-white/30 uppercase">
+        <div className="flex min-h-[5.75rem] flex-col items-center justify-center rounded-[1.15rem] border border-white/[0.08] bg-[#1b202a] px-2 py-2.5 sm:px-3 sm:py-3">
+            <p className="truncate text-center text-[0.56rem] font-bold tracking-[0.16em] text-white/30 uppercase">
                 {label}
             </p>
-            <div className="mt-3 flex items-baseline gap-1.5">
+            <div className="mt-1 flex flex-col items-center">
                 <span
                     className={cn(
                         "font-mono leading-none font-bold tracking-[-0.09em]",
                         prominent
-                            ? "text-[2.5rem] sm:text-[3rem]"
-                            : "text-[2.1rem] sm:text-[2.4rem]",
+                            ? "text-[2.05rem] sm:text-[2.35rem]"
+                            : "text-[1.75rem] sm:text-[2rem]",
                         accentClass,
                     )}
                 >
                     {value}
                 </span>
-                <span className="text-[0.62rem] font-bold text-white/30">
+                <span className="mt-0.5 text-[0.58rem] font-bold text-white/30">
                     {unit}
                 </span>
             </div>
-            <div className="mt-3 flex items-center justify-between gap-2">
-                <p className="truncate text-[0.61rem] font-semibold text-white/30">
-                    {detail}
-                </p>
-                {progress !== undefined ? (
-                    <span className="text-[0.61rem] font-bold text-white/25">
-                        {progress > 0 ? `${Math.round(progress)}%` : "—"}
-                    </span>
-                ) : null}
-            </div>
-            {progress !== undefined ? (
-                <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/[0.08]">
-                    <span
-                        className="block h-full rounded-full bg-[#8b92ff] transition-[width] duration-500"
-                        style={{ width: `${progress}%` }}
-                    />
-                </div>
-            ) : null}
-        </div>
-    );
-}
-
-function MiniStat({ label, value }: { label: string; value: string }) {
-    return (
-        <div className="min-w-0 text-center">
-            <p className="truncate text-[0.55rem] font-bold tracking-[0.15em] text-white/25 uppercase">
-                {label}
-            </p>
-            <p className="mt-1 truncate text-xs font-bold text-white/70">
-                {value}
-            </p>
         </div>
     );
 }

@@ -4,140 +4,47 @@ import {
     LoaderCircle,
     Pause,
     Play,
-    Send,
     Square,
 } from "lucide-react";
-import type { FormEvent, ReactNode } from "react";
-import {
-    maximumFtmsPowerWatts,
-    minimumFtmsPowerWatts,
-} from "./use-ride-session";
+import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
-export function ManualTargetForm({
-    targetInput,
-    isSettingTarget,
-    workoutCompleted,
-    embedded = false,
-    onChange,
-    onSubmit,
-}: {
-    targetInput: string;
-    isSettingTarget: boolean;
-    workoutCompleted: boolean;
-    embedded?: boolean;
-    onChange: (value: string) => void;
-    onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
-    return (
-        <form
-            onSubmit={onSubmit}
-            className={cn(
-                embedded
-                    ? "border-b border-white/[0.08] pb-4"
-                    : "rounded-[2rem] border border-white/[0.1] bg-[#141821] p-4 sm:p-5",
-            )}
-        >
-            <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-                <div>
-                    <p className="text-[0.6rem] font-bold tracking-[0.2em] text-white/30 uppercase">
-                        Manual ERG target
-                    </p>
-                    <p className="mt-2 text-sm font-bold text-white/75">
-                        {workoutCompleted
-                            ? "Workout complete · keep riding"
-                            : "Set a target for this free ride"}
-                    </p>
-                </div>
-                <div className="flex gap-2">
-                    <label className="relative min-w-0 flex-1 sm:w-32">
-                        <span className="sr-only">ERG target in watts</span>
-                        <input
-                            type="number"
-                            inputMode="numeric"
-                            min={minimumFtmsPowerWatts}
-                            max={maximumFtmsPowerWatts}
-                            step="1"
-                            value={targetInput}
-                            onChange={(event) => onChange(event.target.value)}
-                            className="h-12 w-full rounded-2xl border border-white/[0.1] bg-[#0d1017] px-3 pr-9 text-sm font-bold text-white outline-none focus:border-[#7e87ff] focus:ring-2 focus:ring-[#7e87ff]/20"
-                        />
-                        <span className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs font-bold text-white/30">
-                            W
-                        </span>
-                    </label>
-                    <button
-                        type="submit"
-                        disabled={isSettingTarget}
-                        className="inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-[#f5bd58] px-4 text-xs font-black text-[#19140b] transition hover:bg-[#ffd682] focus-visible:ring-2 focus-visible:ring-[#f5bd58] focus-visible:outline-none disabled:opacity-50"
-                    >
-                        {isSettingTarget ? (
-                            <LoaderCircle
-                                aria-hidden="true"
-                                className="size-4 animate-spin"
-                            />
-                        ) : (
-                            <Send aria-hidden="true" className="size-4" />
-                        )}
-                        Set
-                    </button>
-                </div>
-            </div>
-        </form>
-    );
-}
-
-export function WorkoutTargetAdjustment({
+function TargetAdjustmentButton({
     disabled,
     isAdjusting,
-    percent,
+    delta,
+    unit,
     onAdjust,
 }: {
     disabled: boolean;
     isAdjusting: boolean;
-    percent: number;
-    onAdjust: (deltaPercent: number) => void;
+    delta: -1 | 1;
+    unit: "percent" | "watt";
+    onAdjust: (delta: number) => void;
 }) {
+    const isIncrease = delta === 1;
+    const targetLabel =
+        unit === "percent" ? "workout target" : "manual ERG target";
+    const amountLabel = unit === "percent" ? "1 percent" : "1 watt";
     return (
-        <div className="mt-4 grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)] items-center gap-2 border-t border-white/[0.08] pt-4">
-            <output
-                aria-label="Workout target intensity"
-                aria-live="polite"
-                className="pr-2 font-mono text-xl font-black tracking-[-0.08em] text-[#aeb4ff] sm:text-2xl"
-            >
-                {percent}%
-            </output>
-            <button
-                type="button"
-                onClick={() => onAdjust(-1)}
-                disabled={disabled}
-                aria-label="Decrease workout target by 1 percent"
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-white/[0.1] bg-white/[0.05] text-sm font-black text-white/80 transition-colors hover:bg-white/[0.1] hover:text-white focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none disabled:opacity-45"
-            >
-                {isAdjusting ? (
-                    <LoaderCircle
-                        aria-hidden="true"
-                        className="size-4 animate-spin"
-                    />
-                ) : null}
-                -1%
-            </button>
-            <button
-                type="button"
-                onClick={() => onAdjust(1)}
-                disabled={disabled}
-                aria-label="Increase workout target by 1 percent"
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#7e87ff] text-sm font-black text-[#0b0d14] transition-colors hover:bg-[#aeb4ff] focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none disabled:opacity-45"
-            >
-                {isAdjusting ? (
-                    <LoaderCircle
-                        aria-hidden="true"
-                        className="size-4 animate-spin"
-                    />
-                ) : null}
-                +1%
-            </button>
-        </div>
+        <button
+            type="button"
+            onClick={() => onAdjust(delta)}
+            disabled={disabled}
+            aria-label={`${isIncrease ? "Increase" : "Decrease"} ${targetLabel} by ${amountLabel}`}
+            className="grid size-12 shrink-0 place-items-center rounded-2xl border border-white/[0.1] bg-white/[0.05] text-xl font-black text-white/75 transition-colors hover:bg-white/[0.1] hover:text-white focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none disabled:opacity-45"
+        >
+            {isAdjusting ? (
+                <LoaderCircle
+                    aria-hidden="true"
+                    className="size-4 animate-spin"
+                />
+            ) : isIncrease ? (
+                "+"
+            ) : (
+                "−"
+            )}
+        </button>
     );
 }
 
@@ -155,6 +62,7 @@ export function RideControls({
     onPause,
     onResume,
     onStop,
+    manualTargetAdjustment,
     workoutTargetAdjustment,
 }: {
     children?: ReactNode;
@@ -170,18 +78,29 @@ export function RideControls({
     onPause: () => void;
     onResume: () => void;
     onStop: () => void;
+    manualTargetAdjustment?: {
+        disabled: boolean;
+        isAdjusting: boolean;
+        onAdjust: (deltaWatts: number) => void;
+    } | null;
     workoutTargetAdjustment?: {
         disabled: boolean;
         isAdjusting: boolean;
-        percent: number;
         onAdjust: (deltaPercent: number) => void;
     } | null;
 }) {
     const isInProgress = isActive || isPaused;
     const isTransitioning = isPausing || isResuming;
+    const targetAdjustment =
+        workoutTargetAdjustment ?? manualTargetAdjustment ?? null;
+    const targetAdjustmentUnit =
+        workoutTargetAdjustment !== null &&
+        workoutTargetAdjustment !== undefined
+            ? "percent"
+            : "watt";
 
     return (
-        <section className="rounded-[2rem] border border-white/[0.1] bg-[#141821] p-4 sm:p-5">
+        <section className="shrink-0 rounded-[2rem] border border-white/[0.1] bg-[#141821] p-4 sm:p-5">
             {children ? <div className="space-y-4">{children}</div> : null}
             <div
                 className={cn(
@@ -189,16 +108,48 @@ export function RideControls({
                     children ? "mt-4" : null,
                 )}
             >
+                {targetAdjustment ? (
+                    <TargetAdjustmentButton
+                        disabled={targetAdjustment.disabled}
+                        isAdjusting={targetAdjustment.isAdjusting}
+                        delta={-1}
+                        unit={targetAdjustmentUnit}
+                        onAdjust={targetAdjustment.onAdjust}
+                    />
+                ) : null}
+                {isInProgress ? (
+                    <button
+                        type="button"
+                        onClick={isPaused ? onResume : onPause}
+                        disabled={isStopping || isTransitioning}
+                        aria-label={isPaused ? "Resume ride" : "Pause ride"}
+                        className="grid size-12 place-items-center rounded-2xl border border-white/[0.1] bg-white/[0.05] text-white/70 transition-colors hover:bg-white/[0.1] hover:text-white focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none disabled:opacity-50"
+                    >
+                        {isTransitioning ? (
+                            <LoaderCircle
+                                aria-hidden="true"
+                                className="size-5 animate-spin"
+                            />
+                        ) : isPaused ? (
+                            <Play
+                                aria-hidden="true"
+                                className="size-5 fill-current"
+                            />
+                        ) : (
+                            <Pause aria-hidden="true" className="size-5" />
+                        )}
+                    </button>
+                ) : null}
                 <button
                     type="button"
                     onClick={isInProgress ? onStop : onBack}
                     disabled={isStopping}
                     aria-label={isInProgress ? "Stop ride" : "Back to today"}
                     className={cn(
-                        "grid size-16 place-items-center rounded-2xl transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:opacity-60",
+                        "grid size-12 shrink-0 place-items-center rounded-2xl border transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:opacity-60",
                         isInProgress
-                            ? "bg-[#ff8068] text-[#210b09] shadow-[0_10px_28px_rgba(255,128,104,0.16)] hover:bg-[#ff9b88] focus-visible:ring-[#ff8068] focus-visible:ring-offset-[#141821]"
-                            : "bg-[#7e87ff] text-[#0b0d14] hover:bg-[#aeb4ff] focus-visible:ring-[#8b92ff] focus-visible:ring-offset-[#141821]",
+                            ? "border-[#ff8068]/35 bg-[#ff8068]/10 text-[#ff9b88] hover:bg-[#ff8068]/20 focus-visible:ring-[#ff8068] focus-visible:ring-offset-[#141821]"
+                            : "border-[#7e87ff]/50 bg-[#7e87ff]/15 text-[#c3c7ff] hover:bg-[#7e87ff]/25 focus-visible:ring-[#8b92ff] focus-visible:ring-offset-[#141821]",
                     )}
                 >
                     {isInProgress ? (
@@ -231,33 +182,16 @@ export function RideControls({
                         )}
                     </button>
                 ) : null}
-                {isInProgress ? (
-                    <button
-                        type="button"
-                        onClick={isPaused ? onResume : onPause}
-                        disabled={isStopping || isTransitioning}
-                        aria-label={isPaused ? "Resume ride" : "Pause ride"}
-                        className="grid size-12 place-items-center rounded-2xl border border-white/[0.1] bg-white/[0.05] text-white/70 transition-colors hover:bg-white/[0.1] hover:text-white focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none disabled:opacity-50"
-                    >
-                        {isTransitioning ? (
-                            <LoaderCircle
-                                aria-hidden="true"
-                                className="size-5 animate-spin"
-                            />
-                        ) : isPaused ? (
-                            <Play
-                                aria-hidden="true"
-                                className="size-5 fill-current"
-                            />
-                        ) : (
-                            <Pause aria-hidden="true" className="size-5" />
-                        )}
-                    </button>
+                {targetAdjustment ? (
+                    <TargetAdjustmentButton
+                        disabled={targetAdjustment.disabled}
+                        isAdjusting={targetAdjustment.isAdjusting}
+                        delta={1}
+                        unit={targetAdjustmentUnit}
+                        onAdjust={targetAdjustment.onAdjust}
+                    />
                 ) : null}
             </div>
-            {workoutTargetAdjustment ? (
-                <WorkoutTargetAdjustment {...workoutTargetAdjustment} />
-            ) : null}
         </section>
     );
 }

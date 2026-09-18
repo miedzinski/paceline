@@ -1,7 +1,7 @@
 import { WorkoutProgressTile } from "@/components/workout-progress-tile";
 import { formatElapsed } from "@/lib/connection";
 import type { RideSessionModel } from "./use-ride-session";
-import { RideControls, ManualTargetForm } from "./ride-controls";
+import { RideControls } from "./ride-controls";
 import {
     ConnectionBanner,
     ErgProtectionBanner,
@@ -19,13 +19,11 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         session,
         trace,
         now,
-        targetInput,
-        setTargetInput,
         isPausing,
         isResuming,
         isStopping,
         isAdvancing,
-        isSettingTarget,
+        isAdjustingManualTarget,
         isAdjustingWorkoutTarget,
         isUploading,
         isDiscarding,
@@ -40,14 +38,12 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         isPaused,
         currentPower,
         requestedTarget,
-        appliedTarget,
-        powerProgress,
         navigateHome,
         pauseSession,
         resumeSession,
         stopSession,
         advanceStep,
-        setManualTarget,
+        adjustManualTarget,
         adjustWorkoutTarget,
         uploadActivity,
         discardActivity,
@@ -63,17 +59,24 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                       session.ergProtection.state === "UNAVAILABLE" ||
                       session.ergProtection.state === "RECOVERY_FAILED",
                   isAdjusting: isAdjustingWorkoutTarget,
-                  percent: session.workoutPowerTargetPercent ?? 100,
                   onAdjust: (deltaPercent: number) =>
                       void adjustWorkoutTarget(deltaPercent),
               }
             : null;
-    const showManualTarget =
-        isActive && (session.workout === null || session.workout.completed);
+    const isManualMode = session.workout === null || session.workout.completed;
+    const manualTargetAdjustment =
+        (isActive || isPaused) && isManualMode && requestedTarget !== null
+            ? {
+                  disabled: isAdjustingManualTarget || isStopping || !isActive,
+                  isAdjusting: isAdjustingManualTarget,
+                  onAdjust: (deltaWatts: number) =>
+                      void adjustManualTarget(deltaWatts),
+              }
+            : null;
 
     return (
-        <div className="min-h-[100svh] bg-[#090c12] px-4 pt-[calc(0.9rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))] text-[#f5f6fb] sm:px-6 lg:px-8">
-            <div className="mx-auto max-w-[1200px]">
+        <div className="flex min-h-[100svh] flex-col bg-[#090c12] px-4 pt-[calc(0.9rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))] text-[#f5f6fb] sm:px-6 lg:px-8">
+            <div className="mx-auto flex w-full max-w-[1200px] flex-1 flex-col">
                 <RideHeader
                     connection={connection}
                     onLogoClick={navigateHome}
@@ -89,74 +92,62 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                     onOpenEquipment={openEquipment}
                 />
 
-                <ErgProtectionBanner protection={session.ergProtection} />
-
-                <div className="mt-6 grid gap-4">
-                    <WorkoutProgressTile
-                        now={now}
-                        definition={definition}
-                        workout={session.workout}
-                        athleteProfile={profile}
-                        paused={isPaused}
+                <div className="relative mt-6 flex flex-1 flex-col">
+                    <ErgProtectionBanner
+                        protection={session.ergProtection}
+                        overlay
                     />
 
-                    <MetricsPanel
-                        currentPower={currentPower}
-                        cadence={liveTelemetry?.cadenceRpm ?? null}
-                        heartRate={session.heartRate?.heartRateBpm ?? null}
-                        speed={liveTelemetry?.speedKph ?? null}
-                        elapsed={formatElapsed(session.startedAt, now)}
-                        target={requestedTarget}
-                        appliedTarget={appliedTarget}
-                        controlMode={session.controlMode}
-                        protectionState={session.ergProtection.state}
-                        step={
-                            session.controlMode === "FREE_RIDE" ||
-                            session.workout === null
-                                ? "Free ride"
-                                : `${session.workout.currentStep}/${session.workout.totalSteps}`
-                        }
-                        powerProgress={powerProgress}
-                    />
+                    <div className="flex flex-1 flex-col gap-4">
+                        <WorkoutProgressTile
+                            now={now}
+                            manualTargetWatts={
+                                isActive || isPaused ? requestedTarget : null
+                            }
+                            targetPercent={session.workoutPowerTargetPercent}
+                            definition={definition}
+                            workout={session.workout}
+                            athleteProfile={profile}
+                            paused={isPaused}
+                        />
 
-                    <RideControls
-                        isActive={isActive}
-                        isPaused={isPaused}
-                        isPausing={isPausing}
-                        isResuming={isResuming}
-                        isStopping={isStopping}
-                        isAdvancing={isAdvancing}
-                        hasManualStep={
-                            session.workout?.completed === false &&
-                            session.workout.completion.kind === "MANUAL"
-                        }
-                        onAdvance={() => void advanceStep()}
-                        onBack={navigateHome}
-                        onPause={() => void pauseSession()}
-                        onResume={() => void resumeSession()}
-                        onStop={() => setStopPromptOpen(true)}
-                        workoutTargetAdjustment={workoutTargetAdjustment}
-                    >
-                        {showManualTarget || error !== null ? (
-                            <>
-                                {showManualTarget ? (
-                                    <ManualTargetForm
-                                        embedded
-                                        targetInput={targetInput}
-                                        isSettingTarget={isSettingTarget}
-                                        workoutCompleted={
-                                            session.workout?.completed ?? false
-                                        }
-                                        onChange={setTargetInput}
-                                        onSubmit={(event) =>
-                                            void setManualTarget(event)
-                                        }
-                                    />
-                                ) : null}
+                        <MetricsPanel
+                            currentPower={currentPower}
+                            cadence={liveTelemetry?.cadenceRpm ?? null}
+                            heartRate={session.heartRate?.heartRateBpm ?? null}
+                            speed={liveTelemetry?.speedKph ?? null}
+                        />
+
+                        <div className="mt-auto shrink-0">
+                            <p className="mb-2 text-center text-xs font-semibold text-white/55">
+                                <span className="text-white/35">Elapsed</span>{" "}
+                                {formatElapsed(session.startedAt, now)}
+                            </p>
+                            <RideControls
+                                isActive={isActive}
+                                isPaused={isPaused}
+                                isPausing={isPausing}
+                                isResuming={isResuming}
+                                isStopping={isStopping}
+                                isAdvancing={isAdvancing}
+                                hasManualStep={
+                                    session.workout?.completed === false &&
+                                    session.workout.completion.kind === "MANUAL"
+                                }
+                                onAdvance={() => void advanceStep()}
+                                onBack={navigateHome}
+                                onPause={() => void pauseSession()}
+                                onResume={() => void resumeSession()}
+                                onStop={() => setStopPromptOpen(true)}
+                                manualTargetAdjustment={manualTargetAdjustment}
+                                workoutTargetAdjustment={
+                                    workoutTargetAdjustment
+                                }
+                            >
                                 {error ? <ErrorNotice message={error} /> : null}
-                            </>
-                        ) : null}
-                    </RideControls>
+                            </RideControls>
+                        </div>
+                    </div>
                 </div>
 
                 {stopPromptOpen ? (

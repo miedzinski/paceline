@@ -142,12 +142,16 @@ function nextStepText(
 export function WorkoutProgressTile({
     definition,
     workout,
+    manualTargetWatts,
+    targetPercent,
     now = 0,
     athleteProfile = null,
     paused = false,
 }: {
     definition: WorkoutDefinition | null;
     workout: TrainingWorkoutResponse | null;
+    manualTargetWatts?: number | null;
+    targetPercent?: number | null;
     now?: number;
     athleteProfile?: AthleteProfile | null;
     paused?: boolean;
@@ -176,6 +180,16 @@ export function WorkoutProgressTile({
         now,
         paused,
     );
+    const hasTargetAdjustment =
+        workout !== null &&
+        !workout.completed &&
+        targetPercent !== null &&
+        targetPercent !== undefined &&
+        targetPercent !== 100;
+    const manualTargetText =
+        manualTargetWatts === null || manualTargetWatts === undefined
+            ? "No usable FTP target is available."
+            : `${manualTargetWatts} W ERG target`;
 
     return (
         <section
@@ -195,13 +209,24 @@ export function WorkoutProgressTile({
                     </h2>
                 </div>
                 {workout ? (
-                    <span className="shrink-0 rounded-xl bg-white/[0.06] px-3 py-1.5 text-[0.65rem] font-bold text-white/55">
-                        {paused
-                            ? "Paused"
-                            : workout.completed
-                              ? "Done"
-                              : `${workout.currentStep} / ${workout.totalSteps}`}
-                    </span>
+                    <div className="flex shrink-0 items-center gap-2">
+                        {hasTargetAdjustment ? (
+                            <span
+                                aria-label={`Workout target ${targetPercent}%`}
+                                aria-live="polite"
+                                className="rounded-xl bg-[#7e87ff]/12 px-2.5 py-1.5 text-[0.72rem] font-black text-[#aeb4ff]"
+                            >
+                                {targetPercent}%
+                            </span>
+                        ) : null}
+                        <span className="rounded-xl bg-white/[0.06] px-3.5 py-2 text-[0.8rem] font-black text-white/60">
+                            {paused
+                                ? "Paused"
+                                : workout.completed
+                                  ? "Done"
+                                  : `${workout.currentStep} / ${workout.totalSteps}`}
+                        </span>
+                    </div>
                 ) : null}
             </div>
 
@@ -250,28 +275,24 @@ export function WorkoutProgressTile({
                             </div>
                         )}
                     </div>
-                    {hasUpcomingStep || totalRemainingText !== null ? (
-                        <div className="mt-3 flex items-center gap-3">
-                            {hasUpcomingStep ? (
-                                <p className="min-w-0 flex-1 truncate text-xs font-semibold text-white/60">
-                                    <span className="mr-2 text-[0.6rem] font-bold tracking-[0.16em] text-white/35 uppercase">
-                                        Next
-                                    </span>
-                                    {upcomingText}
-                                </p>
-                            ) : (
-                                <span aria-hidden="true" className="flex-1" />
-                            )}
-                            {totalRemainingText !== null ? (
-                                <p className="shrink-0 text-right text-xs font-semibold text-white/55">
-                                    <span className="text-white/35">
-                                        Workout
-                                    </span>{" "}
-                                    {totalRemainingText}
-                                </p>
-                            ) : null}
-                        </div>
-                    ) : null}
+                    <div className="mt-3 flex items-center gap-3">
+                        {hasUpcomingStep ? (
+                            <p className="min-w-0 flex-1 truncate text-xs font-semibold text-white/60">
+                                <span className="mr-2 text-[0.6rem] font-bold tracking-[0.16em] text-white/35 uppercase">
+                                    Next
+                                </span>
+                                {upcomingText}
+                            </p>
+                        ) : (
+                            <span aria-hidden="true" className="flex-1" />
+                        )}
+                        {totalRemainingText !== null ? (
+                            <p className="shrink-0 text-right text-xs font-semibold text-white/55">
+                                <span className="text-white/35">Workout</span>{" "}
+                                {totalRemainingText}
+                            </p>
+                        ) : null}
+                    </div>
                 </div>
             ) : (
                 <div className="mt-6 rounded-2xl border border-dashed border-white/[0.14] bg-white/[0.025] p-5">
@@ -292,16 +313,14 @@ export function WorkoutProgressTile({
                             <p className="mt-1 text-xs leading-5 text-white/40">
                                 {paused
                                     ? "Resume when you are ready to continue."
-                                    : workout === null
-                                      ? "Set a target after the session starts."
-                                      : workout.completed
-                                        ? "Continue riding manually."
-                                        : (workout.stepText ??
-                                          activeStepTarget(
-                                              workout,
-                                              steps,
-                                              athleteProfile,
-                                          ))}
+                                    : workout === null || workout.completed
+                                      ? manualTargetText
+                                      : (workout.stepText ??
+                                        activeStepTarget(
+                                            workout,
+                                            steps,
+                                            athleteProfile,
+                                        ))}
                             </p>
                         </div>
                         {workout !== null && (!workout.completed || paused) ? (

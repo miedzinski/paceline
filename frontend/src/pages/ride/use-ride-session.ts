@@ -1,14 +1,11 @@
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-    type FormEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { ApiError, trainingApi } from "@/api";
 import { useAppShell } from "@/lib/app-shell";
+import {
+    adjustManualErgTargetWatts,
+    initialManualErgTargetWatts,
+} from "@/lib/manual-erg";
 import { workoutDefinitionFromSession } from "@/lib/training-workout";
 import type { WorkoutItem } from "@/lib/workouts";
 import type {
@@ -20,8 +17,6 @@ import type {
 } from "@/types";
 
 const sessionPollIntervalMs = 1_000;
-export const minimumFtmsPowerWatts = -32_768;
-export const maximumFtmsPowerWatts = 32_767;
 
 interface RideLocationState {
     workoutSelection?: WorkoutSelection | null;
@@ -97,7 +92,6 @@ export function useRideSession() {
     );
     const [trace, setTrace] = useState<RidePoint[]>([]);
     const [now, setNow] = useState(0);
-    const [targetInput, setTargetInput] = useState("150");
     const [pendingHeartRateSourceId, setPendingHeartRateSourceId] = useState<
         string | null
     >(null);
@@ -106,7 +100,8 @@ export function useRideSession() {
     const [isResuming, setIsResuming] = useState(false);
     const [isStopping, setIsStopping] = useState(false);
     const [isAdvancing, setIsAdvancing] = useState(false);
-    const [isSettingTarget, setIsSettingTarget] = useState(false);
+    const [isAdjustingManualTarget, setIsAdjustingManualTarget] =
+        useState(false);
     const [isAdjustingWorkoutTarget, setIsAdjustingWorkoutTarget] =
         useState(false);
     const [isUploading, setIsUploading] = useState(false);
@@ -130,14 +125,6 @@ export function useRideSession() {
                 setPostRideOpen(true);
             } else if (nextSession.state === "NOT_STARTED") {
                 setPostRideOpen(false);
-            }
-            const requestedTarget =
-                nextSession.controlMode === "FREE_RIDE"
-                    ? null
-                    : (nextSession.ergRequestedTargetPowerWatts ??
-                      nextSession.ergTargetPowerWatts);
-            if (requestedTarget !== null) {
-                setTargetInput(String(requestedTarget));
             }
         } catch (refreshError) {
             setError(displayError(refreshError));
@@ -298,15 +285,22 @@ export function useRideSession() {
                 selectedHeartRateSourceId ?? undefined,
             );
             sessionRefreshGeneration.current += 1;
-            setSession(result);
             setPendingHeartRateSourceId(result.heartRateSourceId);
-            setTargetInput(
-                String(
-                    result.ergRequestedTargetPowerWatts ??
-                        result.ergTargetPowerWatts ??
-                        150,
-                ),
-            );
+            let nextSession = result;
+            if (result.workout === null && result.sessionId !== null) {
+                const initialTarget = initialManualErgTargetWatts(profile);
+                if (initialTarget !== null) {
+                    try {
+                        nextSession = await trainingApi.setErgTarget(
+                            result.sessionId,
+                            initialTarget,
+                        );
+                    } catch (targetError) {
+                        setError(displayError(targetError));
+                    }
+                }
+            }
+            setSession(nextSession);
         } catch (startError) {
             setError(displayError(startError));
         } finally {
@@ -316,6 +310,7 @@ export function useRideSession() {
         connectedSources.length,
         hasErgControl,
         openEquipment,
+        profile,
         selectedHeartRateSourceId,
         workoutSelection,
     ]);
@@ -387,47 +382,41 @@ export function useRideSession() {
         }
     }, [session.sessionId]);
 
-    const setManualTarget = useCallback(
-        async (event: FormEvent<HTMLFormElement>) => {
-            event.preventDefault();
-            if (session.sessionId === null) {
-                return;
-            }
-
-            const powerWatts = Number(targetInput.trim());
+    const adjustManualTarget = useCallback(
+        async (deltaWatts: number) => {
             if (
-                !Number.isInteger(powerWatts) ||
-                powerWatts < minimumFtmsPowerWatts ||
-                powerWatts > maximumFtmsPowerWatts
+                session.sessionId === null ||
+                !isActive ||
+                (session.workout !== null && !session.workout.completed) ||
+                requestedTarget === null
             ) {
-                setError(
-                    `Target must be an integer from ${minimumFtmsPowerWatts} to ${maximumFtmsPowerWatts} W`,
-                );
                 return;
             }
 
-            setIsSettingTarget(true);
+            const nextTarget = adjustManualErgTargetWatts(
+                requestedTarget,
+                deltaWatts,
+            );
+            if (nextTarget === requestedTarget) {
+                return;
+            }
+
+            setIsAdjustingManualTarget(true);
             setError(null);
             try {
-                const result = await trainingApi.setErgTarget(
-                    session.sessionId,
-                    powerWatts,
-                );
-                setSession(result);
-                setTargetInput(
-                    String(
-                        result.ergRequestedTargetPowerWatts ??
-                            result.ergTargetPowerWatts ??
-                            powerWatts,
+                setSession(
+                    await trainingApi.setErgTarget(
+                        session.sessionId,
+                        nextTarget,
                     ),
                 );
             } catch (targetError) {
                 setError(displayError(targetError));
             } finally {
-                setIsSettingTarget(false);
+                setIsAdjustingManualTarget(false);
             }
         },
-        [session.sessionId, targetInput],
+        [isActive, requestedTarget, session.sessionId, session.workout],
     );
 
     const adjustWorkoutTarget = useCallback(
@@ -543,14 +532,12 @@ export function useRideSession() {
         session,
         trace,
         now,
-        targetInput,
-        setTargetInput,
         isStarting,
         isPausing,
         isResuming,
         isStopping,
         isAdvancing,
-        isSettingTarget,
+        isAdjustingManualTarget,
         isAdjustingWorkoutTarget,
         isUploading,
         isDiscarding,
@@ -578,7 +565,7 @@ export function useRideSession() {
         resumeSession,
         stopSession,
         advanceStep,
-        setManualTarget,
+        adjustManualTarget,
         adjustWorkoutTarget,
         selectHeartRateSource,
         uploadActivity,
