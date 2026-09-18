@@ -10,6 +10,7 @@ import { useLocation, useNavigate } from "react-router";
 import { ApiError, trainingApi } from "@/api";
 import type { RidePoint } from "@/components/telemetry-chart";
 import { useAppShell } from "@/lib/app-shell";
+import { workoutDefinitionFromSession } from "@/lib/training-workout";
 import type { WorkoutItem } from "@/lib/workouts";
 import type {
     HeartRateSource,
@@ -248,7 +249,9 @@ export function useRideSession() {
             ? session.heartRateSourceId
             : (pendingHeartRateSourceId ??
               (connectedSources.length === 1 ? connectedSources[0].id : null));
-    const definition = activeWorkoutDefinition(selectedWorkout);
+    const definition =
+        workoutDefinitionFromSession(session.workout) ??
+        activeWorkoutDefinition(selectedWorkout);
     const isPreparingNewWorkout = workoutSelection !== null;
     const isActive = session.state === "ACTIVE";
     const isPaused = session.state === "PAUSED";

@@ -51,6 +51,7 @@ data class TrainingWorkoutProgress(
     val name: String,
     val currentStepNumber: Int,
     val totalSteps: Int,
+    val steps: List<ExecutableWorkoutStep>,
     val step: ExecutableWorkoutStep,
     val stepStartedAt: Instant,
     val completed: Boolean = false,
@@ -58,6 +59,9 @@ data class TrainingWorkoutProgress(
     init {
         require(currentStepNumber in 1..totalSteps) {
             "The current workout step must be within the executable workout"
+        }
+        require(steps.size == totalSteps) {
+            "The executable workout step projection must contain the full workout"
         }
     }
 
@@ -71,6 +75,7 @@ data class TrainingWorkoutProgress(
                 name = workout.name,
                 currentStepNumber = 1,
                 totalSteps = workout.steps.size,
+                steps = workout.steps,
                 step = workout.steps.first(),
                 stepStartedAt = now,
             )

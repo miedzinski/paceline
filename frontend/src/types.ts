@@ -148,11 +148,19 @@ export interface TrainingWorkoutResponse {
     name: string;
     currentStep: number;
     totalSteps: number;
+    steps: TrainingWorkoutStepResponse[];
     stepText: string | null;
     stepStartedAt: string;
     completion: TrainingStepCompletionResponse;
     target: TrainingStepTargetResponse;
     completed: boolean;
+}
+
+export interface TrainingWorkoutStepResponse {
+    text: string | null;
+    intensity: string | null;
+    completion: TrainingStepCompletionResponse;
+    target: TrainingStepTargetResponse;
 }
 
 export interface TrainingStepCompletionResponse {

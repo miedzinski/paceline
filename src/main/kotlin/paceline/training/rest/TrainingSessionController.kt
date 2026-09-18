@@ -28,6 +28,7 @@ import paceline.training.domain.WorkoutStepAdvanceNotAllowedException
 import paceline.training.domain.WorkoutTargetAdjustmentNotAllowedException
 import paceline.training.domain.WorkoutTargetManagedException
 import paceline.training.ports.ActivityUploadException
+import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutCatalog
 import paceline.workout.domain.WorkoutNotExecutableException
 import paceline.workout.domain.WorkoutNotFoundException
@@ -320,11 +321,19 @@ data class TrainingWorkoutResponse(
     val name: String,
     val currentStep: Int,
     val totalSteps: Int,
+    val steps: List<TrainingWorkoutStepResponse>,
     val stepText: String?,
     val stepStartedAt: Instant,
     val completion: TrainingStepCompletionResponse,
     val target: TrainingStepTargetResponse,
     val completed: Boolean,
+)
+
+data class TrainingWorkoutStepResponse(
+    val text: String?,
+    val intensity: String?,
+    val completion: TrainingStepCompletionResponse,
+    val target: TrainingStepTargetResponse,
 )
 
 data class TrainingStepCompletionResponse(
@@ -394,11 +403,20 @@ private fun TrainingWorkoutProgress.toResponse(): TrainingWorkoutResponse =
         name = name,
         currentStep = currentStepNumber,
         totalSteps = totalSteps,
+        steps = steps.map(ExecutableWorkoutStep::toResponse),
         stepText = step.text,
         stepStartedAt = stepStartedAt,
         completion = step.completion.toResponse(),
         target = step.target.toResponse(),
         completed = completed,
+    )
+
+private fun ExecutableWorkoutStep.toResponse(): TrainingWorkoutStepResponse =
+    TrainingWorkoutStepResponse(
+        text = text,
+        intensity = intensity,
+        completion = completion.toResponse(),
+        target = target.toResponse(),
     )
 
 private fun WorkoutStepCompletion.toResponse(): TrainingStepCompletionResponse =

@@ -91,6 +91,16 @@ class WorkoutExecutionIntegrationTest {
                 ?.groupValues
                 ?.get(1)
                 ?: error("No session id in response: $started")
+        val refreshed =
+            restClient
+                .get()
+                .uri("/training-sessions/current")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
         val completed =
             restClient
                 .post()
@@ -106,6 +116,8 @@ class WorkoutExecutionIntegrationTest {
         assertTrue(started.contains("\"state\":\"ACTIVE\""))
         assertTrue(started.contains("\"sourceId\":\"event-1\""))
         assertTrue(started.contains("\"currentStep\":1"))
+        assertTrue(started.contains("\"steps\":[{\"text\":\"Lap press\""))
+        assertTrue(refreshed.contains("\"steps\":[{\"text\":\"Lap press\""))
         assertTrue(started.contains("\"controlMode\":\"FREE_RIDE\""))
         assertTrue(started.contains("\"ergRequestedTargetPowerWatts\":null"))
         assertTrue(started.contains("\"ergTargetPowerWatts\":null"))
@@ -373,6 +385,8 @@ class WorkoutExecutionIntegrationTest {
                 .responseBody!!
 
         // then the API exposes the adjustment and the next step keeps using it:
+        assertTrue(started.contains("\"steps\":[{\"text\":\"Work\""))
+        assertTrue(started.contains("\"text\":\"Recovery\""))
         assertTrue(started.contains("\"workoutPowerTargetPercent\":100"))
         assertTrue(adjusted.contains("\"workoutPowerTargetPercent\":101"))
         assertTrue(adjusted.contains("\"ergTargetPowerWatts\":202"))

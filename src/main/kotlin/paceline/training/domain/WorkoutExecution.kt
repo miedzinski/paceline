@@ -126,6 +126,7 @@ class WorkoutExecution {
             name = workout.name,
             currentStepNumber = nextIndex + 1,
             totalSteps = workout.steps.size,
+            steps = workout.steps,
             step = nextStep,
             stepStartedAt = transitionAt,
         )
