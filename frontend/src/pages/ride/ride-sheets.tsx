@@ -256,7 +256,7 @@ function ModalBackdrop({
 
     return (
         <div
-            className="fixed inset-0 z-[95] flex items-end justify-center bg-[#05070c]/78 p-4 backdrop-blur-sm sm:items-center sm:p-6"
+            className="fixed inset-0 z-[95] flex items-center justify-center bg-[#05070c]/78 p-4 backdrop-blur-sm sm:p-6"
             role="presentation"
             onMouseDown={(event) => {
                 if (event.target === event.currentTarget) {
