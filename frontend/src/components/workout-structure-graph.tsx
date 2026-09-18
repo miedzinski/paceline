@@ -50,7 +50,7 @@ export function WorkoutStructureGraph({
                             athleteProfile,
                         );
                         const label = stepLabel(step);
-                        const summary = stepSummary(step);
+                        const summary = stepSummary(step, athleteProfile);
                         return (
                             <span
                                 key={`${label ?? "step"}-${index}`}

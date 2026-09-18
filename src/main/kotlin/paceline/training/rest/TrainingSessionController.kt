@@ -37,6 +37,7 @@ import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutSourceType
 import paceline.workout.domain.WorkoutStepCompletion
 import paceline.workout.domain.WorkoutStepTarget
+import paceline.workout.domain.WorkoutTargetSummary
 import paceline.workout.ports.WorkoutProviderUnavailableException
 import java.time.Instant
 import java.util.UUID
@@ -347,6 +348,15 @@ data class TrainingStepTargetResponse(
     val highWatts: Int?,
     val startWatts: Int? = null,
     val endWatts: Int? = null,
+    val sourceTarget: TrainingSourceTargetResponse? = null,
+)
+
+data class TrainingSourceTargetResponse(
+    val value: Double?,
+    val start: Double?,
+    val end: Double?,
+    val units: String?,
+    val target: String?,
 )
 
 private fun WorkoutSelectionRequest.toDomain(): WorkoutSelection =
@@ -407,7 +417,7 @@ private fun TrainingWorkoutProgress.toResponse(): TrainingWorkoutResponse =
         stepText = step.text,
         stepStartedAt = stepStartedAt,
         completion = step.completion.toResponse(),
-        target = step.target.toResponse(),
+        target = step.target.toResponse(step.sourceTarget),
         completed = completed,
     )
 
@@ -416,7 +426,7 @@ private fun ExecutableWorkoutStep.toResponse(): TrainingWorkoutStepResponse =
         text = text,
         intensity = intensity,
         completion = completion.toResponse(),
-        target = target.toResponse(),
+        target = target.toResponse(sourceTarget),
     )
 
 private fun WorkoutStepCompletion.toResponse(): TrainingStepCompletionResponse =
@@ -434,13 +444,14 @@ private fun WorkoutStepCompletion.toResponse(): TrainingStepCompletionResponse =
         }
     }
 
-private fun WorkoutStepTarget.toResponse(): TrainingStepTargetResponse =
+private fun WorkoutStepTarget.toResponse(sourceTarget: WorkoutTargetSummary?): TrainingStepTargetResponse =
     when (this) {
         is WorkoutStepTarget.Power -> {
             TrainingStepTargetResponse(
                 kind = "POWER",
                 lowWatts = lowWatts,
                 highWatts = highWatts,
+                sourceTarget = sourceTarget?.toResponse(),
             )
         }
 
@@ -451,6 +462,7 @@ private fun WorkoutStepTarget.toResponse(): TrainingStepTargetResponse =
                 highWatts = highWatts,
                 startWatts = startWatts,
                 endWatts = endWatts,
+                sourceTarget = sourceTarget?.toResponse(),
             )
         }
 
@@ -458,3 +470,12 @@ private fun WorkoutStepTarget.toResponse(): TrainingStepTargetResponse =
             TrainingStepTargetResponse(kind = "OPEN", lowWatts = null, highWatts = null)
         }
     }
+
+private fun WorkoutTargetSummary.toResponse(): TrainingSourceTargetResponse =
+    TrainingSourceTargetResponse(
+        value = value,
+        start = start,
+        end = end,
+        units = units,
+        target = target,
+    )

@@ -20,6 +20,13 @@ test("rehydrates the complete executable workout structure from a session", () =
                     highWatts: 120,
                     startWatts: null,
                     endWatts: null,
+                    sourceTarget: {
+                        value: 60,
+                        start: null,
+                        end: null,
+                        units: "%ftp",
+                        target: "POWER",
+                    },
                 },
             },
             {
@@ -32,6 +39,13 @@ test("rehydrates the complete executable workout structure from a session", () =
                     highWatts: 220,
                     startWatts: 150,
                     endWatts: 220,
+                    sourceTarget: {
+                        value: null,
+                        start: 75,
+                        end: 60,
+                        units: "%ftp",
+                        target: "POWER",
+                    },
                 },
             },
             {
@@ -69,6 +83,7 @@ test("rehydrates the complete executable workout structure from a session", () =
             freeRide: step.freeRide,
             intensity: step.intensity,
             power: step.power,
+            resolvedPower: step.resolvedPower,
         })),
         [
             {
@@ -78,6 +93,13 @@ test("rehydrates the complete executable workout structure from a session", () =
                 freeRide: false,
                 intensity: "warmup",
                 power: {
+                    value: 60,
+                    start: null,
+                    end: null,
+                    units: "%ftp",
+                    target: "POWER",
+                },
+                resolvedPower: {
                     value: 120,
                     start: 120,
                     end: 120,
@@ -93,6 +115,13 @@ test("rehydrates the complete executable workout structure from a session", () =
                 intensity: null,
                 power: {
                     value: null,
+                    start: 75,
+                    end: 60,
+                    units: "%ftp",
+                    target: "POWER",
+                },
+                resolvedPower: {
+                    value: null,
                     start: 150,
                     end: 220,
                     units: "watts",
@@ -106,6 +135,7 @@ test("rehydrates the complete executable workout structure from a session", () =
                 freeRide: true,
                 intensity: "cooldown",
                 power: null,
+                resolvedPower: null,
             },
         ],
     );

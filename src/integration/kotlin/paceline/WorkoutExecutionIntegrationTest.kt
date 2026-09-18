@@ -387,6 +387,8 @@ class WorkoutExecutionIntegrationTest {
         // then the API exposes the adjustment and the next step keeps using it:
         assertTrue(started.contains("\"steps\":[{\"text\":\"Work\""))
         assertTrue(started.contains("\"text\":\"Recovery\""))
+        assertTrue(started.contains("\"sourceTarget\":{\"value\":80.0"))
+        assertTrue(started.contains("\"sourceTarget\":{\"value\":40.0"))
         assertTrue(started.contains("\"workoutPowerTargetPercent\":100"))
         assertTrue(adjusted.contains("\"workoutPowerTargetPercent\":101"))
         assertTrue(adjusted.contains("\"ergTargetPowerWatts\":202"))
@@ -482,7 +484,7 @@ class WorkoutExecutionIntegrationTestConfiguration {
                                     description = null,
                                     durationSeconds = 20,
                                     distanceMeters = null,
-                                    ftpWatts = null,
+                                    ftpWatts = 250,
                                     thresholdHeartRateBpm = null,
                                     target = "POWER",
                                     steps =
@@ -502,8 +504,8 @@ class WorkoutExecutionIntegrationTestConfiguration {
                                                 hidePower = null,
                                                 power =
                                                     WorkoutTargetSummary(
-                                                        value = 200.0,
-                                                        units = "W",
+                                                        value = 80.0,
+                                                        units = "%ftp",
                                                     ),
                                                 resolvedPower = null,
                                                 heartRate = null,
@@ -529,8 +531,8 @@ class WorkoutExecutionIntegrationTestConfiguration {
                                                 hidePower = null,
                                                 power =
                                                     WorkoutTargetSummary(
-                                                        value = 100.0,
-                                                        units = "W",
+                                                        value = 40.0,
+                                                        units = "%ftp",
                                                     ),
                                                 resolvedPower = null,
                                                 heartRate = null,

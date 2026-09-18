@@ -8,9 +8,9 @@ import type {
     WorkoutStep,
     WorkoutTarget,
 } from "@/types";
-import { flattenWorkoutSteps } from "@/lib/workout-steps";
+import { flattenWorkoutSteps } from "./workout-steps.ts";
 
-export { flattenWorkoutSteps } from "@/lib/workout-steps";
+export { flattenWorkoutSteps } from "./workout-steps.ts";
 
 export type WorkoutItem = ScheduledWorkout | LibraryWorkout;
 
@@ -89,6 +89,24 @@ export function powerZoneForStep(
         }
     }
 
+    const declaredZoneRange = powerZoneRangeForTarget(step.power, profile);
+    if (declaredZoneRange !== null) {
+        const firstZone = declaredZoneRange[0];
+        const lastZone = declaredZoneRange[1];
+        if (lastZone.maxPercent === null) {
+            return lastZone;
+        }
+
+        const midpoint = (firstZone.minPercent + lastZone.maxPercent) / 2;
+        return (
+            profile.powerZones.find(
+                (zone) =>
+                    midpoint > zone.minPercent &&
+                    (zone.maxPercent === null || midpoint <= zone.maxPercent),
+            ) ?? lastZone
+        );
+    }
+
     const percentageRange = stepTargetIntensityRangePercent(step, profile);
     if (isFtpRelativePowerTarget(step.power) && percentageRange !== null) {
         const midpoint = (percentageRange[0] + percentageRange[1]) / 2;
@@ -120,14 +138,12 @@ function stepTargetIntensityRangePercent(
     step: WorkoutStep,
     profile: AthleteProfile | null | undefined,
 ): [number, number] | null {
-    const declaredZoneNumber = powerZoneNumberForStep(step);
-    if (declaredZoneNumber !== null) {
-        const zone = profile?.powerZones.find(
-            (candidate) => candidate.number === declaredZoneNumber,
-        );
-        if (zone !== undefined) {
-            return [zone.minPercent, zone.maxPercent ?? zone.minPercent];
-        }
+    const declaredZoneRange = powerZoneRangeForTarget(step.power, profile);
+    if (declaredZoneRange !== null) {
+        return [
+            declaredZoneRange[0].minPercent,
+            declaredZoneRange[1].maxPercent ?? declaredZoneRange[1].minPercent,
+        ];
     }
 
     const target = isFtpRelativePowerTarget(step.power)
@@ -145,6 +161,10 @@ function stepTargetIntensityRangePercent(
 
     if (isFtpRelativePowerTarget(target)) {
         return [start, end];
+    }
+
+    if (isPowerZoneTarget(target)) {
+        return null;
     }
 
     const ftpWatts = profile?.indoorFtpWatts ?? profile?.ftpWatts;
@@ -523,6 +543,152 @@ export function formatTarget(target: WorkoutTarget | null): string | null {
         : [range, units].filter(Boolean).join(" ");
 }
 
+function formatPowerTarget(
+    step: WorkoutStep,
+    profile: AthleteProfile | null | undefined,
+): string | null {
+    const sourceTarget = step.power;
+    if (sourceTarget === null) {
+        return formatTarget(step.resolvedPower);
+    }
+
+    if (isFtpRelativePowerTarget(sourceTarget)) {
+        const watts =
+            formatTarget(step.resolvedPower) ??
+            formatWattsRange(stepPowerRangeWatts(step, profile));
+        return joinTargetLabels(formatTarget(sourceTarget), watts);
+    }
+
+    if (isPowerZoneTarget(sourceTarget)) {
+        const watts =
+            formatTarget(step.resolvedPower) ??
+            formatPowerZoneWattsTarget(sourceTarget, profile);
+        return joinTargetLabels(
+            formatTarget(sourceTarget),
+            formatPowerZonePercentTarget(sourceTarget, profile),
+            watts,
+        );
+    }
+
+    return formatTarget(sourceTarget);
+}
+
+function formatWattsRange(range: [number, number] | null): string | null {
+    if (range === null) {
+        return null;
+    }
+
+    return formatTarget({
+        value: null,
+        start: range[0],
+        end: range[1],
+        units: "W",
+        target: null,
+    });
+}
+
+function formatPowerZonePercentTarget(
+    target: WorkoutTarget,
+    profile: AthleteProfile | null | undefined,
+): string | null {
+    const zones = powerZoneRangeForTarget(target, profile);
+    if (zones === null) {
+        return null;
+    }
+
+    return formatPercentRange(zones[0].minPercent, zones[1].maxPercent);
+}
+
+function formatPowerZoneWattsTarget(
+    target: WorkoutTarget,
+    profile: AthleteProfile | null | undefined,
+): string | null {
+    const zones = powerZoneRangeForTarget(target, profile);
+    if (zones === null) {
+        return null;
+    }
+
+    const first = zones[0];
+    const last = zones[1];
+    if (last.maxWatts === null) {
+        return `≥${first.minWatts} W`;
+    }
+
+    return formatWattsRange([first.minWatts, last.maxWatts]);
+}
+
+function powerZoneRangeForTarget(
+    target: WorkoutTarget | null,
+    profile: AthleteProfile | null | undefined,
+): [PowerZone, PowerZone] | null {
+    if (
+        !isPowerZoneTarget(target) ||
+        profile === null ||
+        profile === undefined
+    ) {
+        return null;
+    }
+
+    const numbers = powerZoneNumbersForTarget(target);
+    if (numbers === null) {
+        return null;
+    }
+
+    const first = profile.powerZones.find((zone) => zone.number === numbers[0]);
+    const last = profile.powerZones.find((zone) => zone.number === numbers[1]);
+    return first === undefined || last === undefined ? null : [first, last];
+}
+
+function powerZoneNumbersForTarget(
+    target: WorkoutTarget | null,
+): [number, number] | null {
+    if (target === null || !isPowerZoneTarget(target)) {
+        return null;
+    }
+
+    const start = target.start ?? target.value ?? target.end;
+    const end = target.end ?? target.value ?? target.start;
+    if (
+        start === null ||
+        start === undefined ||
+        end === null ||
+        end === undefined ||
+        !Number.isFinite(start) ||
+        !Number.isFinite(end)
+    ) {
+        return null;
+    }
+
+    const first = Math.round(Math.min(start, end));
+    const last = Math.round(Math.max(start, end));
+    return first > 0 &&
+        first === Math.min(start, end) &&
+        last === Math.max(start, end)
+        ? [first, last]
+        : null;
+}
+
+function formatPercentRange(
+    minPercent: number,
+    maxPercent: number | null,
+): string {
+    const first = Math.round(minPercent);
+    if (maxPercent === null) {
+        return `${first}% FTP+`;
+    }
+
+    const last = Math.round(maxPercent);
+    return first === last ? `${first}% FTP` : `${first}–${last}% FTP`;
+}
+
+function joinTargetLabels(...labels: Array<string | null>): string | null {
+    const uniqueLabels = labels.filter(
+        (label, index, all): label is string =>
+            label !== null && all.indexOf(label) === index,
+    );
+    return uniqueLabels.length === 0 ? null : uniqueLabels.join(" · ");
+}
+
 function formatPowerZoneTarget(target: WorkoutTarget): string {
     const start = target.start ?? target.value;
     const end = target.end;
@@ -560,14 +726,13 @@ function formatTargetUnits(units: string | null): string | null {
     return trimmed ?? null;
 }
 
-export function stepTarget(step: WorkoutStep): string | null {
-    const target = formatTarget(
-        step.power ??
-            step.resolvedPower ??
-            step.heartRate ??
-            step.pace ??
-            step.cadence,
-    );
+export function stepTarget(
+    step: WorkoutStep,
+    profile: AthleteProfile | null | undefined = null,
+): string | null {
+    const target =
+        formatPowerTarget(step, profile) ??
+        formatTarget(step.heartRate ?? step.pace ?? step.cadence);
     if (target === null && isFreeRideStep(step)) {
         return "Free Ride";
     }
@@ -600,9 +765,12 @@ export function stepDurationLabel(step: WorkoutStep): string | null {
     return null;
 }
 
-export function stepSummary(step: WorkoutStep): string | null {
+export function stepSummary(
+    step: WorkoutStep,
+    profile: AthleteProfile | null | undefined = null,
+): string | null {
     const duration = stepDurationLabel(step);
-    const target = stepTarget(step);
+    const target = stepTarget(step, profile);
     const repeats = step.repeats === null ? null : `${step.repeats} repeats`;
 
     if (duration !== null && target !== null) {

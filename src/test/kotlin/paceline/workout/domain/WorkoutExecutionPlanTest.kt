@@ -132,6 +132,14 @@ class WorkoutExecutionPlanTest {
         // then fixed percentages become watts and the descending ramp keeps its ordered endpoints:
         assertEquals(WorkoutStepTarget.Power(160, 160), result.steps[0].target)
         assertEquals(WorkoutStepTarget.Ramp(150, 120), result.steps[1].target)
+        assertEquals(
+            WorkoutTargetSummary(value = 80.0, units = "%ftp"),
+            result.steps[0].sourceTarget,
+        )
+        assertEquals(
+            WorkoutTargetSummary(start = 75.0, end = 60.0, units = "%ftp"),
+            result.steps[1].sourceTarget,
+        )
     }
 
     @Test
@@ -168,6 +176,10 @@ class WorkoutExecutionPlanTest {
 
         // then the trainer receives the concrete range and the session can use its midpoint:
         assertEquals(WorkoutStepTarget.Power(138, 187), result.steps.single().target)
+        assertEquals(
+            WorkoutTargetSummary(value = 2.0, units = "power_zone"),
+            result.steps.single().sourceTarget,
+        )
     }
 
     @Test

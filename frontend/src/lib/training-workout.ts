@@ -6,7 +6,7 @@ import type {
     WorkoutStep,
 } from "../types";
 
-function targetFromSessionStep(
+function resolvedTargetFromSessionStep(
     target: TrainingWorkoutStepResponse["target"],
 ): WorkoutTarget | null {
     if (target.kind === "OPEN") {
@@ -38,8 +38,26 @@ function targetFromSessionStep(
     };
 }
 
+function sourceTargetFromSessionStep(
+    target: TrainingWorkoutStepResponse["target"],
+): WorkoutTarget | null {
+    const sourceTarget = target.sourceTarget;
+    if (sourceTarget === undefined || sourceTarget === null) {
+        return null;
+    }
+
+    return {
+        value: sourceTarget.value,
+        start: sourceTarget.start,
+        end: sourceTarget.end,
+        units: sourceTarget.units,
+        target: sourceTarget.target,
+    };
+}
+
 function stepFromSessionStep(step: TrainingWorkoutStepResponse): WorkoutStep {
-    const target = targetFromSessionStep(step.target);
+    const resolvedTarget = resolvedTargetFromSessionStep(step.target);
+    const sourceTarget = sourceTargetFromSessionStep(step.target);
     const intensity = step.intensity?.trim() || null;
 
     return {
@@ -54,8 +72,8 @@ function stepFromSessionStep(step: TrainingWorkoutStepResponse): WorkoutStep {
         intensity,
         ramp: step.target.kind === "RAMP",
         freeRide: step.target.kind === "OPEN",
-        power: target,
-        resolvedPower: target,
+        power: sourceTarget ?? resolvedTarget,
+        resolvedPower: resolvedTarget,
         heartRate: null,
         pace: null,
         cadence: null,

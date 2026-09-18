@@ -182,6 +182,15 @@ export interface TrainingStepTargetResponse {
     highWatts: number | null;
     startWatts: number | null;
     endWatts: number | null;
+    sourceTarget?: TrainingSourceTargetResponse | null;
+}
+
+export interface TrainingSourceTargetResponse {
+    value: number | null;
+    start: number | null;
+    end: number | null;
+    units: string | null;
+    target: string | null;
 }
 
 export interface WorkoutSelection {

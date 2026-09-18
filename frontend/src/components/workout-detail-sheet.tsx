@@ -176,7 +176,7 @@ function WorkoutDetailStep({
         ? customLabel === null
             ? null
             : `${repetitions} ${repetitions === 1 ? "repeat" : "repeats"}`
-        : stepSummary(step);
+        : stepSummary(step, athleteProfile);
 
     return (
         <li

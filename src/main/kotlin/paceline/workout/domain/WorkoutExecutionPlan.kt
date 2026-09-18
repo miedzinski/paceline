@@ -23,6 +23,7 @@ data class ExecutableWorkoutStep(
     val completion: WorkoutStepCompletion,
     val target: WorkoutStepTarget,
     val intensity: String? = null,
+    val sourceTarget: WorkoutTargetSummary? = null,
 )
 
 sealed interface WorkoutStepCompletion {
@@ -163,6 +164,7 @@ object ExecutableWorkoutFactory {
                 completion = completion,
                 target = target,
                 intensity = step.fitIntensity(),
+                sourceTarget = step.power ?: step.resolvedPower,
             ),
         )
     }

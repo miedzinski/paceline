@@ -11,19 +11,31 @@ import {
     stepDuration,
     stepLabel,
     stepSummary,
+    stepTarget,
 } from "@/lib/workouts";
 import {
     workoutProgressPercent,
     workoutRemainingSeconds,
 } from "@/lib/workout-progress";
 
-function activeStepTarget(workout: TrainingWorkoutResponse | null): string {
+function activeStepTarget(
+    workout: TrainingWorkoutResponse | null,
+    steps: WorkoutDefinition["steps"],
+    profile: AthleteProfile | null | undefined,
+): string {
     if (workout === null) {
         return "Open target";
     }
     if (workout.completed) {
         return "Workout complete";
     }
+
+    const step = steps[workout.currentStep - 1];
+    const sourceTarget = step === undefined ? null : stepTarget(step, profile);
+    if (sourceTarget !== null) {
+        return sourceTarget;
+    }
+
     if (workout.target.kind === "OPEN") {
         return "Open target";
     }
@@ -103,6 +115,7 @@ function currentStepText(
     workout: TrainingWorkoutResponse | null,
     steps: WorkoutDefinition["steps"],
     currentIndex: number,
+    profile: AthleteProfile | null | undefined,
 ): string | null {
     const liveText = workout?.stepText?.trim();
     if (liveText) {
@@ -110,15 +123,20 @@ function currentStepText(
     }
 
     const step = steps[currentIndex];
-    return step === undefined ? null : (stepLabel(step) ?? stepSummary(step));
+    return step === undefined
+        ? null
+        : (stepLabel(step) ?? stepSummary(step, profile));
 }
 
 function nextStepText(
     steps: WorkoutDefinition["steps"],
     currentIndex: number,
+    profile: AthleteProfile | null | undefined,
 ): string | null {
     const step = steps[currentIndex + 1];
-    return step === undefined ? null : (stepLabel(step) ?? stepSummary(step));
+    return step === undefined
+        ? null
+        : (stepLabel(step) ?? stepSummary(step, profile));
 }
 
 export function WorkoutProgressTile({
@@ -143,8 +161,13 @@ export function WorkoutProgressTile({
     );
     const stepWeights = steps.map((step) => stepDuration(step) ?? 1);
     const progressPercent = workoutProgressPercent(workout, stepWeights, now);
-    const activeText = currentStepText(workout, steps, currentIndex);
-    const upcomingText = nextStepText(steps, currentIndex);
+    const activeText = currentStepText(
+        workout,
+        steps,
+        currentIndex,
+        athleteProfile,
+    );
+    const upcomingText = nextStepText(steps, currentIndex, athleteProfile);
     const hasUpcomingStep =
         upcomingText !== null && workout !== null && !workout.completed;
     const totalRemainingText = workoutRemainingLabel(
@@ -199,13 +222,21 @@ export function WorkoutProgressTile({
                                     : workout?.completed
                                       ? "Workout complete"
                                       : (activeText ??
-                                        activeStepTarget(workout))}
+                                        activeStepTarget(
+                                            workout,
+                                            steps,
+                                            athleteProfile,
+                                        ))}
                             </p>
                             {!paused &&
                             workout !== null &&
                             !workout.completed ? (
                                 <p className="mt-1 truncate text-xs font-semibold text-white/60">
-                                    {activeStepTarget(workout)}
+                                    {activeStepTarget(
+                                        workout,
+                                        steps,
+                                        athleteProfile,
+                                    )}
                                 </p>
                             ) : null}
                         </div>
@@ -266,7 +297,11 @@ export function WorkoutProgressTile({
                                       : workout.completed
                                         ? "Continue riding manually."
                                         : (workout.stepText ??
-                                          activeStepTarget(workout))}
+                                          activeStepTarget(
+                                              workout,
+                                              steps,
+                                              athleteProfile,
+                                          ))}
                             </p>
                         </div>
                         {workout !== null && (!workout.completed || paused) ? (
