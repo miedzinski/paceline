@@ -10,8 +10,7 @@ import {
     Zap,
 } from "lucide-react";
 import { useEffect, useMemo, type ReactNode } from "react";
-import type { RidePoint } from "@/components/telemetry-chart";
-import type { TrainingActivityUploadResponse } from "@/types";
+import type { RidePoint, TrainingActivityUploadResponse } from "@/types";
 
 export function StopPrompt({
     isStopping,

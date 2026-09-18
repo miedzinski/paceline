@@ -8,12 +8,12 @@ import {
 } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { ApiError, trainingApi } from "@/api";
-import type { RidePoint } from "@/components/telemetry-chart";
 import { useAppShell } from "@/lib/app-shell";
 import { workoutDefinitionFromSession } from "@/lib/training-workout";
 import type { WorkoutItem } from "@/lib/workouts";
 import type {
     HeartRateSource,
+    RidePoint,
     TrainingSessionResponse,
     WorkoutDefinition,
     WorkoutSelection,

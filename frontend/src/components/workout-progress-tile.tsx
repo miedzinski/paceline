@@ -1,4 +1,4 @@
-import { ArrowRight, Timer } from "lucide-react";
+import { Timer } from "lucide-react";
 import type {
     AthleteProfile,
     TrainingWorkoutResponse,
@@ -58,10 +58,6 @@ function remainingLabel(
     if (workout === null) {
         return "Open target";
     }
-    if (workout.completed) {
-        return "Complete";
-    }
-
     if (workout.completion.kind === "TIME") {
         const startedAt = Date.parse(workout.stepStartedAt);
         const total = Math.max(0, workout.completion.value ?? 0);
@@ -213,13 +209,15 @@ export function WorkoutProgressTile({
                                 </p>
                             ) : null}
                         </div>
-                        <div className="shrink-0 text-right">
-                            <span className="block pt-0.5 text-base leading-none font-black text-white/90 sm:text-lg">
-                                {paused
-                                    ? "Paused"
-                                    : remainingLabel(workout, now)}
-                            </span>
-                        </div>
+                        {workout?.completed && !paused ? null : (
+                            <div className="shrink-0 text-right">
+                                <span className="block pt-0.5 text-base leading-none font-black text-white/90 sm:text-lg">
+                                    {paused
+                                        ? "Paused"
+                                        : remainingLabel(workout, now)}
+                                </span>
+                            </div>
+                        )}
                     </div>
                     {hasUpcomingStep || totalRemainingText !== null ? (
                         <div className="mt-3 flex items-center gap-3">
@@ -271,7 +269,7 @@ export function WorkoutProgressTile({
                                           activeStepTarget(workout))}
                             </p>
                         </div>
-                        {workout !== null ? (
+                        {workout !== null && (!workout.completed || paused) ? (
                             <span className="shrink-0 text-xs font-bold text-white/85">
                                 {paused
                                     ? "Paused"
@@ -281,13 +279,6 @@ export function WorkoutProgressTile({
                     </div>
                 </div>
             )}
-
-            {workout?.completed ? (
-                <div className="mt-4 flex items-center gap-2 text-xs font-semibold text-[#73d6a1]">
-                    <ArrowRight aria-hidden="true" className="size-3.5" />
-                    Continue manually after the planned steps.
-                </div>
-            ) : null}
         </section>
     );
 }

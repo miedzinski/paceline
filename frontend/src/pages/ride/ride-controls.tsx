@@ -7,7 +7,7 @@ import {
     Send,
     Square,
 } from "lucide-react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import {
     maximumFtmsPowerWatts,
     minimumFtmsPowerWatts,
@@ -18,19 +18,25 @@ export function ManualTargetForm({
     targetInput,
     isSettingTarget,
     workoutCompleted,
+    embedded = false,
     onChange,
     onSubmit,
 }: {
     targetInput: string;
     isSettingTarget: boolean;
     workoutCompleted: boolean;
+    embedded?: boolean;
     onChange: (value: string) => void;
     onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
     return (
         <form
             onSubmit={onSubmit}
-            className="rounded-[2rem] border border-white/[0.1] bg-[#141821] p-4 sm:p-5"
+            className={cn(
+                embedded
+                    ? "border-b border-white/[0.08] pb-4"
+                    : "rounded-[2rem] border border-white/[0.1] bg-[#141821] p-4 sm:p-5",
+            )}
         >
             <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
                 <div>
@@ -136,6 +142,7 @@ export function WorkoutTargetAdjustment({
 }
 
 export function RideControls({
+    children,
     isActive,
     isPaused,
     isStopping,
@@ -150,6 +157,7 @@ export function RideControls({
     onStop,
     workoutTargetAdjustment,
 }: {
+    children?: ReactNode;
     isActive: boolean;
     isPaused: boolean;
     isStopping: boolean;
@@ -174,7 +182,13 @@ export function RideControls({
 
     return (
         <section className="rounded-[2rem] border border-white/[0.1] bg-[#141821] p-4 sm:p-5">
-            <div className="flex items-center justify-center gap-3">
+            {children ? <div className="space-y-4">{children}</div> : null}
+            <div
+                className={cn(
+                    "flex items-center justify-center gap-3",
+                    children ? "mt-4" : null,
+                )}
+            >
                 <button
                     type="button"
                     onClick={isInProgress ? onStop : onBack}

@@ -62,6 +62,14 @@ export interface DeviceHeartRate {
     receivedAt: string;
 }
 
+export interface RidePoint {
+    timestamp: number;
+    powerWatts: number | null;
+    cadenceRpm: number | null;
+    speedKph: number | null;
+    heartRateBpm: number | null;
+}
+
 export interface ConnectedConnection {
     id: string;
     state: string;
