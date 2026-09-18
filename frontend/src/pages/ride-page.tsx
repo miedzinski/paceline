@@ -1,9 +1,19 @@
 import { ActiveRideView } from "@/pages/ride/active-ride-view";
-import { PreRideView } from "@/pages/ride/ride-setup";
+import { PreRideView, RideStartingView } from "@/pages/ride/ride-setup";
 import { useRideSession } from "@/pages/ride/use-ride-session";
 
 export function RidePage() {
     const ride = useRideSession();
+
+    if (ride.isAutoStartingWorkout) {
+        return (
+            <RideStartingView
+                connection={ride.connection}
+                onLogoClick={ride.navigateHome}
+                onOpenEquipment={ride.openEquipment}
+            />
+        );
+    }
 
     if (
         !ride.isActive &&

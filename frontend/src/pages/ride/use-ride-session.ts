@@ -6,6 +6,7 @@ import {
     adjustManualErgTargetWatts,
     initialManualErgTargetWatts,
 } from "@/lib/manual-erg";
+import { canAutoStartSelectedWorkout } from "@/lib/ride-entry";
 import { workoutDefinitionFromSession } from "@/lib/training-workout";
 import type { WorkoutItem } from "@/lib/workouts";
 import type {
@@ -108,8 +109,10 @@ export function useRideSession() {
     const [isDiscarding, setIsDiscarding] = useState(false);
     const [stopPromptOpen, setStopPromptOpen] = useState(false);
     const [postRideOpen, setPostRideOpen] = useState(false);
+    const [sessionLoaded, setSessionLoaded] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const sessionRefreshGeneration = useRef(0);
+    const autoStartKeyRef = useRef<string | null>(null);
     const liveTelemetry =
         session.trainerConnection === "CONNECTED" ? connection.telemetry : null;
 
@@ -121,6 +124,7 @@ export function useRideSession() {
                 return;
             }
             setSession(nextSession);
+            setSessionLoaded(true);
             if (nextSession.state === "STOPPED") {
                 setPostRideOpen(true);
             } else if (nextSession.state === "NOT_STARTED") {
@@ -243,6 +247,21 @@ export function useRideSession() {
     const isActive = session.state === "ACTIVE";
     const isPaused = session.state === "PAUSED";
     const isStopped = session.state === "STOPPED";
+    const autoStartKey =
+        workoutSelection === null
+            ? null
+            : `${workoutSelection.provider}:${workoutSelection.sourceType}:${workoutSelection.sourceId}`;
+    const canAutoStartWorkout =
+        error === null &&
+        canAutoStartSelectedWorkout({
+            sessionLoaded,
+            sessionState: session.state,
+            workoutSelection,
+            hasErgControl,
+            heartRateSourceCount: connectedSources.length,
+            selectedHeartRateSourceId,
+        });
+    const isAutoStartingWorkout = isPreparingNewWorkout && isStarting;
     const currentPower = liveTelemetry?.powerWatts ?? null;
     const requestedTarget =
         session.controlMode === "FREE_RIDE"
@@ -314,6 +333,19 @@ export function useRideSession() {
         selectedHeartRateSourceId,
         workoutSelection,
     ]);
+
+    useEffect(() => {
+        if (
+            !canAutoStartWorkout ||
+            autoStartKey === null ||
+            autoStartKeyRef.current === autoStartKey
+        ) {
+            return;
+        }
+
+        autoStartKeyRef.current = autoStartKey;
+        void startSession();
+    }, [autoStartKey, canAutoStartWorkout, startSession]);
 
     const pauseSession = useCallback(async () => {
         if (session.sessionId === null) {
@@ -552,6 +584,7 @@ export function useRideSession() {
         selectedHeartRateSourceId,
         definition,
         isPreparingNewWorkout,
+        isAutoStartingWorkout,
         isActive,
         isPaused,
         isStopped,

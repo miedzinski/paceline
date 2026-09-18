@@ -63,7 +63,7 @@ export function PreRideView({
                             </h1>
                             <p className="mt-5 max-w-xl text-sm leading-6 text-white/48 sm:text-base sm:leading-7">
                                 {selectedWorkout
-                                    ? "Review the structure, connect your trainer, and start when you are ready."
+                                    ? "Connect your trainer and start when you are ready."
                                     : "A blank canvas for an easy spin or a target of your choosing."}
                             </p>
                             {selectedWorkout ? (
@@ -172,11 +172,45 @@ export function PreRideView({
                                   ? "Start ride"
                                   : "Connect trainer"}
                         </button>
-                        <p className="mt-3 text-center text-xs leading-5 text-white/30">
-                            Your trainer receives a target only after start.
-                        </p>
                     </section>
                 </div>
+            </div>
+        </div>
+    );
+}
+
+export function RideStartingView({
+    connection,
+    onLogoClick,
+    onOpenEquipment,
+}: {
+    connection: AppShellContextValue["connection"];
+    onLogoClick: () => void;
+    onOpenEquipment: () => void;
+}) {
+    return (
+        <div className="min-h-[100svh] bg-[#090c12] px-4 pt-[calc(0.9rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))] text-[#f5f6fb] sm:px-6 lg:px-8">
+            <div className="mx-auto max-w-[1250px]">
+                <RideHeader
+                    connection={connection}
+                    onLogoClick={onLogoClick}
+                    onOpenEquipment={onOpenEquipment}
+                />
+                <main className="mt-7 grid min-h-[calc(100svh-8rem)] place-items-center rounded-[2.25rem] border border-white/[0.1] bg-[#141821] p-8 text-center">
+                    <div>
+                        <LoaderCircle
+                            aria-hidden="true"
+                            className="mx-auto size-8 animate-spin text-[#aeb4ff]"
+                        />
+                        <p className="mt-5 text-2xl font-black tracking-[-0.06em] text-white">
+                            Starting ride…
+                        </p>
+                        <p className="mt-2 text-sm text-white/45">
+                            Connecting to your trainer and preparing the
+                            workout.
+                        </p>
+                    </div>
+                </main>
             </div>
         </div>
     );
