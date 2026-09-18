@@ -8,7 +8,7 @@ export function RideHeader({
     onOpenEquipment,
 }: {
     connection: DeviceConnectionResponse;
-    onLogoClick: () => void;
+    onLogoClick?: () => void;
     onOpenEquipment: () => void;
 }) {
     return (

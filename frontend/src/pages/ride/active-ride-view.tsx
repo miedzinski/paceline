@@ -79,7 +79,6 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
             <div className="mx-auto flex w-full max-w-[1200px] flex-1 flex-col">
                 <RideHeader
                     connection={connection}
-                    onLogoClick={navigateHome}
                     onOpenEquipment={openEquipment}
                 />
 
