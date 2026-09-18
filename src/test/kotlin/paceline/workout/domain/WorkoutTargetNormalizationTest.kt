@@ -7,7 +7,7 @@ import kotlin.test.assertNull
 
 class WorkoutTargetNormalizationTest {
     @Test
-    fun `resolves supported FTP-relative unit spellings into rounded watts`() {
+    fun `resolves supported FTP-relative unit spellings into floored watts`() {
         // given a target with provider unit spelling and both fixed and ramp values:
         val target =
             WorkoutTargetSummary(
@@ -21,12 +21,38 @@ class WorkoutTargetNormalizationTest {
         // when the domain normalizer resolves it using the workout FTP:
         val result = WorkoutTargetNormalizer.resolveFtpPower(target, ftpWatts = 200)
 
-        // then the relative values become rounded watts and metadata is retained:
+        // then the relative values become integer watts and metadata is retained:
         assertEquals(
             WorkoutTargetSummary(
                 value = null,
                 start = 150.0,
                 end = 120.0,
+                units = "W",
+                target = "POWER",
+            ),
+            result,
+        )
+    }
+
+    @Test
+    fun `floors fractional FTP-relative watts instead of rounding up`() {
+        // given a target whose FTP percentages produce fractional watt values:
+        val target =
+            WorkoutTargetSummary(
+                start = 83.0,
+                end = 96.0,
+                units = "%ftp",
+                target = "POWER",
+            )
+
+        // when the domain normalizer resolves it using the workout FTP:
+        val result = WorkoutTargetNormalizer.resolveFtpPower(target, ftpWatts = 208)
+
+        // then each percentage is rounded down to match the provider's workout conversion:
+        assertEquals(
+            WorkoutTargetSummary(
+                start = 172.0,
+                end = 199.0,
                 units = "W",
                 target = "POWER",
             ),

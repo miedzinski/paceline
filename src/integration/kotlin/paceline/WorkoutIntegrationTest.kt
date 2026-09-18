@@ -71,7 +71,7 @@ class WorkoutIntegrationTest {
         assertTrue(response.contains("\"name\":\"Threshold intervals\""))
         assertFalse(response.contains("Completed intervals"))
         assertTrue(response.contains("\"plannedZoneDistribution\":[{\"zone\":\"Z1\",\"durationSeconds\":900}"))
-        assertTrue(response.contains("\"resolvedPower\":{\"value\":238.0"))
+        assertTrue(response.contains("\"resolvedPower\":{\"value\":237.0"))
         assertTrue(response.contains("\"freeRide\":true"))
         mockIntervalsServer.verify()
     }

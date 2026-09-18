@@ -139,7 +139,7 @@ class IntervalsIcuWorkoutSourceTest {
             result.single().workout?.plannedZoneDistribution,
         )
         assertEquals(
-            238.0,
+            237.0,
             result
                 .single()
                 .workout
@@ -245,7 +245,7 @@ class IntervalsIcuWorkoutSourceTest {
                 ?.start,
         )
         assertEquals(
-            188.0,
+            187.0,
             detail
                 ?.workout
                 ?.steps

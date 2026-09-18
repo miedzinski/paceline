@@ -1,6 +1,7 @@
 package paceline.workout.domain
 
 import paceline.profile.domain.PowerZone
+import kotlin.math.floor
 import kotlin.math.roundToInt
 
 object WorkoutTargetNormalizer {
@@ -24,7 +25,7 @@ object WorkoutTargetNormalizer {
         fun resolve(percent: Double?): Double? =
             percent
                 ?.takeIf(Double::isFinite)
-                ?.let { ((it / 100.0) * validFtpWatts).roundToInt().toDouble() }
+                ?.let { floor((it / 100.0) * validFtpWatts) }
 
         return target.copy(
             value = resolve(target.value),
