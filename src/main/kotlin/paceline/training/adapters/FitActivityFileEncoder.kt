@@ -71,7 +71,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             }
 
             fileEncoder.write(activity.timerEvent(EventType.START, activity.startedAt))
-            val firstDistance = activity.samples.firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
+            val firstDistance = activity.exportSamples.firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
             activity.writeTimeline(fileEncoder, firstDistance)
             fileEncoder.write(activity.timerEvent(EventType.STOP_ALL, activity.stoppedAt))
             segments.forEachIndexed { index, segment ->
@@ -142,7 +142,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
     ) {
         val events = events.sortedBy { it.occurredAt }
         var eventIndex = 0
-        samples.forEach { sample ->
+        exportSamples.forEach { sample ->
             while (eventIndex < events.size && !events[eventIndex].occurredAt.isAfter(sample.receivedAt)) {
                 fileEncoder.write(events[eventIndex].eventMessage())
                 eventIndex += 1
@@ -166,6 +166,8 @@ class FitActivityFileEncoder : ActivityFileEncoder {
                         TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
                         TrainingActivityEventType.TRAINER_RECONNECTED,
                         TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
+                        TrainingActivityEventType.TRAINING_PAUSED,
+                        TrainingActivityEventType.TRAINING_RESUMED,
                     )
             event =
                 if (isWorkoutAdjustment || isTrainerConnectionEvent) {
@@ -187,6 +189,8 @@ class FitActivityFileEncoder : ActivityFileEncoder {
                     TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
                     TrainingActivityEventType.TRAINER_RECONNECTED,
                     TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
+                    TrainingActivityEventType.TRAINING_PAUSED,
+                    TrainingActivityEventType.TRAINING_RESUMED,
                     -> EventType.MARKER
                 }
             if (isWorkoutAdjustment) {
@@ -217,14 +221,14 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             startTime = startedAt.toFitDateTime()
             totalElapsedTime = durationSeconds().toFloat()
             totalTimerTime = durationSeconds().toFloat()
-            samples.relativeDistance(firstDistance)?.toFloat()?.let { totalDistance = it }
+            exportSamples.relativeDistance(firstDistance)?.toFloat()?.let { totalDistance = it }
             sport = Sport.CYCLING
             subSport = SubSport.INDOOR_CYCLING
             firstLapIndex = 0
             numLaps = lapCount
             trigger = SessionTrigger.ACTIVITY_END
-            samples.averagePower()?.let { avgPower = it }
-            samples.maximumPower()?.let { maxPower = it }
+            exportSamples.averagePower()?.let { avgPower = it }
+            exportSamples.maximumPower()?.let { maxPower = it }
         }
 
     private fun RecordedTrainingActivity.activityMessage(): ActivityMesg {
@@ -347,13 +351,13 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             sport = Sport.CYCLING
             subSport = SubSport.INDOOR_CYCLING
             workoutStepIndex?.let { wktStepIndex = it }
-            samples.averagePower()?.let { avgPower = it }
-            samples.maximumPower()?.let { maxPower = it }
+            exportSamples.averagePower()?.let { avgPower = it }
+            exportSamples.maximumPower()?.let { maxPower = it }
         }
 
     private fun RecordedTrainingActivitySegment.distanceMeters(): Double? {
-        val firstDistance = samples.firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
-        val lastDistance = samples.asReversed().firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
+        val firstDistance = exportSamples.firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
+        val lastDistance = exportSamples.asReversed().firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
         return if (firstDistance != null && lastDistance != null) {
             max(0.0, lastDistance - firstDistance)
         } else {
@@ -430,7 +434,9 @@ class FitActivityFileEncoder : ActivityFileEncoder {
                     targetPowerWatts = null,
                     startedAt = startedAt,
                     stoppedAt = stoppedAt,
-                    samples = samples,
+                    samples = exportSamples,
+                    cyclingObservations = cyclingObservations,
+                    heartRateObservations = heartRateObservations,
                 ),
             )
         }

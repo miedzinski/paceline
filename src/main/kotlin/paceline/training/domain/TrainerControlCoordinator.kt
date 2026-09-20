@@ -1,8 +1,9 @@
 package paceline.training.domain
 
-import paceline.device.domain.IndoorBikeTelemetry
-import paceline.device.ports.IndoorBikePowerControl
-import paceline.training.ports.TrainingDevice
+import paceline.device.domain.CyclingTelemetry
+import paceline.training.ports.CyclingTelemetrySource
+import paceline.training.ports.TrainerControl
+import paceline.training.ports.TrainerControlConnection
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -18,8 +19,7 @@ data class TrainerConnectionAvailability(
     val error: String?,
 )
 
-class TrainerConnectionManager(
-    private val trainingDevice: TrainingDevice,
+class TrainerControlCoordinator(
     private val clock: Clock,
     private val telemetryFreshness: Duration,
     private val onInterrupted: (Instant, String?, Boolean) -> Unit,
@@ -29,11 +29,13 @@ class TrainerConnectionManager(
     private val logger = org.slf4j.LoggerFactory.getLogger(javaClass)
 
     private var sessionId: UUID? = null
-    private var activePowerControl: IndoorBikePowerControl? = null
+    private var selectedTrainer: TrainerControlConnection? = null
+    private var selectedTrainerTelemetry: CyclingTelemetrySource? = null
+    private var activeTrainerControl: TrainerControl? = null
     private var connectionInterruptedAt: Instant? = null
     private var nextConnectionRecoveryAt: Instant? = null
     private var connectionRecoveryAttempt = 0
-    private var connectionRecovery: CompletionStage<IndoorBikePowerControl?>? = null
+    private var connectionRecovery: CompletionStage<TrainerControlConnection?>? = null
     private var targetSynchronizationPending = false
     private var targetSynchronizationAt: Instant? = null
     private var pendingZeroPowerCommand = false
@@ -42,18 +44,19 @@ class TrainerConnectionManager(
     private var connectionError: String? = null
 
     @Synchronized
-    fun currentPowerControl(): IndoorBikePowerControl? = activePowerControl
-
-    @Synchronized
-    fun powerControlForStart(): IndoorBikePowerControl? = trainingDevice.currentPowerControl()
+    fun currentControl(): TrainerControl? {
+        val active = activeTrainerControl ?: return null
+        val selected = runCatching { selectedTrainer?.control() }.getOrNull()
+        return active.takeIf { selected != null }
+    }
 
     @Synchronized
     fun requestControl(
-        powerControl: IndoorBikePowerControl,
+        trainerControl: TrainerControl,
         reason: String,
     ) {
         try {
-            powerControl.requestControl()
+            trainerControl.requestControl()
         } catch (exception: Exception) {
             throw TrainingSessionUnavailableException(
                 "The connected device did not grant ERG control$reason",
@@ -65,10 +68,14 @@ class TrainerConnectionManager(
     @Synchronized
     fun beginSession(
         sessionId: UUID,
-        powerControl: IndoorBikePowerControl,
+        trainer: TrainerControlConnection,
+        trainerControl: TrainerControl,
+        trainerTelemetry: CyclingTelemetrySource?,
     ) {
         this.sessionId = sessionId
-        activePowerControl = powerControl
+        selectedTrainer = trainer
+        selectedTrainerTelemetry = trainerTelemetry
+        activeTrainerControl = trainerControl
         connectionInterruptedAt = null
         nextConnectionRecoveryAt = null
         connectionRecoveryAttempt = 0
@@ -82,8 +89,8 @@ class TrainerConnectionManager(
     }
 
     @Synchronized
-    fun observeTelemetry(telemetry: IndoorBikeTelemetry?) {
-        if (telemetry == null || !runCatching { trainingDevice.hasTelemetryCapability() }.getOrDefault(false)) {
+    fun observeTelemetry(telemetry: CyclingTelemetry?) {
+        if (telemetry == null || !hasCyclingTelemetry()) {
             return
         }
         val receivedAt = telemetry.receivedAt
@@ -121,7 +128,7 @@ class TrainerConnectionManager(
         connectionInterruptedAt = at
         nextConnectionRecoveryAt = at
         connectionRecoveryAttempt = 0
-        activePowerControl = null
+        activeTrainerControl = null
         targetSynchronizationPending = true
         targetSynchronizationAt = null
         connectionError = error
@@ -138,10 +145,10 @@ class TrainerConnectionManager(
         now: Instant,
         paused: Boolean,
     ): TrainerConnectionAvailability {
-        val currentPowerControl = runCatching { trainingDevice.currentPowerControl() }.getOrNull()
+        val currentTrainerControl = runCatching { selectedTrainer?.control() }.getOrNull()
         val telemetryStale = !paused && isTelemetryStale(now)
-        if (connectionInterruptedAt == null && currentPowerControl != null && !telemetryStale) {
-            activePowerControl = currentPowerControl
+        if (connectionInterruptedAt == null && currentTrainerControl != null && !telemetryStale) {
+            activeTrainerControl = currentTrainerControl
             connectionError = null
             return availability(connected = true, recovered = false)
         }
@@ -159,11 +166,10 @@ class TrainerConnectionManager(
 
             connectionRecovery = null
             val recoveryResult = runCatching { future.join() }
-            val recoveredPowerControl = recoveryResult.getOrNull()
-            if (recoveredPowerControl != null) {
-                val latestPowerControl = runCatching { trainingDevice.currentPowerControl() }.getOrNull()
+            val recoveredTrainer = recoveryResult.getOrNull()
+            if (recoveredTrainer != null) {
                 return trainerConnectionRecovered(
-                    powerControl = latestPowerControl ?: recoveredPowerControl,
+                    trainer = recoveredTrainer,
                     at = now,
                 )
             }
@@ -172,13 +178,12 @@ class TrainerConnectionManager(
                 recoveryResult.exceptionOrNull()?.let { exception ->
                     exception.cause?.message ?: exception.message
                 } ?: "Trainer reconnection failed"
-            val currentPowerControlAfterRecovery =
-                runCatching { trainingDevice.currentPowerControl() }.getOrNull()
-            if (currentPowerControlAfterRecovery != null) {
+            val currentTrainerAfterRecovery = runCatching { selectedTrainer?.control() }.getOrNull()
+            if (currentTrainerAfterRecovery != null) {
                 telemetryObserved = false
                 lastTelemetryReceivedAt = null
             }
-            activePowerControl = null
+            activeTrainerControl = null
             connectionError = failure
             nextConnectionRecoveryAt = now.plus(connectionRecoveryDelay(connectionRecoveryAttempt.coerceAtLeast(1)))
             return availability(connected = false, recovered = false)
@@ -202,11 +207,11 @@ class TrainerConnectionManager(
             attempt,
         )
 
-        val recoveryStage: CompletionStage<IndoorBikePowerControl?> =
-            if (currentPowerControl != null && !telemetryStale) {
-                CompletableFuture.completedFuture(currentPowerControl)
+        val recoveryStage: CompletionStage<TrainerControlConnection?> =
+            if (currentTrainerControl != null && !telemetryStale) {
+                CompletableFuture.completedFuture(selectedTrainer)
             } else {
-                runCatching { trainingDevice.reconnectPowerControl(force = telemetryStale) }
+                runCatching { reconnectSelectedTrainer(force = telemetryStale) }
                     .onFailure { exception ->
                         logger.warn(
                             "Trainer connection recovery could not start: sessionId={} attempt={} error={}",
@@ -216,7 +221,7 @@ class TrainerConnectionManager(
                             exception,
                         )
                     }.getOrElse {
-                        CompletableFuture.completedFuture<IndoorBikePowerControl?>(null)
+                        CompletableFuture.completedFuture<TrainerControlConnection?>(null)
                     }
             }
         startTrainerRecovery(recoveryStage)
@@ -224,15 +229,15 @@ class TrainerConnectionManager(
     }
 
     @Synchronized
-    fun activePowerControlOrThrow(): IndoorBikePowerControl =
-        activePowerControl
+    fun activeTrainerControlOrThrow(): TrainerControl =
+        currentControl()
             ?: throw TrainingSessionUnavailableException(
                 "The active training session no longer has a connected ERG power-control device",
             )
 
     @Synchronized
     fun setTarget(
-        powerControl: IndoorBikePowerControl,
+        trainerControl: TrainerControl,
         powerWatts: Int,
         description: String,
     ) {
@@ -243,7 +248,7 @@ class TrainerConnectionManager(
             description,
         )
         try {
-            powerControl.setTargetPower(powerWatts)
+            trainerControl.setTargetPower(powerWatts)
             logger.debug(
                 "ERG target command accepted: sessionId={} targetPowerWatts={} reason={}",
                 sessionId,
@@ -269,7 +274,7 @@ class TrainerConnectionManager(
 
     @Synchronized
     fun setFreeRide(
-        powerControl: IndoorBikePowerControl,
+        trainerControl: TrainerControl,
         description: String,
     ) {
         logger.debug(
@@ -278,7 +283,7 @@ class TrainerConnectionManager(
             description,
         )
         try {
-            powerControl.setFreeRide()
+            trainerControl.setFreeRide()
             logger.debug(
                 "Free Ride command accepted: sessionId={} reason={}",
                 sessionId,
@@ -306,12 +311,19 @@ class TrainerConnectionManager(
         description: String,
         at: Instant,
     ): Boolean {
-        val powerControl = activePowerControl ?: return false
+        if (activeTrainerControl == null) {
+            return false
+        }
+        val trainerControl = currentControl()
+        if (trainerControl == null) {
+            markConnectionInterrupted(at)
+            return false
+        }
         return try {
-            setTarget(powerControl, powerWatts, description)
+            setTarget(trainerControl, powerWatts, description)
             true
         } catch (exception: TrainingSessionUnavailableException) {
-            if (runCatching { trainingDevice.currentPowerControl() }.getOrNull() == null) {
+            if (runCatching { selectedTrainer?.control() }.getOrNull() == null) {
                 markConnectionInterrupted(at)
                 false
             } else {
@@ -325,12 +337,19 @@ class TrainerConnectionManager(
         description: String,
         at: Instant,
     ): Boolean {
-        val powerControl = activePowerControl ?: return false
+        if (activeTrainerControl == null) {
+            return false
+        }
+        val trainerControl = currentControl()
+        if (trainerControl == null) {
+            markConnectionInterrupted(at)
+            return false
+        }
         return try {
-            setFreeRide(powerControl, description)
+            setFreeRide(trainerControl, description)
             true
         } catch (exception: TrainingSessionUnavailableException) {
-            if (runCatching { trainingDevice.currentPowerControl() }.getOrNull() == null) {
+            if (runCatching { selectedTrainer?.control() }.getOrNull() == null) {
                 markConnectionInterrupted(at)
                 false
             } else {
@@ -341,8 +360,10 @@ class TrainerConnectionManager(
 
     @Synchronized
     fun clear(preserveRecovery: Boolean = false) {
-        activePowerControl = null
+        activeTrainerControl = null
         if (!preserveRecovery) {
+            selectedTrainer = null
+            selectedTrainerTelemetry = null
             connectionInterruptedAt = null
             nextConnectionRecoveryAt = null
             connectionRecoveryAttempt = 0
@@ -357,11 +378,11 @@ class TrainerConnectionManager(
         }
     }
 
-    private fun startTrainerRecovery(recoveryStage: CompletionStage<IndoorBikePowerControl?>) {
+    private fun startTrainerRecovery(recoveryStage: CompletionStage<TrainerControlConnection?>) {
         connectionRecovery =
             try {
-                recoveryStage.thenApplyAsync { powerControl ->
-                    powerControl?.also { it.requestControl() }
+                recoveryStage.thenApplyAsync { trainer ->
+                    trainer?.takeIf { it.control() != null }?.also { it.control()?.requestControl() }
                 }
             } catch (exception: Exception) {
                 logger.warn(
@@ -374,11 +395,17 @@ class TrainerConnectionManager(
             }
     }
 
+    private fun reconnectSelectedTrainer(force: Boolean): CompletionStage<TrainerControlConnection?> =
+        selectedTrainer?.reconnect(force) ?: CompletableFuture.completedFuture(null)
+
+    private fun hasCyclingTelemetry(): Boolean = selectedTrainerTelemetry != null
+
     private fun trainerConnectionRecovered(
-        powerControl: IndoorBikePowerControl,
+        trainer: TrainerControlConnection,
         at: Instant,
     ): TrainerConnectionAvailability {
-        activePowerControl = powerControl
+        selectedTrainer = trainer
+        activeTrainerControl = trainer.control()
         connectionInterruptedAt = null
         nextConnectionRecoveryAt = null
         connectionRecoveryAttempt = 0
@@ -397,7 +424,7 @@ class TrainerConnectionManager(
     }
 
     private fun isTelemetryStale(now: Instant): Boolean {
-        if (!runCatching { trainingDevice.hasTelemetryCapability() }.getOrDefault(false) || !telemetryObserved) {
+        if (!hasCyclingTelemetry() || !telemetryObserved) {
             return false
         }
         val lastReceivedAt = lastTelemetryReceivedAt ?: return false

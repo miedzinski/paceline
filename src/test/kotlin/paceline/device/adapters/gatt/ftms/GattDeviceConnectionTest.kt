@@ -5,10 +5,12 @@ import paceline.device.adapters.gatt.GattCharacteristicProperty
 import paceline.device.adapters.gatt.GattDeviceConnection
 import paceline.device.adapters.gatt.GattService
 import paceline.device.adapters.gatt.SupportedGattCapabilityFactories
+import paceline.device.adapters.gatt.cyclingpower.CyclingPowerUuid
+import paceline.device.adapters.gatt.cyclingspeedcadence.CyclingSpeedCadenceUuid
 import paceline.device.adapters.gatt.heartrate.HeartRateUuid
+import paceline.device.ports.CyclingTelemetrySource
 import paceline.device.ports.HeartRateTelemetrySource
-import paceline.device.ports.IndoorBikePowerControl
-import paceline.device.ports.IndoorBikeTelemetrySource
+import paceline.device.ports.TrainerControl
 import paceline.testsupport.FakeGattClient
 import paceline.testsupport.kickrCore2Device
 import java.time.Clock
@@ -37,8 +39,8 @@ class GattDeviceConnectionTest {
                 capabilityFactories = SupportedGattCapabilityFactories.all,
                 clock = clock,
             )
-        val bikeTelemetry = assertNotNull(connection.capabilities().filterIsInstance<IndoorBikeTelemetrySource>().single())
-        val telemetry = mutableListOf<paceline.device.domain.IndoorBikeTelemetry>()
+        val bikeTelemetry = assertNotNull(connection.capabilities().filterIsInstance<CyclingTelemetrySource>().single())
+        val telemetry = mutableListOf<paceline.device.domain.CyclingTelemetry>()
         bikeTelemetry.addTelemetryListener { telemetry += it }
 
         // when an Indoor Bike Data notification arrives:
@@ -98,6 +100,107 @@ class GattDeviceConnectionTest {
     }
 
     @Test
+    fun `shares one GATT connection across FTMS power control CPS CSC and heart rate profiles`() {
+        // given one physical GATT client exposing every supported profile:
+        val gattClient =
+            FakeGattClient(
+                listOf(
+                    GattService(
+                        FtmsUuid.FITNESS_MACHINE_SERVICE,
+                        listOf(
+                            GattCharacteristic(
+                                FtmsUuid.INDOOR_BIKE_DATA,
+                                setOf(GattCharacteristicProperty.NOTIFY),
+                            ),
+                            GattCharacteristic(
+                                FtmsUuid.FITNESS_MACHINE_CONTROL_POINT,
+                                setOf(GattCharacteristicProperty.WRITE, GattCharacteristicProperty.INDICATE),
+                            ),
+                        ),
+                    ),
+                    GattService(
+                        CyclingPowerUuid.CYCLING_POWER_SERVICE,
+                        listOf(
+                            GattCharacteristic(
+                                CyclingPowerUuid.CYCLING_POWER_MEASUREMENT,
+                                setOf(GattCharacteristicProperty.NOTIFY),
+                            ),
+                        ),
+                    ),
+                    GattService(
+                        CyclingSpeedCadenceUuid.CYCLING_SPEED_CADENCE_SERVICE,
+                        listOf(
+                            GattCharacteristic(
+                                CyclingSpeedCadenceUuid.CSC_MEASUREMENT,
+                                setOf(GattCharacteristicProperty.NOTIFY),
+                            ),
+                        ),
+                    ),
+                    GattService(
+                        HeartRateUuid.HEART_RATE_SERVICE,
+                        listOf(
+                            GattCharacteristic(
+                                HeartRateUuid.HEART_RATE_MEASUREMENT,
+                                setOf(GattCharacteristicProperty.NOTIFY),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        val connection =
+            GattDeviceConnection(
+                device = kickrCore2Device(),
+                gattClient = gattClient,
+                capabilityFactories = SupportedGattCapabilityFactories.all,
+                clock = clock,
+            )
+
+        // when all profile notifications arrive through the shared client:
+        val cyclingSources = connection.capabilities().filterIsInstance<CyclingTelemetrySource>()
+        val received = mutableListOf<paceline.device.domain.CyclingTelemetry>()
+        cyclingSources.forEach { source -> source.addTelemetryListener { received += it } }
+        gattClient.emit(CyclingPowerUuid.CYCLING_POWER_MEASUREMENT, byteArrayOf(0x00, 0x00, 0x2C, 0x01))
+        gattClient.emit(
+            CyclingSpeedCadenceUuid.CSC_MEASUREMENT,
+            byteArrayOf(0x02, 0x0A, 0x00, 0xE8.toByte(), 0x03),
+        )
+        gattClient.emit(
+            CyclingSpeedCadenceUuid.CSC_MEASUREMENT,
+            byteArrayOf(0x02, 0x0B, 0x00, 0xE8.toByte(), 0x07),
+        )
+
+        // then each profile remains separate while the physical connection is initialized once:
+        assertEquals(1, gattClient.discoverServicesCalls)
+        assertEquals(3, cyclingSources.size)
+        assertEquals(
+            setOf(
+                FtmsUuid.INDOOR_BIKE_DATA,
+                FtmsUuid.FITNESS_MACHINE_CONTROL_POINT,
+                CyclingPowerUuid.CYCLING_POWER_MEASUREMENT,
+                CyclingSpeedCadenceUuid.CSC_MEASUREMENT,
+                HeartRateUuid.HEART_RATE_MEASUREMENT,
+            ),
+            gattClient.enabledNotifications.toSet(),
+        )
+        assertEquals(
+            300,
+            cyclingSources
+                .single { it.measurements == setOf(paceline.device.domain.CyclingMeasurement.POWER) }
+                .latestTelemetry()
+                ?.powerWatts,
+        )
+        assertEquals(
+            60.0,
+            cyclingSources
+                .single { it.measurements == setOf(paceline.device.domain.CyclingMeasurement.CADENCE) }
+                .latestTelemetry()
+                ?.cadenceRpm,
+        )
+        assertEquals(3, received.size)
+        connection.close()
+    }
+
+    @Test
     fun `opens a heart-rate-only GATT device without inventing trainer capabilities`() {
         // given a GATT client exposing only the standard Heart Rate Service:
         val gattClient = fakeGattClient(withIndoorBike = false, withHeartRate = true)
@@ -111,8 +214,8 @@ class GattDeviceConnectionTest {
 
         // when the profile capabilities are inspected:
         // then only heart rate is available:
-        assertEquals(null, connection.capabilities().filterIsInstance<IndoorBikeTelemetrySource>().singleOrNull())
-        assertEquals(null, connection.capabilities().filterIsInstance<IndoorBikePowerControl>().singleOrNull())
+        assertEquals(null, connection.capabilities().filterIsInstance<CyclingTelemetrySource>().singleOrNull())
+        assertEquals(null, connection.capabilities().filterIsInstance<TrainerControl>().singleOrNull())
         assertNotNull(connection.capabilities().filterIsInstance<HeartRateTelemetrySource>().single())
         connection.close()
     }
@@ -165,7 +268,7 @@ class GattDeviceConnectionTest {
                 capabilityFactories = SupportedGattCapabilityFactories.all,
                 clock = clock,
             )
-        val powerControl = assertNotNull(connection.capabilities().filterIsInstance<IndoorBikePowerControl>().single())
+        val powerControl = assertNotNull(connection.capabilities().filterIsInstance<TrainerControl>().single())
 
         // when the session acquires control, selects Free Ride, and sets a target power:
         powerControl.requestControl()
@@ -193,6 +296,42 @@ class GattDeviceConnectionTest {
     }
 
     @Test
+    fun `opens a control-only FTMS device without Indoor Bike Data`() {
+        // given a GATT client exposing only a writable and indicatable FTMS control point:
+        val gattClient = fakeGattClient(withIndoorBike = false, withPowerControl = true)
+        gattClient.onWrite = { characteristic, value ->
+            assertEquals(FtmsUuid.FITNESS_MACHINE_CONTROL_POINT, characteristic)
+            gattClient.emit(
+                characteristic,
+                byteArrayOf(
+                    FtmsErgControl.OPCODE_RESPONSE_CODE.toByte(),
+                    value.first(),
+                    FtmsErgControl.RESULT_SUCCESS.toByte(),
+                ),
+            )
+        }
+        val connection =
+            GattDeviceConnection(
+                device = kickrCore2Device(),
+                gattClient = gattClient,
+                capabilityFactories = SupportedGattCapabilityFactories.all,
+                clock = clock,
+            )
+        val powerControl = assertNotNull(connection.capabilities().filterIsInstance<TrainerControl>().single())
+
+        // when the control-only connection acquires control and sets an ERG target:
+        powerControl.requestControl()
+        powerControl.setTargetPower(250)
+
+        // then the connection is usable without inventing a telemetry source:
+        assertTrue(connection.isOpen())
+        assertEquals(null, connection.capabilities().filterIsInstance<CyclingTelemetrySource>().singleOrNull())
+        assertEquals(listOf(FtmsUuid.FITNESS_MACHINE_CONTROL_POINT), gattClient.enabledNotifications)
+        assertEquals(2, gattClient.writes.size)
+        connection.close()
+    }
+
+    @Test
     fun `does not expose ERG control when the control point is absent`() {
         // given a connected FTMS device that only exposes telemetry:
         val connection =
@@ -205,7 +344,7 @@ class GattDeviceConnectionTest {
 
         // when the connection capabilities are inspected:
         // then telemetry remains available without inventing a control capability:
-        assertEquals(null, connection.capabilities().filterIsInstance<IndoorBikePowerControl>().singleOrNull())
+        assertEquals(null, connection.capabilities().filterIsInstance<TrainerControl>().singleOrNull())
         connection.close()
     }
 
@@ -220,7 +359,7 @@ class GattDeviceConnectionTest {
                 capabilityFactories = SupportedGattCapabilityFactories.all,
                 clock = clock,
             )
-        val powerControl = assertNotNull(connection.capabilities().filterIsInstance<IndoorBikePowerControl>().single())
+        val powerControl = assertNotNull(connection.capabilities().filterIsInstance<TrainerControl>().single())
 
         // when a target is submitted before control is requested:
         // then the adapter rejects the command without writing to the trainer:
@@ -241,15 +380,17 @@ class GattDeviceConnectionTest {
     ): FakeGattClient =
         FakeGattClient(
             buildList {
-                if (withIndoorBike) {
+                if (withIndoorBike || withPowerControl) {
                     add(
                         GattService(
                             FtmsUuid.FITNESS_MACHINE_SERVICE,
                             buildList {
-                                GattCharacteristic(
-                                    FtmsUuid.INDOOR_BIKE_DATA,
-                                    setOf(GattCharacteristicProperty.NOTIFY),
-                                ).also(::add)
+                                if (withIndoorBike) {
+                                    GattCharacteristic(
+                                        FtmsUuid.INDOOR_BIKE_DATA,
+                                        setOf(GattCharacteristicProperty.NOTIFY),
+                                    ).also(::add)
+                                }
                                 if (withPowerControl) {
                                     add(
                                         GattCharacteristic(

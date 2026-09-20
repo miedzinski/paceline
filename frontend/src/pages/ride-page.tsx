@@ -5,10 +5,12 @@ import { useRideSession } from "@/pages/ride/use-ride-session";
 export function RidePage() {
     const ride = useRideSession();
 
-    if (ride.isAutoStartingWorkout) {
+    if (ride.isWaitingToStartWorkout) {
         return (
             <RideStartingView
                 connection={ride.connection}
+                equipment={ride.equipment}
+                isChecking={ride.workoutEntryMode === "CHECKING"}
                 onLogoClick={ride.navigateHome}
                 onOpenEquipment={ride.openEquipment}
             />
@@ -23,18 +25,16 @@ export function RidePage() {
         return (
             <PreRideView
                 connection={ride.connection}
-                connectedSources={ride.connectedSources}
+                equipment={ride.equipment}
+                equipmentError={ride.equipmentError}
+                equipmentLoading={ride.equipmentLoading}
                 hasErgControl={ride.hasErgControl}
                 isStarting={ride.isStarting}
-                selectedHeartRateSourceId={ride.selectedHeartRateSourceId}
                 selectedWorkout={ride.selectedWorkout}
                 athleteProfile={ride.profile}
                 error={ride.error}
                 onLogoClick={ride.navigateHome}
                 onOpenEquipment={ride.openEquipment}
-                onSelectHeartRateSource={(sourceId) =>
-                    void ride.selectHeartRateSource(sourceId)
-                }
                 onStart={() => void ride.startSession()}
             />
         );

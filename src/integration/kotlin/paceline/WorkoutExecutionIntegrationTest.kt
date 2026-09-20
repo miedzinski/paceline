@@ -13,11 +13,11 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
 import paceline.testsupport.FakeActivityUploader
-import paceline.testsupport.FakeIndoorBikePowerControl
 import paceline.testsupport.FakePlannedWorkoutCalendar
-import paceline.testsupport.FakeTrainingDevice
+import paceline.testsupport.FakeRideSourceCatalog
+import paceline.testsupport.FakeTrainerControl
 import paceline.testsupport.FakeWorkoutLibrary
 import paceline.workout.domain.ScheduledWorkout
 import paceline.workout.domain.WorkoutPlanSummary
@@ -39,10 +39,10 @@ class WorkoutExecutionIntegrationTest {
     private var serverPort: Int = 0
 
     @Autowired
-    private lateinit var powerControl: FakeIndoorBikePowerControl
+    private lateinit var powerControl: FakeTrainerControl
 
     @Autowired
-    private lateinit var trainingDevice: FakeTrainingDevice
+    private lateinit var rideSourceCatalog: FakeRideSourceCatalog
 
     @Autowired
     private lateinit var activityUploader: FakeActivityUploader
@@ -214,8 +214,8 @@ class WorkoutExecutionIntegrationTest {
                 ?.groupValues
                 ?.get(1)
                 ?: error("No session id in response: $started")
-        trainingDevice.emitTelemetry(
-            IndoorBikeTelemetry(
+        rideSourceCatalog.emitTelemetry(
+            CyclingTelemetry(
                 powerWatts = 200,
                 cadenceRpm = 90.0,
                 speedKph = 25.0,
@@ -402,11 +402,11 @@ class WorkoutExecutionIntegrationTest {
 class WorkoutExecutionIntegrationTestConfiguration {
     @Bean
     @Primary
-    fun fakePowerControl(): FakeIndoorBikePowerControl = FakeIndoorBikePowerControl()
+    fun fakePowerControl(): FakeTrainerControl = FakeTrainerControl()
 
     @Bean
     @Primary
-    fun fakeTrainingDevice(powerControl: FakeIndoorBikePowerControl): FakeTrainingDevice = FakeTrainingDevice(powerControl)
+    fun fakeRideSourceCatalog(powerControl: FakeTrainerControl): FakeRideSourceCatalog = FakeRideSourceCatalog(powerControl)
 
     @Bean
     @Primary

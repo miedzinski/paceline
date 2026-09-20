@@ -1,24 +1,24 @@
 package paceline.training.domain
 
+import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.HeartRateTelemetry
-import paceline.device.domain.IndoorBikeTelemetry
-import paceline.training.ports.TrainingDevice
+import paceline.training.ports.HeartRateSource
+import paceline.training.ports.SelectedRideEquipment
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
 import java.time.Instant
 import java.util.UUID
 
-class TrainingActivitySession(
-    private val trainingDevice: TrainingDevice,
-) {
+class TrainingActivitySession {
     private val activityRecorder = InMemoryTrainingActivityRecorder()
     private var completedActivity: RecordedTrainingActivity? = null
     private var activeSessionId: UUID? = null
-    private var activeHeartRateSourceId: String? = null
-    private var telemetryRegistration: AutoCloseable? = null
+    private var activeEquipment: SelectedRideEquipment? = null
+    private val telemetryRegistrations = mutableListOf<AutoCloseable>()
     private var heartRateRegistration: AutoCloseable? = null
     private var recordingActive = false
-    private var telemetryObserver: ((IndoorBikeTelemetry) -> Unit)? = null
+    private var telemetryObserver: ((CyclingTelemetry) -> Unit)? = null
+    private var sourceTelemetryObserver: ((String, CyclingTelemetry) -> Unit)? = null
     private var heartRateObserver: ((UUID, String, HeartRateTelemetry) -> Unit)? = null
 
     @Synchronized
@@ -26,10 +26,11 @@ class TrainingActivitySession(
         sessionId: UUID,
         startedAt: Instant,
         workout: ExecutableWorkout?,
-        heartRateSourceId: String?,
         initialTargetPowerWatts: Int?,
-        onTelemetry: (IndoorBikeTelemetry) -> Unit,
+        onTelemetry: (CyclingTelemetry) -> Unit,
         onHeartRate: (UUID, String, HeartRateTelemetry) -> Unit,
+        equipment: SelectedRideEquipment,
+        onSourceTelemetry: ((String, CyclingTelemetry) -> Unit)? = null,
     ) {
         activityRecorder.start(
             sessionId = sessionId,
@@ -49,33 +50,21 @@ class TrainingActivitySession(
             initialWorkoutStep = workout?.steps?.first(),
         )
         activeSessionId = sessionId
-        activeHeartRateSourceId = heartRateSourceId
+        activeEquipment = equipment
         telemetryObserver = onTelemetry
+        sourceTelemetryObserver = onSourceTelemetry
         heartRateObserver = onHeartRate
         completedActivity = null
         recordingActive = true
         registerTelemetry(sessionId)
-        registerHeartRate(sessionId, heartRateSourceId)
+        registerHeartRate(sessionId)
     }
 
     @Synchronized
-    fun selectHeartRateSource(
-        sessionId: UUID,
-        sourceId: String,
-    ): HeartRateTelemetry? {
-        check(activeSessionId == sessionId) { "No recording exists for session $sessionId" }
-        heartRateRegistration?.close()
-        heartRateRegistration = null
-        activeHeartRateSourceId = sourceId
-        registerHeartRate(sessionId, sourceId)
-        return trainingDevice.currentHeartRate(sourceId)
-    }
+    fun selectedHeartRateSourceId(): String? = activeEquipment?.heartRate?.sourceId
 
     @Synchronized
-    fun selectedHeartRateSourceId(): String? = activeHeartRateSourceId
-
-    @Synchronized
-    fun currentHeartRate(): HeartRateTelemetry? = activeHeartRateSourceId?.let(trainingDevice::currentHeartRate)
+    fun currentHeartRate(): HeartRateTelemetry? = activeEquipment?.heartRate?.current()
 
     @Synchronized
     fun pauseRecording() {
@@ -85,8 +74,7 @@ class TrainingActivitySession(
 
     @Synchronized
     fun interruptTrainerRecording() {
-        telemetryRegistration?.close()
-        telemetryRegistration = null
+        closeTelemetryListeners()
     }
 
     @Synchronized
@@ -94,7 +82,7 @@ class TrainingActivitySession(
         check(activeSessionId == sessionId) { "No recording exists for session $sessionId" }
         recordingActive = true
         registerTelemetry(sessionId)
-        registerHeartRate(sessionId, activeHeartRateSourceId)
+        registerHeartRate(sessionId)
     }
 
     @Synchronized
@@ -122,11 +110,41 @@ class TrainingActivitySession(
         sessionId: UUID,
         sourceId: String,
         telemetry: HeartRateTelemetry,
+    ): Boolean =
+        recordHeartRateObservation(
+            sessionId = sessionId,
+            observation =
+                RecordedHeartRateObservation(
+                    receivedAt = telemetry.receivedAt,
+                    heartRateBpm = telemetry.heartRateBpm,
+                    sourceId = sourceId,
+                ),
+        )
+
+    @Synchronized
+    fun recordCyclingObservation(
+        sessionId: UUID,
+        observation: RecordedCyclingObservation,
     ): Boolean {
-        if (!recordingActive || activeSessionId != sessionId || activeHeartRateSourceId != sourceId) {
+        if (!recordingActive || activeSessionId != sessionId) {
             return false
         }
-        activityRecorder.recordHeartRate(sessionId, sourceId, telemetry)
+        activityRecorder.recordCyclingObservation(sessionId, observation)
+        return true
+    }
+
+    @Synchronized
+    fun recordHeartRateObservation(
+        sessionId: UUID,
+        observation: RecordedHeartRateObservation,
+    ): Boolean {
+        if (!recordingActive || activeSessionId != sessionId) {
+            return false
+        }
+        if (activeEquipment?.heartRate?.sourceId != observation.sourceId) {
+            return false
+        }
+        activityRecorder.recordHeartRateObservation(sessionId, observation)
         return true
     }
 
@@ -183,8 +201,9 @@ class TrainingActivitySession(
         val activity = activityRecorder.finish(sessionId, stoppedAt)
         completedActivity = activity
         activeSessionId = null
-        activeHeartRateSourceId = null
+        activeEquipment = null
         telemetryObserver = null
+        sourceTelemetryObserver = null
         heartRateObserver = null
         return activity
     }
@@ -200,50 +219,81 @@ class TrainingActivitySession(
     }
 
     private fun registerTelemetry(sessionId: UUID) {
-        telemetryRegistration =
-            trainingDevice.addTelemetryListener { telemetry ->
-                val observer =
-                    synchronized(this) {
-                        telemetryObserver.takeIf { recordingActive && activeSessionId == sessionId }
-                    }
-                observer?.invoke(telemetry)
-                synchronized(this) {
-                    if (recordingActive && activeSessionId == sessionId) {
-                        activityRecorder.record(sessionId, telemetry)
-                    }
+        closeTelemetryListeners()
+        val equipment = requireNotNull(activeEquipment) { "No ride equipment is bound to the recording" }
+        val sources =
+            listOfNotNull(
+                equipment.controlTelemetry,
+                equipment.powerTelemetry,
+                equipment.cadenceTelemetry,
+            ).distinctBy { source -> source.sourceId }
+        sources.forEach { source ->
+            telemetryRegistrations +=
+                source.subscribe { telemetry ->
+                    handleTelemetry(sessionId, source.sourceId, telemetry)
                 }
-            }
+        }
     }
 
-    private fun registerHeartRate(
+    private fun handleTelemetry(
         sessionId: UUID,
-        sourceId: String?,
+        sourceId: String,
+        telemetry: CyclingTelemetry,
     ) {
+        val observers =
+            synchronized(this) {
+                if (!recordingActive || activeSessionId != sessionId) {
+                    null
+                } else {
+                    sourceTelemetryObserver to telemetryObserver
+                }
+            }
+        if (observers == null) {
+            return
+        }
+        val (sourceObserver, genericObserver) = observers
+        sourceObserver?.invoke(sourceId, telemetry) ?: genericObserver?.invoke(telemetry)
+        val equipment = synchronized(this) { activeEquipment }
+        val observation =
+            RecordedCyclingObservation.fromSelected(
+                telemetry,
+                sourceId,
+                requireNotNull(equipment).selection,
+            )
+        recordCyclingObservation(sessionId, observation)
+    }
+
+    private fun registerHeartRate(sessionId: UUID) {
+        val source = activeEquipment?.heartRate
         heartRateRegistration =
-            sourceId?.let { selectedSourceId ->
-                trainingDevice.addHeartRateListener(selectedSourceId) { telemetry ->
+            source?.let { selectedSource ->
+                selectedSource.subscribe { telemetry ->
                     val observer =
                         synchronized(this) {
                             if (
                                 !recordingActive ||
                                 activeSessionId != sessionId ||
-                                activeHeartRateSourceId != selectedSourceId
+                                selectedHeartRateSourceId() != selectedSource.sourceId
                             ) {
                                 null
                             } else {
                                 heartRateObserver
                             }
                         }
-                    observer?.invoke(sessionId, selectedSourceId, telemetry)
+                    observer?.invoke(sessionId, selectedSource.sourceId, telemetry)
                 }
             }
     }
 
     private fun closeRecordingListeners() {
-        telemetryRegistration?.close()
-        telemetryRegistration = null
+        closeTelemetryListeners()
         heartRateRegistration?.close()
         heartRateRegistration = null
+    }
+
+    private fun closeTelemetryListeners() {
+        telemetryRegistrations.forEach(AutoCloseable::close)
+        telemetryRegistrations.clear()
     }
 
     private fun activitySegmentName(

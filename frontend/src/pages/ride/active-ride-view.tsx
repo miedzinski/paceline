@@ -1,5 +1,6 @@
 import { WorkoutProgressTile } from "@/components/workout-progress-tile";
 import { formatElapsed } from "@/lib/connection";
+import { sourceName } from "@/lib/ride-equipment";
 import type { RideSessionModel } from "./use-ride-session";
 import { RideControls } from "./ride-controls";
 import {
@@ -32,7 +33,10 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         postRideOpen,
         error,
         liveTelemetry,
+        telemetry,
         trainer,
+        equipment,
+        selectedHeartRateSourceId,
         definition,
         isActive,
         isPaused,
@@ -73,18 +77,28 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                       void adjustManualTarget(deltaWatts),
               }
             : null;
+    const controlTrainerName =
+        trainer?.device.name ??
+        sourceName(equipment, equipment?.assignments.controlSourceId ?? null);
+    const controlTrainerAssigned =
+        equipment?.assignments.controlSourceId !== null &&
+        equipment?.assignments.controlSourceId !== undefined;
 
     return (
         <div className="flex min-h-[100svh] flex-col bg-[#090c12] px-4 pt-[calc(0.9rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))] text-[#f5f6fb] sm:px-6 lg:px-8">
             <div className="mx-auto flex w-full max-w-[1200px] flex-1 flex-col">
                 <RideHeader
                     connection={connection}
+                    equipment={equipment}
                     onOpenEquipment={openEquipment}
                 />
 
                 <ConnectionBanner
-                    hasTrainer={trainer !== undefined}
-                    telemetryAvailable={liveTelemetry !== null}
+                    hasTrainer={controlTrainerAssigned}
+                    trainerName={controlTrainerName}
+                    telemetryAvailable={
+                        liveTelemetry?.availability === "CURRENT"
+                    }
                     status={session.trainerConnection}
                     retryAttempt={session.trainerConnectionRetryAttempt}
                     error={session.trainerConnectionError}
@@ -112,9 +126,17 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
 
                         <MetricsPanel
                             currentPower={currentPower}
-                            cadence={liveTelemetry?.cadenceRpm ?? null}
-                            heartRate={session.heartRate?.heartRateBpm ?? null}
-                            speed={liveTelemetry?.speedKph ?? null}
+                            cadence={telemetry.cycling?.cadenceRpm ?? null}
+                            heartRate={
+                                telemetry.heartRate?.heartRateBpm ?? null
+                            }
+                            heartRateAvailability={
+                                telemetry.heartRateAvailability
+                            }
+                            speed={telemetry.cycling?.speedKph ?? null}
+                            heartRateSelected={
+                                selectedHeartRateSourceId !== null
+                            }
                         />
 
                         <div className="mt-auto shrink-0">

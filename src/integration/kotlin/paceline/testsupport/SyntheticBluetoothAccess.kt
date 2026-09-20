@@ -23,6 +23,8 @@ class SyntheticBluetoothAccess(
     var candidates: List<BluetoothDeviceCandidate>,
     var gattClient: SyntheticGattClient,
 ) : BluetoothAccess {
+    var gattClientFactory: (DeviceEndpoint.Bluetooth) -> GattClient = { gattClient }
+
     var discoverCalls: Int = 0
         private set
 
@@ -44,7 +46,7 @@ class SyntheticBluetoothAccess(
     override fun connect(endpoint: DeviceEndpoint.Bluetooth): GattClient {
         connectCalls += 1
         connectedEndpoint = endpoint
-        return gattClient
+        return gattClientFactory(endpoint)
     }
 
     override fun close() {

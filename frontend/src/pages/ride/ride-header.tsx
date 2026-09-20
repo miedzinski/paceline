@@ -1,13 +1,15 @@
 import { EquipmentButton } from "@/components/equipment-button";
 import { PacelineLogo } from "@/components/paceline-logo";
-import type { DeviceConnectionResponse } from "@/types";
+import type { DeviceConnectionsResponse, RideEquipmentResponse } from "@/types";
 
 export function RideHeader({
     connection,
+    equipment,
     onLogoClick,
     onOpenEquipment,
 }: {
-    connection: DeviceConnectionResponse;
+    connection: DeviceConnectionsResponse;
+    equipment: RideEquipmentResponse | null;
     onLogoClick?: () => void;
     onOpenEquipment: () => void;
 }) {
@@ -16,6 +18,7 @@ export function RideHeader({
             <PacelineLogo onClick={onLogoClick} />
             <EquipmentButton
                 connection={connection}
+                equipment={equipment}
                 onClick={onOpenEquipment}
             />
         </div>

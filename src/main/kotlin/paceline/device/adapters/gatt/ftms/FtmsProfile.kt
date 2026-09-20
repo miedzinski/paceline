@@ -1,6 +1,6 @@
 package paceline.device.adapters.gatt.ftms
 
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
 import java.time.Instant
 import java.util.UUID
 
@@ -12,8 +12,8 @@ object FtmsUuid {
     private fun uuid16(value: Int): UUID = UUID.fromString("0000%04x-0000-1000-8000-00805f9b34fb".format(value))
 }
 
-fun FtmsIndoorBikeData.toIndoorBikeTelemetry(receivedAt: Instant): IndoorBikeTelemetry =
-    IndoorBikeTelemetry(
+fun FtmsIndoorBikeData.toCyclingTelemetry(receivedAt: Instant): CyclingTelemetry =
+    CyclingTelemetry(
         powerWatts = instantaneousPowerWatts,
         cadenceRpm = instantaneousCadenceRpm,
         speedKph = instantaneousSpeedKph,

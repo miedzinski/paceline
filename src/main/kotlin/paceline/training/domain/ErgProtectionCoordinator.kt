@@ -1,7 +1,7 @@
 package paceline.training.domain
 
 import org.slf4j.LoggerFactory
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
 import paceline.training.config.ErgProtectionProperties
 import java.time.Duration
 import java.time.Instant
@@ -9,11 +9,12 @@ import java.util.UUID
 
 class ErgProtectionCoordinator(
     private val properties: ErgProtectionProperties,
+    private val telemetryFreshness: Duration,
     private val setTarget: (Int, String, Instant) -> Boolean,
     private val recordActivityEvent: (UUID, TrainingActivityEvent) -> Unit,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
-    private val detector = ErgSpiralDetector(properties)
+    private val detector = ErgSpiralDetector(properties, telemetryFreshness)
 
     fun reset(at: Instant) {
         detector.reset(at)
@@ -30,7 +31,7 @@ class ErgProtectionCoordinator(
     fun evaluate(
         state: TrainingSessionState,
         now: Instant,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
         workoutActive: Boolean,
     ): TrainingSessionState {
         when (state.ergProtection.status) {
@@ -157,7 +158,7 @@ class ErgProtectionCoordinator(
     private fun retryRecovery(
         state: TrainingSessionState,
         now: Instant,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
         workoutActive: Boolean,
     ): TrainingSessionState {
         val protection = state.ergProtection

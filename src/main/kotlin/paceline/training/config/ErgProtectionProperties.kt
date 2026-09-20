@@ -10,7 +10,6 @@ data class ErgProtectionProperties(
     val lowCadenceDuration: Duration = Duration.ofSeconds(3),
     val recoveryCadenceRpm: Double = 60.0,
     val recoveryDuration: Duration = Duration.ofSeconds(2),
-    val telemetryFreshness: Duration = Duration.ofSeconds(2),
     val targetChangeGracePeriod: Duration = Duration.ofSeconds(2),
     val recoveryRetryInitialDelay: Duration = Duration.ofSeconds(1),
     val recoveryRetryMaxDelay: Duration = Duration.ofSeconds(8),
@@ -28,9 +27,6 @@ data class ErgProtectionProperties(
         }
         require(!recoveryDuration.isNegative && !recoveryDuration.isZero) {
             "ERG protection recovery duration must be positive"
-        }
-        require(!telemetryFreshness.isNegative && !telemetryFreshness.isZero) {
-            "ERG protection telemetry freshness must be positive"
         }
         require(!targetChangeGracePeriod.isNegative) {
             "ERG protection target-change grace period must not be negative"

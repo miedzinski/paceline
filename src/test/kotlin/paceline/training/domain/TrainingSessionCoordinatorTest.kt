@@ -1,15 +1,17 @@
 package paceline.training.domain
 
 import org.awaitility.Awaitility
+import paceline.config.TelemetryProperties
 import paceline.device.domain.ConnectionPhase
+import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.DeviceAdvertisement
 import paceline.device.domain.DeviceEndpoint
-import paceline.device.domain.HeartRateSourceDescriptor
 import paceline.device.domain.HeartRateTelemetry
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.TelemetryAvailability
 import paceline.testsupport.FakeActivityUploader
-import paceline.testsupport.FakeIndoorBikePowerControl
-import paceline.testsupport.FakeTrainingDevice
+import paceline.testsupport.FakeRideSourceCatalog
+import paceline.testsupport.FakeTrainerControl
+import paceline.testsupport.rideSource
 import paceline.training.config.ErgProtectionProperties
 import paceline.workout.domain.ExecutableSport
 import paceline.workout.domain.ExecutableWorkout
@@ -27,6 +29,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 
 class TrainingSessionCoordinatorTest {
     private val now = Instant.parse("2026-09-12T12:00:00Z")
@@ -35,19 +38,19 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `cannot start a training session before a controlled device is connected`() {
         // given a session coordinator whose device connection is still ready:
-        val session = coordinator(FakeTrainingDevice(), clock)
+        val session = coordinator(FakeRideSourceCatalog(), clock)
 
         // when a training session is started:
         // then the session remains not started because device control is unavailable:
-        assertFailsWith<TrainingSessionUnavailableException> { session.start() }
+        assertFailsWith<RideEquipmentUnavailableException> { session.start() }
         assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
     }
 
     @Test
     fun `starting a session acquires control and gates target changes`() {
         // given a connected device with an ERG power-control capability:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
 
         // when the session is started in Free Ride and a target is changed:
         val started = session.start()
@@ -64,48 +67,116 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `requires an explicit source when multiple heart-rate devices are connected`() {
-        // given a trainer and two connected heart-rate sources:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice =
-            FakeTrainingDevice(
-                powerControl = powerControl,
-                availableHeartRateSources = listOf(heartRateSource("bridge"), heartRateSource("strap")),
-            )
-        val session = coordinator(trainingDevice, clock)
+    fun `starting a session needs control but not power or cadence telemetry`() {
+        // given a connected FTMS source that exposes only resistance control:
+        val control = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                availableRideSources =
+                    listOf(
+                        rideSource(
+                            "ftms-control",
+                            setOf(RideSourceCapability.RESISTANCE_CONTROL),
+                        ),
+                    ),
+            ).also {
+                it.sourcePowerControls["ftms-control"] = control
+            }
+        val session = coordinator(rideSourceCatalog, clock)
 
-        // when a session is started without selecting one source:
-        // then session creation is rejected before trainer control is requested:
-        assertFailsWith<HeartRateSourceSelectionRequiredException> { session.start() }
-        assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
-        assertEquals(0, powerControl.requestControlCalls)
+        // when the ride is started without telemetry sources:
+        val started = session.start()
+
+        // then the control-only trainer starts successfully and telemetry roles remain unassigned:
+        assertEquals(TrainingSessionPhase.ACTIVE, started.phase)
+        assertEquals("ftms-control", started.equipment?.selection?.controlSourceId)
+        assertNull(started.equipment?.selection?.powerSourceId)
+        assertNull(started.equipment?.selection?.cadenceSourceId)
+        assertEquals(RideRoleStatus.OPTIONAL, started.equipment?.power?.status)
+        assertEquals(RideRoleStatus.OPTIONAL, started.equipment?.cadence?.status)
+        assertEquals(1, control.requestControlCalls)
+        assertEquals(1, control.freeRideCalls)
     }
 
     @Test
-    fun `records only the explicitly selected heart-rate source and supports switching`() {
+    fun `does not require a heart-rate source when multiple devices are connected`() {
         // given a trainer and two connected heart-rate sources:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice =
-            FakeTrainingDevice(
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                powerControl = powerControl,
+                availableHeartRateSources = listOf(heartRateSource("bridge"), heartRateSource("strap")),
+            )
+        val session = coordinator(rideSourceCatalog, clock)
+
+        // when a session is started without selecting one source:
+        // then control is acquired and the session starts without heart-rate recording:
+        val started = session.start()
+        assertEquals(TrainingSessionPhase.ACTIVE, started.phase)
+        assertNull(started.equipment?.selection?.heartRateSourceId)
+        assertEquals(1, powerControl.requestControlCalls)
+    }
+
+    @Test
+    fun `starts without heart rate when the selected source disconnects before start`() {
+        // given a trainer and one heart-rate source that is selected automatically:
+        val powerControl = FakeTrainerControl()
+        val strap = heartRateSource("strap")
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                powerControl = powerControl,
+                availableHeartRateSources = listOf(strap),
+            )
+        val session = coordinator(rideSourceCatalog, clock)
+        assertEquals("strap", session.equipment().selection.heartRateSourceId)
+
+        // when the selected heart-rate source disconnects before the session starts:
+        rideSourceCatalog.availableHeartRateSources =
+            listOf(strap.copy(state = ConnectionPhase.DISCONNECTED))
+        val started = session.start()
+
+        // then control starts while the selected heart-rate stream is unavailable:
+        assertEquals(TrainingSessionPhase.ACTIVE, started.phase)
+        assertEquals("strap", started.equipment?.selection?.heartRateSourceId)
+        assertEquals(RideRoleStatus.UNAVAILABLE, started.equipment?.heartRate?.status)
+        assertEquals(TelemetryAvailability.UNAVAILABLE, started.telemetry?.heartRate?.availability)
+        assertEquals(1, powerControl.requestControlCalls)
+    }
+
+    @Test
+    fun `records only the explicitly selected heart-rate source`() {
+        // given a trainer and two connected heart-rate sources:
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
                 powerControl = powerControl,
                 availableHeartRateSources = listOf(heartRateSource("bridge"), heartRateSource("strap")),
             )
         val uploader = FakeActivityUploader()
-        val session = coordinator(trainingDevice, clock, uploader)
+        val session = coordinator(rideSourceCatalog, clock, uploader)
 
-        // when a session selects bridge HR, then switches to the strap:
-        val started = session.start(heartRateSourceId = "bridge")
+        // when a session starts with bridge HR selected:
+        val started =
+            session.start(
+                equipment = RideEquipmentSelection(heartRateSourceId = "bridge"),
+            )
         val sessionId = requireNotNull(started.sessionId)
-        trainingDevice.emitHeartRate("bridge", heartRate(140))
-        session.selectHeartRateSource(sessionId, "strap")
-        trainingDevice.emitHeartRate("bridge", heartRate(145))
-        trainingDevice.emitHeartRate("strap", heartRate(155))
+        rideSourceCatalog.emitHeartRate("bridge", heartRate(140))
+        rideSourceCatalog.emitHeartRate("strap", heartRate(145))
+        rideSourceCatalog.emitHeartRate("bridge", heartRate(155))
         val stopped = session.stop(sessionId)
         session.upload(sessionId)
 
-        // then the session state and raw activity preserve the selected-source sequence:
-        assertEquals("strap", stopped.heartRateSourceId)
-        assertEquals(155, stopped.heartRate?.heartRateBpm)
+        // then the session keeps the start-time selection and records only that source:
+        assertEquals("bridge", started.equipment?.selection?.heartRateSourceId)
+        assertEquals(
+            155,
+            stopped
+                .telemetry
+                ?.heartRate
+                ?.sample
+                ?.heartRateBpm,
+        )
         assertEquals(
             listOf(140, 155),
             uploader.uploads
@@ -114,7 +185,7 @@ class TrainingSessionCoordinatorTest {
                 .map { it.heartRateBpm },
         )
         assertEquals(
-            listOf("bridge", "strap"),
+            listOf("bridge", "bridge"),
             uploader.uploads
                 .single()
                 .samples
@@ -125,21 +196,24 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `merges an independently received selected heart-rate sample with trainer telemetry`() {
         // given a session with one selected heart-rate source:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice =
-            FakeTrainingDevice(
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
                 powerControl = powerControl,
                 availableHeartRateSources = listOf(heartRateSource("strap")),
             )
         val uploader = FakeActivityUploader()
-        val session = coordinator(trainingDevice, clock, uploader)
-        val started = session.start(heartRateSourceId = "strap")
+        val session = coordinator(rideSourceCatalog, clock, uploader)
+        val started =
+            session.start(
+                equipment = RideEquipmentSelection(heartRateSourceId = "strap"),
+            )
         val sessionId = requireNotNull(started.sessionId)
         val receivedAt = now.plusSeconds(1)
 
         // when trainer and heart-rate notifications arrive independently for the same timestamp:
-        trainingDevice.emitTelemetry(telemetry(receivedAt = receivedAt, distanceMeters = 1_000.0))
-        trainingDevice.emitHeartRate(
+        rideSourceCatalog.emitTelemetry(telemetry(receivedAt = receivedAt, distanceMeters = 1_000.0))
+        rideSourceCatalog.emitHeartRate(
             "strap",
             HeartRateTelemetry(
                 heartRateBpm = 151,
@@ -162,10 +236,87 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
+    fun `exposes selected cycling and heart-rate values through one session telemetry projection`() {
+        // given a trainer with cycling telemetry and one selected heart-rate source:
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                powerControl = powerControl,
+                telemetryCapabilityAvailable = true,
+                availableHeartRateSources = listOf(heartRateSource("strap")),
+            )
+        val session = coordinator(rideSourceCatalog, clock)
+        val started =
+            session.start(
+                equipment = RideEquipmentSelection(heartRateSourceId = "strap"),
+            )
+        val sessionId = requireNotNull(started.sessionId)
+        val cycling = telemetry(distanceMeters = 1_000.0)
+        val heartRate = HeartRateTelemetry(heartRateBpm = 152, receivedAt = now)
+
+        // when both selected streams publish their latest values:
+        rideSourceCatalog.emitTelemetry(cycling)
+        rideSourceCatalog.emitHeartRate("strap", heartRate)
+        val current = session.current()
+
+        // then the session exposes them under the same telemetry projection:
+        assertEquals(cycling, current.telemetry?.cycling?.sample)
+        assertEquals(heartRate, current.telemetry?.heartRate?.sample)
+        assertEquals(TelemetryAvailability.CURRENT, current.telemetry?.heartRate?.availability)
+        session.stop(sessionId)
+    }
+
+    @Test
+    fun `marks a selected heart-rate stream interrupted after its freshness window`() {
+        // given a selected heart-rate source with a two-second freshness window:
+        val mutableClock = MutableTestClock(now)
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                powerControl = FakeTrainerControl(),
+                availableHeartRateSources = listOf(heartRateSource("strap")),
+            )
+        val session =
+            coordinator(
+                rideSourceCatalog = rideSourceCatalog,
+                clock = mutableClock,
+                telemetryProperties = TelemetryProperties(freshness = Duration.ofSeconds(2)),
+            )
+        val sessionId =
+            requireNotNull(
+                session
+                    .start(equipment = RideEquipmentSelection(heartRateSourceId = "strap"))
+                    .sessionId,
+            )
+        val first = HeartRateTelemetry(heartRateBpm = 150, receivedAt = now)
+        rideSourceCatalog.emitHeartRate("strap", first)
+
+        // when no newer selected heart-rate notification arrives after the freshness window:
+        mutableClock.currentTime = now.plusSeconds(3)
+        val interrupted = session.current()
+
+        // then the last value is withheld and only its receipt time remains visible:
+        assertEquals(TelemetryAvailability.INTERRUPTED, interrupted.telemetry?.heartRate?.availability)
+        assertNull(interrupted.telemetry?.heartRate?.sample)
+        assertEquals(now, interrupted.telemetry?.heartRate?.lastReceivedAt)
+
+        // when the selected source publishes a new notification:
+        val recoveredAt = now.plusSeconds(4)
+        mutableClock.currentTime = recoveredAt
+        val recovered = HeartRateTelemetry(heartRateBpm = 152, receivedAt = recoveredAt)
+        rideSourceCatalog.emitHeartRate("strap", recovered)
+
+        // then the projection becomes current again with the new sample:
+        val current = session.current()
+        assertEquals(TelemetryAvailability.CURRENT, current.telemetry?.heartRate?.availability)
+        assertEquals(recovered, current.telemetry?.heartRate?.sample)
+        session.stop(sessionId)
+    }
+
+    @Test
     fun `target changes are rejected without an active session`() {
         // given a connected device with ERG control but no started session:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = java.util.UUID.randomUUID()
 
         // when a target is submitted before starting:
@@ -180,10 +331,10 @@ class TrainingSessionCoordinatorTest {
     fun `a failed control request does not create a session`() {
         // given a connected device that rejects the control request:
         val powerControl =
-            FakeIndoorBikePowerControl().also {
+            FakeTrainerControl().also {
                 it.requestControlFailure = IllegalStateException("control denied")
             }
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
 
         // when the session is started:
         // then the failure is visible and the session remains not started:
@@ -196,10 +347,10 @@ class TrainingSessionCoordinatorTest {
     fun `a failed initial Free Ride command does not create a session`() {
         // given a connected device that rejects the initial Free Ride command:
         val powerControl =
-            FakeIndoorBikePowerControl().also {
+            FakeTrainerControl().also {
                 it.freeRideFailure = IllegalStateException("free ride rejected")
             }
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
 
         // when a manual session is started:
         // then the failure is visible and the session remains not started:
@@ -212,12 +363,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `a started session remains bound to the control it acquired`() {
         // given a session that acquired control from one device:
-        val firstPowerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = coordinator(trainingDevice, clock)
+        val firstPowerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(firstPowerControl)
+        val session = coordinator(rideSourceCatalog, clock)
         val started = session.start()
-        val secondPowerControl = FakeIndoorBikePowerControl()
-        trainingDevice.powerControl = secondPowerControl
+        val secondPowerControl = FakeTrainerControl()
+        rideSourceCatalog.powerControl = secondPowerControl
 
         // when the target is changed after the provider reports another device:
         session.setTargetPower(requireNotNull(started.sessionId), 300)
@@ -228,10 +379,305 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
+    fun `selected control source owns commands and recovery`() {
+        // given two connected trainers and an explicit ride assignment to the second trainer:
+        val firstPowerControl = FakeTrainerControl()
+        val secondPowerControl = FakeTrainerControl()
+        val recoveredPowerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                availableRideSources =
+                    listOf(
+                        rideSource("trainer-a", trainerCapabilities()),
+                        rideSource("trainer-b", trainerCapabilities()),
+                    ),
+            ).also {
+                it.sourcePowerControls["trainer-a"] = firstPowerControl
+                it.sourcePowerControls["trainer-b"] = secondPowerControl
+            }
+        val session = coordinator(rideSourceCatalog, clock)
+        session.selectEquipment(
+            RideEquipmentSelection(
+                controlSourceId = "trainer-b",
+                powerSourceId = "trainer-b",
+                cadenceSourceId = "trainer-b",
+            ),
+        )
+
+        // when the ride starts, loses the selected trainer, and later recovers:
+        val started = session.start()
+        val sessionId = requireNotNull(started.sessionId)
+        session.setTargetPower(sessionId, 250)
+        rideSourceCatalog.availableRideSources =
+            rideSourceCatalog.availableRideSources.map { source ->
+                if (source.id == "trainer-b") source.copy(state = ConnectionPhase.DISCONNECTED) else source
+            }
+        rideSourceCatalog.sourcePowerControls["trainer-b"] = null
+        rideSourceCatalog.sourceReconnectResults["trainer-b"] = recoveredPowerControl
+        session.tick(now.plusSeconds(1), null)
+        var recoveryTime = now.plusSeconds(1)
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            recoveryTime = recoveryTime.plusSeconds(1)
+            session.tick(recoveryTime, null)
+            assertEquals(listOf(250), recoveredPowerControl.targetPowers)
+        }
+
+        // then control and recovery commands stay on trainer-b and never fall back to trainer-a:
+        assertEquals("trainer-b", started.equipment?.selection?.controlSourceId)
+        assertEquals(1, secondPowerControl.requestControlCalls)
+        assertEquals(1, secondPowerControl.freeRideCalls)
+        assertEquals(listOf(250), secondPowerControl.targetPowers)
+        assertEquals(emptyList(), firstPowerControl.targetPowers)
+        assertEquals(0, firstPowerControl.requestControlCalls)
+        assertEquals(listOf("trainer-b"), rideSourceCatalog.sourceReconnectCalls)
+    }
+
+    @Test
+    fun `execution and recording keep power cadence and control telemetry source-specific`() {
+        // given independent selected power and cadence sources alongside the control trainer:
+        val controlPowerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                availableRideSources =
+                    listOf(
+                        rideSource(
+                            "control",
+                            setOf(
+                                RideSourceCapability.RESISTANCE_CONTROL,
+                                RideSourceCapability.POWER,
+                                RideSourceCapability.CADENCE,
+                            ),
+                        ),
+                        rideSource("power", setOf(RideSourceCapability.POWER)),
+                        rideSource("cadence", setOf(RideSourceCapability.CADENCE)),
+                    ),
+            ).also {
+                it.sourcePowerControls["control"] = controlPowerControl
+                it.emitTelemetry(
+                    "control",
+                    CyclingTelemetry(
+                        powerWatts = 180,
+                        cadenceRpm = 80.0,
+                        speedKph = 25.0,
+                        distanceMeters = 1_000.0,
+                        receivedAt = now,
+                    ),
+                )
+                it.emitTelemetry(
+                    "power",
+                    CyclingTelemetry(powerWatts = 300, distanceMeters = 5_000.0, receivedAt = now),
+                )
+                it.emitTelemetry(
+                    "cadence",
+                    CyclingTelemetry(cadenceRpm = 90.0, distanceMeters = 9_000.0, receivedAt = now),
+                )
+            }
+        val uploader = FakeActivityUploader()
+        val mutableClock = MutableTestClock(now)
+        val session =
+            coordinator(
+                rideSourceCatalog,
+                mutableClock,
+                uploader,
+            )
+        session.selectEquipment(
+            RideEquipmentSelection(
+                controlSourceId = "control",
+                powerSourceId = "power",
+                cadenceSourceId = "cadence",
+            ),
+        )
+        val workout =
+            workout(
+                distanceStep("Distance", meters = 100.0, lowWatts = 200, highWatts = 200),
+                timedStep("Finish", seconds = 10, lowWatts = 150, highWatts = 150),
+            )
+        val sessionId = requireNotNull(session.start(workout).sessionId)
+
+        // when each selected source reports its own observation and the control trainer advances its distance:
+        val beforeBoundary = now.plusSeconds(1)
+        rideSourceCatalog.emitTelemetry(
+            "control",
+            CyclingTelemetry(speedKph = 28.0, distanceMeters = 1_099.0, receivedAt = beforeBoundary),
+        )
+        rideSourceCatalog.emitTelemetry(
+            "power",
+            CyclingTelemetry(powerWatts = 325, distanceMeters = 9_999.0, receivedAt = beforeBoundary.plusMillis(1)),
+        )
+        rideSourceCatalog.emitTelemetry(
+            "cadence",
+            CyclingTelemetry(cadenceRpm = 92.0, distanceMeters = 8_888.0, receivedAt = beforeBoundary.plusMillis(2)),
+        )
+        val beforeDistanceBoundary =
+            session.tick(
+                beforeBoundary,
+                CyclingTelemetry(distanceMeters = 9_999.0, receivedAt = beforeBoundary),
+            )
+        rideSourceCatalog.emitTelemetry(
+            "control",
+            CyclingTelemetry(speedKph = 28.0, distanceMeters = 1_100.0, receivedAt = now.plusSeconds(2)),
+        )
+        val afterDistanceBoundary = session.tick(now.plusSeconds(2))
+        mutableClock.currentTime = now.plusSeconds(2)
+        session.stop(sessionId)
+        session.upload(sessionId)
+
+        // then execution uses control distance, while raw recording retains only each selected source's fields:
+        assertEquals(1, beforeDistanceBoundary.workout?.currentStepNumber)
+        assertEquals(2, afterDistanceBoundary.workout?.currentStepNumber)
+        assertEquals(listOf(200, 150, 0), controlPowerControl.targetPowers)
+        val activity = uploader.uploads.single()
+        val controlObservations = activity.cyclingObservations.filter { it.sourceId == "control" }
+        val powerObservations = activity.cyclingObservations.filter { it.sourceId == "power" }
+        val cadenceObservations = activity.cyclingObservations.filter { it.sourceId == "cadence" }
+        assertEquals(2, controlObservations.size)
+        assertNull(controlObservations[0].powerWatts)
+        assertNull(controlObservations[0].cadenceRpm)
+        assertEquals(1_099.0, controlObservations[0].distanceMeters)
+        assertEquals(listOf(325), powerObservations.map { it.powerWatts })
+        assertNull(powerObservations.single().cadenceRpm)
+        assertNull(powerObservations.single().distanceMeters)
+        assertEquals(listOf(92.0), cadenceObservations.map { it.cadenceRpm })
+        assertNull(cadenceObservations.single().powerWatts)
+        assertNull(cadenceObservations.single().distanceMeters)
+    }
+
+    @Test
+    fun `stale independent power and cadence are absent from live session telemetry`() {
+        // given a selected control trainer and independent power and cadence sources with a short freshness window:
+        val controlPowerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                availableRideSources =
+                    listOf(
+                        rideSource(
+                            "control",
+                            setOf(
+                                RideSourceCapability.RESISTANCE_CONTROL,
+                                RideSourceCapability.POWER,
+                                RideSourceCapability.CADENCE,
+                            ),
+                        ),
+                        rideSource("power", setOf(RideSourceCapability.POWER)),
+                        rideSource("cadence", setOf(RideSourceCapability.CADENCE)),
+                    ),
+            ).also {
+                it.sourcePowerControls["control"] = controlPowerControl
+                it.emitTelemetry(
+                    "control",
+                    CyclingTelemetry(cadenceRpm = 90.0, receivedAt = now),
+                )
+                it.emitTelemetry(
+                    "power",
+                    CyclingTelemetry(powerWatts = 300, receivedAt = now),
+                )
+                it.emitTelemetry(
+                    "cadence",
+                    CyclingTelemetry(cadenceRpm = 20.0, receivedAt = now),
+                )
+            }
+        val session =
+            coordinator(
+                rideSourceCatalog = rideSourceCatalog,
+                clock = clock,
+                ergProtectionProperties =
+                    ergProtectionProperties(
+                        lowCadenceDuration = Duration.ofSeconds(1),
+                    ),
+                telemetryProperties = TelemetryProperties(freshness = Duration.ofSeconds(2)),
+            )
+        session.selectEquipment(
+            RideEquipmentSelection(
+                controlSourceId = "control",
+                powerSourceId = "power",
+                cadenceSourceId = "cadence",
+            ),
+        )
+        val sessionId = requireNotNull(session.start().sessionId)
+        session.setTargetPower(sessionId, 300)
+
+        // when only the control trainer reports a fresh high cadence sample after the independent source goes quiet:
+        rideSourceCatalog.emitTelemetry(
+            "control",
+            CyclingTelemetry(cadenceRpm = 90.0, receivedAt = now.plusSeconds(3)),
+        )
+        val state = session.tick(now.plusSeconds(3))
+
+        // then stale independent values are absent rather than triggering a protective command:
+        assertEquals(listOf(300), controlPowerControl.targetPowers)
+        assertEquals(300, state.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.INACTIVE, state.ergProtection.status)
+        assertNull(
+            state
+                .telemetry
+                ?.cycling
+                ?.sample
+                ?.powerWatts,
+        )
+        assertNull(
+            state
+                .telemetry
+                ?.cycling
+                ?.sample
+                ?.cadenceRpm,
+        )
+        session.stop(sessionId)
+    }
+
+    @Test
+    fun `a lost selected control source stays unavailable and cannot fall back to another trainer`() {
+        // given a ride explicitly bound to trainer-b while trainer-a is also connected:
+        val trainerAControl = FakeTrainerControl()
+        val trainerBControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                availableRideSources =
+                    listOf(
+                        rideSource("trainer-a", trainerCapabilities()),
+                        rideSource("trainer-b", trainerCapabilities()),
+                    ),
+            ).also {
+                it.sourcePowerControls["trainer-a"] = trainerAControl
+                it.sourcePowerControls["trainer-b"] = trainerBControl
+            }
+        val session = coordinator(rideSourceCatalog, clock)
+        session.selectEquipment(
+            RideEquipmentSelection(
+                controlSourceId = "trainer-b",
+                powerSourceId = "trainer-b",
+                cadenceSourceId = "trainer-b",
+            ),
+        )
+        val started = session.start()
+        val sessionId = requireNotNull(started.sessionId)
+        rideSourceCatalog.availableRideSources =
+            rideSourceCatalog.availableRideSources.map { source ->
+                if (source.id == "trainer-b") source.copy(state = ConnectionPhase.DISCONNECTED) else source
+            }
+        rideSourceCatalog.sourcePowerControls["trainer-b"] = null
+
+        // when the scheduler observes the selected trainer loss and a target command is attempted:
+        val interrupted = session.tick(now.plusSeconds(1), null)
+        val unavailable = session.current()
+
+        // then the selected source is reported unavailable and no command or recovery uses trainer-a:
+        assertEquals(TrainerConnectionStatus.RECONNECTING, interrupted.trainerConnection)
+        assertEquals("trainer-b", unavailable.equipment?.selection?.controlSourceId)
+        assertEquals(RideRoleStatus.UNAVAILABLE, unavailable.equipment?.control?.status)
+        assertEquals(listOf("trainer-a"), unavailable.equipment?.control?.compatibleSourceIds)
+        assertFailsWith<TrainingSessionUnavailableException> {
+            session.setTargetPower(sessionId, 250)
+        }
+        assertEquals(emptyList(), trainerAControl.targetPowers)
+        assertEquals(0, trainerAControl.requestControlCalls)
+        assertEquals(listOf("trainer-b"), rideSourceCatalog.sourceReconnectCalls)
+    }
+
+    @Test
     fun `stopping a session sends zero watts and marks it stopped`() {
         // given an active session with a previously selected ERG target:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val started = session.start()
         val sessionId = requireNotNull(started.sessionId)
         session.setTargetPower(sessionId, 300)
@@ -251,8 +697,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `stopped sessions reject further target changes`() {
         // given a session that has sent its zero-watt stop target:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
         session.stop(sessionId)
 
@@ -265,13 +711,54 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
+    fun `a stopped session can be discarded while the trainer is disconnected`() {
+        // given a session that loses trainer control before it is stopped:
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
+        val session = coordinator(rideSourceCatalog, clock)
+        val sessionId = requireNotNull(session.start().sessionId)
+        rideSourceCatalog.powerControl = null
+        val stopped = session.stop(sessionId)
+
+        // when the stopped session is discarded before zero watts can be confirmed:
+        val discarded = session.discard(sessionId)
+
+        // then the recording is cleared without waiting for trainer recovery:
+        assertEquals(TrainingSessionPhase.STOPPED, stopped.phase)
+        assertEquals(TrainingSessionPhase.NOT_STARTED, discarded.phase)
+        assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
+    }
+
+    @Test
+    fun `a stopped session can be uploaded while the trainer is disconnected`() {
+        // given a stopped session with a recording whose trainer connection is lost first:
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
+        val uploader = FakeActivityUploader()
+        val session = coordinator(rideSourceCatalog, clock, uploader)
+        val sessionId = requireNotNull(session.start().sessionId)
+        rideSourceCatalog.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        rideSourceCatalog.powerControl = null
+        val stopped = session.stop(sessionId)
+
+        // when the stopped recording is uploaded before zero watts can be confirmed:
+        val uploaded = session.upload(sessionId)
+
+        // then upload succeeds and clears the stopped session without waiting for recovery:
+        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+        assertEquals(TrainingSessionPhase.NOT_STARTED, uploaded.phase)
+        assertEquals(1, uploader.uploads.size)
+        assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
+    }
+
+    @Test
     fun `a failed zero-watt stop target leaves the session active`() {
         // given an active session whose device rejects its stop target:
         val powerControl =
-            FakeIndoorBikePowerControl().also {
+            FakeTrainerControl().also {
                 it.targetPowerFailure = IllegalStateException("trainer unavailable")
             }
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
 
         // when the active session is stopped:
@@ -286,8 +773,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `finishing a workout keeps the session active for manual ERG continuation`() {
         // given a two-step workout whose power ranges resolve to different midpoint targets:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val workout =
             workout(
                 timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
@@ -322,9 +809,9 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `starting another workout after stopping the previous one starts from its first step`() {
         // given a completed and stopped workout followed by a different executable workout:
-        val powerControl = FakeIndoorBikePowerControl()
+        val powerControl = FakeTrainerControl()
         val mutableClock = MutableTestClock(now)
-        val session = coordinator(FakeTrainingDevice(powerControl), mutableClock)
+        val session = coordinator(FakeRideSourceCatalog(powerControl), mutableClock)
         val firstWorkout =
             workout(timedStep("First", seconds = 1, lowWatts = 200, highWatts = 200)).copy(
                 source = WorkoutSourceReference("intervals.icu", "first-workout"),
@@ -359,11 +846,11 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `discarding a stopped session forgets its recording and resets the session`() {
         // given a stopped session with a recorded activity:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
-        val session = coordinator(trainingDevice, clock)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
+        val session = coordinator(rideSourceCatalog, clock)
         val sessionId = requireNotNull(session.start().sessionId)
-        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        rideSourceCatalog.emitTelemetry(telemetry(distanceMeters = 1_000.0))
         session.stop(sessionId)
 
         // when the stopped activity is discarded:
@@ -372,19 +859,19 @@ class TrainingSessionCoordinatorTest {
         // then the runtime returns to its initial state and the old session cannot be uploaded:
         assertEquals(TrainingSessionPhase.NOT_STARTED, discarded.phase)
         assertEquals(null, discarded.sessionId)
-        assertEquals(discarded, session.current())
+        assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
         assertFailsWith<TrainingSessionMismatchException> { session.upload(sessionId) }
     }
 
     @Test
     fun `connection loss keeps the workout moving and synchronizes the current target after recovery`() {
         // given a timed workout whose trainer connection disappears after the first sample:
-        val firstPowerControl = FakeIndoorBikePowerControl()
-        val recoveredPowerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(firstPowerControl)
+        val firstPowerControl = FakeTrainerControl()
+        val recoveredPowerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(firstPowerControl)
         val uploader = FakeActivityUploader()
         val mutableClock = MutableTestClock(now)
-        val session = coordinator(trainingDevice, mutableClock, uploader)
+        val session = coordinator(rideSourceCatalog, mutableClock, uploader)
         val workout =
             workout(
                 timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
@@ -392,15 +879,15 @@ class TrainingSessionCoordinatorTest {
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val beforeLoss = telemetry(receivedAt = now, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(beforeLoss)
-        trainingDevice.powerControl = null
+        rideSourceCatalog.emitTelemetry(beforeLoss)
+        rideSourceCatalog.powerControl = null
 
         // when the scheduler observes the loss, advances the timed step, and later reconnects:
         val interrupted = session.tick(now.plusSeconds(1), null)
         val advancedWhileDisconnected = session.tick(now.plusSeconds(3), null)
         val afterRecovery = telemetry(receivedAt = now.plusSeconds(5), distanceMeters = 1_005.0)
-        trainingDevice.telemetry = afterRecovery
-        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        rideSourceCatalog.telemetry = afterRecovery
+        rideSourceCatalog.reconnectPowerControlResult = recoveredPowerControl
         session.tick(now.plusSeconds(5), null)
         var recoveryTime = now.plusSeconds(5)
         Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
@@ -408,7 +895,7 @@ class TrainingSessionCoordinatorTest {
             session.tick(recoveryTime, null)
             assertEquals(listOf(100), recoveredPowerControl.targetPowers, session.current().toString())
         }
-        trainingDevice.emitTelemetry(afterRecovery)
+        rideSourceCatalog.emitTelemetry(afterRecovery)
         mutableClock.currentTime = now.plusSeconds(5)
         session.stop(sessionId)
         session.upload(sessionId)
@@ -447,17 +934,17 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `manual pause remains available during loss and applies zero after recovery`() {
         // given an active workout whose trainer disappears while automatic recovery is pending:
-        val firstPowerControl = FakeIndoorBikePowerControl()
-        val recoveredPowerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = coordinator(trainingDevice, clock)
+        val firstPowerControl = FakeTrainerControl()
+        val recoveredPowerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(firstPowerControl)
+        val session = coordinator(rideSourceCatalog, clock)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 20, 200, 200))).sessionId)
-        trainingDevice.powerControl = null
+        rideSourceCatalog.powerControl = null
         session.tick(now.plusSeconds(1), null)
 
         // when the rider pauses and then the trainer becomes reachable again:
         val paused = session.pause(sessionId)
-        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        rideSourceCatalog.reconnectPowerControlResult = recoveredPowerControl
         var recoveryTime = now.plusSeconds(1)
         Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
             recoveryTime = recoveryTime.plusSeconds(1)
@@ -474,17 +961,17 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `manual stop during loss remains terminal until zero is confirmed`() {
         // given an active ride whose trainer is disconnected before the stop command can be sent:
-        val firstPowerControl = FakeIndoorBikePowerControl()
-        val recoveredPowerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = coordinator(trainingDevice, clock)
+        val firstPowerControl = FakeTrainerControl()
+        val recoveredPowerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(firstPowerControl)
+        val session = coordinator(rideSourceCatalog, clock)
         val sessionId = requireNotNull(session.start().sessionId)
-        trainingDevice.powerControl = null
+        rideSourceCatalog.powerControl = null
         session.tick(now.plusSeconds(1), null)
 
         // when the rider stops and the trainer later becomes reachable:
         val stopped = session.stop(sessionId)
-        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        rideSourceCatalog.reconnectPowerControlResult = recoveredPowerControl
         var recoveryTime = now.plusSeconds(1)
         Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
             recoveryTime = recoveryTime.plusSeconds(1)
@@ -501,57 +988,58 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `stale telemetry forces a transport recovery while the power capability is still open`() {
         // given a trainer that advertises telemetry and has emitted one sample:
-        val firstPowerControl = FakeIndoorBikePowerControl()
-        val recoveredPowerControl = FakeIndoorBikePowerControl()
-        val trainingDevice =
-            FakeTrainingDevice(
+        val firstPowerControl = FakeTrainerControl()
+        val recoveredPowerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
                 powerControl = firstPowerControl,
                 telemetryCapabilityAvailable = true,
             )
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = clock,
-                ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
+                ergProtectionProperties = ergProtectionProperties(),
+                telemetryProperties = TelemetryProperties(freshness = Duration.ofSeconds(2)),
             )
         session.start()
         val sample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(sample)
+        rideSourceCatalog.emitTelemetry(sample)
         session.tick(now, sample)
-        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        rideSourceCatalog.reconnectPowerControlResult = recoveredPowerControl
 
         // when no newer sample arrives past the configured freshness window:
         val interrupted = session.tick(now.plusSeconds(3), null)
 
         // then the session exposes recovery and forces a fresh transport connection:
         assertEquals(TrainerConnectionStatus.RECONNECTING, interrupted.trainerConnection)
-        assertEquals(true, trainingDevice.lastReconnectForce)
+        assertEquals(true, rideSourceCatalog.lastReconnectForce)
         var recoveryTime = now.plusSeconds(3)
         Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
             recoveryTime = recoveryTime.plusSeconds(1)
             assertEquals(TrainerConnectionStatus.CONNECTED, session.tick(recoveryTime, null).trainerConnection)
         }
-        assertEquals(1, trainingDevice.reconnectCalls)
+        assertEquals(1, rideSourceCatalog.reconnectCalls)
     }
 
     @Test
     fun `failed target synchronization exposes the interrupted connection and retries`() {
         // given a workout whose replacement trainer rejects the first synchronized target:
-        val firstPowerControl = FakeIndoorBikePowerControl()
+        val firstPowerControl = FakeTrainerControl()
         val recoveredPowerControl =
-            FakeIndoorBikePowerControl().also {
+            FakeTrainerControl().also {
                 it.targetPowerFailure = IllegalStateException("target synchronization rejected")
             }
-        val trainingDevice = FakeTrainingDevice(firstPowerControl)
-        val session = coordinator(trainingDevice, clock)
+        val rideSourceCatalog = FakeRideSourceCatalog(firstPowerControl)
+        val session = coordinator(rideSourceCatalog, clock)
         val sessionId =
             requireNotNull(
                 session
                     .start(workout(timedStep("Work", seconds = 20, lowWatts = 200, highWatts = 200)))
                     .sessionId,
             )
-        trainingDevice.powerControl = null
-        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        rideSourceCatalog.powerControl = null
+        rideSourceCatalog.reconnectPowerControlResult = recoveredPowerControl
 
         // when the trainer reconnects, rejects synchronization, and then accepts the retry:
         session.tick(now.plusSeconds(1), null)
@@ -579,34 +1067,35 @@ class TrainingSessionCoordinatorTest {
         // then the session remains active and the rejected synchronization is retried on the same connection:
         assertEquals(sessionId, recovered.sessionId)
         assertEquals(listOf(200, 200), recoveredPowerControl.targetPowerAttempts)
-        assertEquals(1, trainingDevice.reconnectCalls)
+        assertEquals(1, rideSourceCatalog.reconnectCalls)
     }
 
     @Test
     fun `manual replacement is not force-reconnected after stale telemetry recovery fails`() {
         // given a telemetry-capable manual session whose sample becomes stale during recovery:
-        val firstPowerControl = FakeIndoorBikePowerControl()
-        val manualPowerControl = FakeIndoorBikePowerControl()
-        val trainingDevice =
-            FakeTrainingDevice(
+        val firstPowerControl = FakeTrainerControl()
+        val manualPowerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
                 powerControl = firstPowerControl,
                 telemetryCapabilityAvailable = true,
             )
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = clock,
-                ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
+                ergProtectionProperties = ergProtectionProperties(),
+                telemetryProperties = TelemetryProperties(freshness = Duration.ofSeconds(2)),
             )
         val sessionId = requireNotNull(session.start().sessionId)
         val sample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(sample)
+        rideSourceCatalog.emitTelemetry(sample)
         session.tick(now, sample)
-        trainingDevice.powerControl = null
+        rideSourceCatalog.powerControl = null
 
         // when automatic recovery fails after a manual replacement takes over:
         val reconnecting = session.tick(now.plusSeconds(3), null)
-        trainingDevice.powerControl = manualPowerControl
+        rideSourceCatalog.powerControl = manualPowerControl
         val afterManualReplacement = session.tick(now.plusSeconds(3), null)
         var recoveryTime = now.plusSeconds(3)
         var recovered = session.current()
@@ -618,10 +1107,10 @@ class TrainingSessionCoordinatorTest {
 
         // then the manual connection remains authoritative and receives synchronization without another transport attempt:
         assertEquals(TrainerConnectionStatus.RECONNECTING, reconnecting.trainerConnection)
-        assertEquals(true, trainingDevice.lastReconnectForce)
+        assertEquals(true, rideSourceCatalog.lastReconnectForce)
         assertEquals(TrainerConnectionStatus.RECONNECTING, afterManualReplacement.trainerConnection)
         assertEquals(sessionId, recovered.sessionId)
-        assertEquals(1, trainingDevice.reconnectCalls)
+        assertEquals(1, rideSourceCatalog.reconnectCalls)
         assertEquals(1, manualPowerControl.requestControlCalls)
         assertEquals(1, manualPowerControl.freeRideCalls)
     }
@@ -629,21 +1118,22 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `paused sessions do not reconnect only because telemetry is stale`() {
         // given a paused telemetry-capable session with an old but valid sample:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice =
-            FakeTrainingDevice(
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
                 powerControl = powerControl,
                 telemetryCapabilityAvailable = true,
             )
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = clock,
-                ergProtectionProperties = ergProtectionProperties().copy(telemetryFreshness = Duration.ofSeconds(2)),
+                ergProtectionProperties = ergProtectionProperties(),
+                telemetryProperties = TelemetryProperties(freshness = Duration.ofSeconds(2)),
             )
         val sessionId = requireNotNull(session.start().sessionId)
         val sample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(sample)
+        rideSourceCatalog.emitTelemetry(sample)
         session.tick(now, sample)
         session.pause(sessionId)
 
@@ -653,14 +1143,14 @@ class TrainingSessionCoordinatorTest {
         // then the intentional pause remains connected without starting transport recovery:
         assertEquals(TrainingSessionPhase.PAUSED, pausedTick.phase)
         assertEquals(TrainerConnectionStatus.CONNECTED, pausedTick.trainerConnection)
-        assertEquals(0, trainingDevice.reconnectCalls)
+        assertEquals(0, rideSourceCatalog.reconnectCalls)
     }
 
     @Test
     fun `updates the ERG target progressively during a timed ramp`() {
         // given a timed workout step with ordered ramp endpoints:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val workout =
             workout(
                 ExecutableWorkoutStep(
@@ -690,8 +1180,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `adjusts every workout power step from the session target percentage`() {
         // given a workout with two fixed power steps:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val workout =
             workout(
                 timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
@@ -717,8 +1207,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `adjusts ascending and descending ramp targets without changing their progression`() {
         // given a timed ramp workout:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val workout =
             workout(
                 ExecutableWorkoutStep(
@@ -745,12 +1235,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `adjusts the retained target while ERG protection is active`() {
         // given a workout that has released resistance after a sustained low cadence:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = mutableClock,
                 ergProtectionProperties =
                     ergProtectionProperties(
@@ -761,14 +1251,14 @@ class TrainingSessionCoordinatorTest {
         val workout = workout(timedStep("Hard", seconds = 10, lowWatts = 300, highWatts = 300))
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
         session.tick(now.plusSeconds(1), lowCadence)
 
         // when the target is increased during protection and cadence then recovers:
         val adjusted = session.adjustWorkoutTarget(sessionId, 1L)
         val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
-        trainingDevice.emitTelemetry(highCadence)
+        rideSourceCatalog.emitTelemetry(highCadence)
         session.tick(now.plusSeconds(1), highCadence)
         val recovered = session.tick(now.plusSeconds(2), highCadence)
 
@@ -786,8 +1276,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `allows the target percentage to exceed ordinary intensity ranges while clamping device watts`() {
         // given a fixed workout target:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
 
         // when a large positive percentage adjustment is requested:
@@ -802,15 +1292,15 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `records workout target adjustments in the uploaded activity`() {
         // given an active workout with an in-memory activity uploader:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
-        val session = coordinator(trainingDevice, clock, uploader)
+        val session = coordinator(rideSourceCatalog, clock, uploader)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
 
         // when the target is adjusted and the session is stopped and uploaded:
         session.adjustWorkoutTarget(sessionId, 1L)
-        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        rideSourceCatalog.emitTelemetry(telemetry(distanceMeters = 1_000.0))
         session.stop(sessionId)
         session.upload(sessionId)
 
@@ -829,18 +1319,18 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `stopping records each telemetry notification once and uploads the in-memory activity`() {
         // given an active session and an uploader that records the submitted activity:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
-        val session = coordinator(trainingDevice, clock, uploader)
+        val session = coordinator(rideSourceCatalog, clock, uploader)
         val started = session.start()
         val firstSample = telemetry(receivedAt = now, distanceMeters = 1_000.0)
         val secondSample = telemetry(receivedAt = now.plusMillis(100), distanceMeters = 1_001.0)
 
         // when telemetry notifications include the same timestamp twice and the session is stopped and uploaded:
-        trainingDevice.emitTelemetry(firstSample)
-        trainingDevice.emitTelemetry(firstSample)
-        trainingDevice.emitTelemetry(secondSample)
+        rideSourceCatalog.emitTelemetry(firstSample)
+        rideSourceCatalog.emitTelemetry(firstSample)
+        rideSourceCatalog.emitTelemetry(secondSample)
         val stopped = session.stop(requireNotNull(started.sessionId))
         val uploaded = session.upload(requireNotNull(started.sessionId))
 
@@ -863,8 +1353,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `recorded scheduled workouts retain step and manual continuation segments`() {
         // given a scheduled two-step workout and telemetry around each transition:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
         var currentTime = now
         val mutableClock =
@@ -875,7 +1365,13 @@ class TrainingSessionCoordinatorTest {
 
                 override fun withZone(zone: ZoneId): Clock = this
             }
-        val session = coordinator(trainingDevice, mutableClock, uploader)
+        val session =
+            coordinator(
+                rideSourceCatalog = rideSourceCatalog,
+                clock = mutableClock,
+                activityUploader = uploader,
+                telemetryProperties = TelemetryProperties(freshness = Duration.ofMinutes(1)),
+            )
         val workout =
             workout(
                 timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 300),
@@ -885,11 +1381,11 @@ class TrainingSessionCoordinatorTest {
         val sessionId = requireNotNull(started.sessionId)
 
         // when the workout completes, the ride continues briefly, and the session is uploaded:
-        trainingDevice.emitTelemetry(telemetry(receivedAt = now, distanceMeters = 1_000.0))
+        rideSourceCatalog.emitTelemetry(telemetry(receivedAt = now, distanceMeters = 1_000.0))
         session.tick(now.plusSeconds(10))
-        trainingDevice.emitTelemetry(telemetry(receivedAt = now.plusSeconds(10), distanceMeters = 1_001.0))
+        rideSourceCatalog.emitTelemetry(telemetry(receivedAt = now.plusSeconds(10), distanceMeters = 1_001.0))
         session.tick(now.plusSeconds(30))
-        trainingDevice.emitTelemetry(telemetry(receivedAt = now.plusSeconds(30), distanceMeters = 1_002.0))
+        rideSourceCatalog.emitTelemetry(telemetry(receivedAt = now.plusSeconds(30), distanceMeters = 1_002.0))
         currentTime = now.plusSeconds(31)
         session.stop(sessionId)
         session.upload(sessionId)
@@ -916,13 +1412,13 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `distance workout steps use the trainer distance counter`() {
         // given a distance step starting from the trainer's current total distance:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice =
-            FakeTrainingDevice(
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
                 powerControl = powerControl,
                 telemetry = telemetry(distanceMeters = 1_000.0),
             )
-        val session = coordinator(trainingDevice, clock)
+        val session = coordinator(rideSourceCatalog, clock)
         val workout =
             workout(
                 distanceStep("Block", meters = 100.0, lowWatts = 200, highWatts = 200),
@@ -931,9 +1427,9 @@ class TrainingSessionCoordinatorTest {
         val sessionId = requireNotNull(session.start(workout).sessionId)
 
         // when the trainer reports less than and then exactly the requested distance:
-        trainingDevice.telemetry = telemetry(distanceMeters = 1_099.0)
+        rideSourceCatalog.telemetry = telemetry(distanceMeters = 1_099.0)
         val beforeBoundary = session.tick(now.plusSeconds(1))
-        trainingDevice.telemetry = telemetry(distanceMeters = 1_100.0)
+        rideSourceCatalog.telemetry = telemetry(distanceMeters = 1_100.0)
         val afterBoundary = session.tick(now.plusSeconds(2))
 
         // then the step does not advance early and advances once the distance delta is met:
@@ -946,8 +1442,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `manual workout steps advance only through the explicit advance action`() {
         // given a workout beginning with a manual step:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val workout =
             workout(
                 ExecutableWorkoutStep(
@@ -972,8 +1468,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `manual ERG target changes are rejected while a workout owns the target`() {
         // given an active executable workout:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = requireNotNull(session.start(workout(timedStep("Work", 10, 200, 200))).sessionId)
 
         // when a manual target is submitted during workout execution:
@@ -987,26 +1483,26 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `pausing a session sends zero watts and stops recording until resume`() {
         // given an active manual session with a selected ERG target and telemetry:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
         val mutableClock = MutableTestClock(now)
-        val session = coordinator(trainingDevice, mutableClock, uploader)
+        val session = coordinator(rideSourceCatalog, mutableClock, uploader)
         val started = session.start()
         val sessionId = requireNotNull(started.sessionId)
         session.setTargetPower(sessionId, 300)
         val beforePause = telemetry(receivedAt = now.plusSeconds(1), distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(beforePause)
+        rideSourceCatalog.emitTelemetry(beforePause)
 
         // when the session is paused, a notification arrives, then the session resumes and records again:
         mutableClock.currentTime = now.plusSeconds(2)
         val paused = session.pause(sessionId)
         val duringPause = telemetry(receivedAt = now.plusSeconds(3), distanceMeters = 1_001.0)
-        trainingDevice.emitTelemetry(duringPause)
+        rideSourceCatalog.emitTelemetry(duringPause)
         mutableClock.currentTime = now.plusSeconds(10)
         val resumed = session.resume(sessionId)
         val afterResume = telemetry(receivedAt = now.plusSeconds(11), distanceMeters = 1_002.0)
-        trainingDevice.emitTelemetry(afterResume)
+        rideSourceCatalog.emitTelemetry(afterResume)
         session.stop(sessionId)
         session.upload(sessionId)
 
@@ -1023,14 +1519,32 @@ class TrainingSessionCoordinatorTest {
                 .samples
                 .map { it.receivedAt },
         )
+        assertEquals(
+            listOf(beforePause.receivedAt, afterResume.receivedAt),
+            uploader.uploads
+                .single()
+                .cyclingObservations
+                .map { it.receivedAt },
+        )
+        assertEquals(
+            listOf(
+                TrainingActivityEventType.TRAINING_PAUSED,
+                TrainingActivityEventType.TRAINING_RESUMED,
+            ),
+            uploader
+                .uploads
+                .single()
+                .events
+                .map { it.type },
+        )
     }
 
     @Test
     fun `paused workout timing resumes from the remaining step duration`() {
         // given a timed workout that has run for part of its first step:
-        val powerControl = FakeIndoorBikePowerControl()
+        val powerControl = FakeTrainerControl()
         val mutableClock = MutableTestClock(now)
-        val session = coordinator(FakeTrainingDevice(powerControl), mutableClock)
+        val session = coordinator(FakeRideSourceCatalog(powerControl), mutableClock)
         val workout = workout(timedStep("Work", seconds = 10, lowWatts = 200, highWatts = 200))
         val sessionId = requireNotNull(session.start(workout).sessionId)
         mutableClock.currentTime = now.plusSeconds(5)
@@ -1062,33 +1576,33 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `paused distance workout ignores trainer distance accumulated during the pause`() {
         // given a distance workout with thirty meters completed before pausing:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl, telemetry = telemetry(distanceMeters = 1_000.0))
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl, telemetry = telemetry(distanceMeters = 1_000.0))
         val mutableClock = MutableTestClock(now)
-        val session = coordinator(trainingDevice, mutableClock)
+        val session = coordinator(rideSourceCatalog, mutableClock)
         val workout =
             workout(
                 distanceStep("Block", meters = 100.0, lowWatts = 200, highWatts = 200),
                 timedStep("Finish", seconds = 1, lowWatts = 150, highWatts = 150),
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
-        trainingDevice.telemetry = telemetry(distanceMeters = 1_030.0)
+        rideSourceCatalog.telemetry = telemetry(receivedAt = now.plusSeconds(1), distanceMeters = 1_030.0)
         mutableClock.currentTime = now.plusSeconds(1)
 
         // when the trainer moves fifty meters while paused and then moves sixty-nine meters after resume:
         session.pause(sessionId)
-        trainingDevice.telemetry = telemetry(distanceMeters = 1_080.0)
+        rideSourceCatalog.telemetry = telemetry(receivedAt = now.plusSeconds(1), distanceMeters = 1_080.0)
         mutableClock.currentTime = now.plusSeconds(20)
         session.resume(sessionId)
-        trainingDevice.telemetry = telemetry(distanceMeters = 1_149.0)
-        val beforeBoundary = session.tick(now.plusSeconds(21), trainingDevice.telemetry)
+        rideSourceCatalog.telemetry = telemetry(receivedAt = now.plusSeconds(21), distanceMeters = 1_149.0)
+        val beforeBoundary = session.tick(now.plusSeconds(21), rideSourceCatalog.telemetry)
 
         // then distance accumulated while paused is not counted:
         assertEquals(1, beforeBoundary.workout?.currentStepNumber)
 
         // when the trainer reaches seventy post-resume meters:
-        trainingDevice.telemetry = telemetry(distanceMeters = 1_150.0)
-        val atBoundary = session.tick(now.plusSeconds(22), trainingDevice.telemetry)
+        rideSourceCatalog.telemetry = telemetry(receivedAt = now.plusSeconds(22), distanceMeters = 1_150.0)
+        val atBoundary = session.tick(now.plusSeconds(22), rideSourceCatalog.telemetry)
 
         // then the thirty pre-pause meters plus seventy post-resume meters complete the step:
         assertEquals(2, atBoundary.workout?.currentStepNumber)
@@ -1097,12 +1611,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `stopping a paused session finalizes the recording and remains safe`() {
         // given an active session with a recorded sample:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
-        val session = coordinator(trainingDevice, clock, uploader)
+        val session = coordinator(rideSourceCatalog, clock, uploader)
         val sessionId = requireNotNull(session.start().sessionId)
-        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        rideSourceCatalog.emitTelemetry(telemetry(distanceMeters = 1_000.0))
 
         // when the session is paused and stopped without resuming:
         session.pause(sessionId)
@@ -1118,12 +1632,12 @@ class TrainingSessionCoordinatorTest {
     fun `a failed pause target leaves the session active and recording`() {
         // given an active session whose trainer rejects the pause target:
         val powerControl =
-            FakeIndoorBikePowerControl().also {
+            FakeTrainerControl().also {
                 it.targetPowerFailure = IllegalStateException("trainer unavailable")
             }
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
-        val session = coordinator(trainingDevice, clock, uploader)
+        val session = coordinator(rideSourceCatalog, clock, uploader)
         val sessionId = requireNotNull(session.start().sessionId)
 
         // when the session is paused:
@@ -1135,7 +1649,7 @@ class TrainingSessionCoordinatorTest {
         assertEquals(TrainingSessionPhase.ACTIVE, session.current().phase)
         assertEquals(emptyList(), powerControl.targetPowers)
         powerControl.targetPowerFailure = null
-        trainingDevice.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        rideSourceCatalog.emitTelemetry(telemetry(distanceMeters = 1_000.0))
         session.stop(sessionId)
         session.upload(sessionId)
         assertEquals(
@@ -1150,8 +1664,8 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `a failed resume Free Ride command leaves the session paused`() {
         // given a paused Free Ride session whose trainer rejects the restored mode:
-        val powerControl = FakeIndoorBikePowerControl()
-        val session = coordinator(FakeTrainingDevice(powerControl), clock)
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
         session.pause(sessionId)
         powerControl.freeRideFailure = IllegalStateException("trainer unavailable")
@@ -1171,12 +1685,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `automatically releases and restores a manual ERG target around a cadence collapse`() {
         // given a manual session with cadence protection and an activity uploader:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = clock,
                 activityUploader = uploader,
                 ergProtectionProperties = ergProtectionProperties(),
@@ -1191,7 +1705,7 @@ class TrainingSessionCoordinatorTest {
                 cadenceRpm = 44.0,
                 distanceMeters = 1_000.0,
             )
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(lowCadence.receivedAt, lowCadence)
         session.tick(now.plusSeconds(2), lowCadence)
         val bailedOut = session.tick(now.plusSeconds(3), lowCadence)
@@ -1201,7 +1715,7 @@ class TrainingSessionCoordinatorTest {
                 cadenceRpm = 60.0,
                 distanceMeters = 1_001.0,
             )
-        trainingDevice.emitTelemetry(recoveredCadence)
+        rideSourceCatalog.emitTelemetry(recoveredCadence)
         session.tick(recoveredCadence.receivedAt, recoveredCadence)
         val recovered = session.tick(now.plusSeconds(6), recoveredCadence)
 
@@ -1241,11 +1755,11 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `does not release ERG for a steady fifty rpm interval`() {
         // given a manual session with a forty-five-rpm bailout threshold:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = clock,
                 ergProtectionProperties = ergProtectionProperties(),
             )
@@ -1259,7 +1773,7 @@ class TrainingSessionCoordinatorTest {
                 cadenceRpm = 50.0,
                 distanceMeters = 1_000.0,
             )
-        trainingDevice.emitTelemetry(cadence)
+        rideSourceCatalog.emitTelemetry(cadence)
         session.tick(cadence.receivedAt, cadence)
         val state = session.tick(now.plusSeconds(6), cadence)
 
@@ -1274,12 +1788,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `continues workout timing while ERG protection is active`() {
         // given a timed workout and a short cadence-protection dwell:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = mutableClock,
                 ergProtectionProperties =
                     ergProtectionProperties(
@@ -1294,7 +1808,7 @@ class TrainingSessionCoordinatorTest {
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
 
         // when the target is bailed out and the first timed step reaches its wall-clock boundary:
@@ -1320,13 +1834,13 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `retries a rejected structured workout recovery with the latest step target`() {
         // given a structured workout that has entered confirmed zero-watt protection:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
         val mutableClock = MutableTestClock(now)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = mutableClock,
                 activityUploader = uploader,
                 ergProtectionProperties =
@@ -1342,11 +1856,11 @@ class TrainingSessionCoordinatorTest {
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
         session.tick(now.plusSeconds(1), lowCadence)
         val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
-        trainingDevice.emitTelemetry(highCadence)
+        rideSourceCatalog.emitTelemetry(highCadence)
         session.tick(now.plusSeconds(1), highCadence)
         powerControl.targetPowerFailure = IllegalStateException("temporary trainer rejection")
 
@@ -1393,11 +1907,11 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `requires a new recovery cadence dwell after cadence drops during a retry`() {
         // given a structured workout whose first recovery attempt is rejected:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = clock,
                 ergProtectionProperties =
                     ergProtectionProperties(
@@ -1408,22 +1922,22 @@ class TrainingSessionCoordinatorTest {
         val workout = workout(timedStep("Hard", seconds = 10, lowWatts = 300, highWatts = 300))
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
         session.tick(now.plusSeconds(1), lowCadence)
         val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
-        trainingDevice.emitTelemetry(highCadence)
+        rideSourceCatalog.emitTelemetry(highCadence)
         session.tick(now.plusSeconds(1), highCadence)
         powerControl.targetPowerFailure = IllegalStateException("temporary trainer rejection")
         val retrying = session.tick(now.plusSeconds(2), highCadence)
 
         // when cadence drops before the retry deadline and then rises again:
         val lowAgain = telemetry(receivedAt = now.plusMillis(2_500), cadenceRpm = 40.0, distanceMeters = 1_002.0)
-        trainingDevice.emitTelemetry(lowAgain)
+        rideSourceCatalog.emitTelemetry(lowAgain)
         val bailedOut = session.tick(now.plusMillis(2_500), lowAgain)
         powerControl.targetPowerFailure = null
         val highAgain = telemetry(receivedAt = now.plusMillis(2_500), cadenceRpm = 70.0, distanceMeters = 1_003.0)
-        trainingDevice.emitTelemetry(highAgain)
+        rideSourceCatalog.emitTelemetry(highAgain)
         val rearmed = session.tick(now.plusMillis(2_500), highAgain)
         val beforeDwell = session.tick(now.plusMillis(3_400), highAgain)
         val attemptsBeforeRecovery = powerControl.targetPowerAttempts.toList()
@@ -1447,12 +1961,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `backs off and stops structured workout recovery retries without freezing the workout`() {
         // given a structured workout with a bounded recovery retry policy:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = mutableClock,
                 ergProtectionProperties =
                     ergProtectionProperties(
@@ -1470,11 +1984,11 @@ class TrainingSessionCoordinatorTest {
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
         session.tick(now.plusSeconds(1), lowCadence)
         val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
-        trainingDevice.emitTelemetry(highCadence)
+        rideSourceCatalog.emitTelemetry(highCadence)
         session.tick(now.plusSeconds(1), highCadence)
         powerControl.targetPowerFailure = IllegalStateException("persistent trainer rejection")
 
@@ -1515,12 +2029,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `holds workout progression after a failed protective release`() {
         // given a timed workout whose trainer rejects the protective zero-watt command:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = mutableClock,
                 ergProtectionProperties =
                     ergProtectionProperties(
@@ -1536,7 +2050,7 @@ class TrainingSessionCoordinatorTest {
         val sessionId = requireNotNull(session.start(workout).sessionId)
         powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
 
         // when the protection command fails and the current timed step reaches its boundary:
@@ -1563,13 +2077,13 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `reconnection resolves unavailable ERG protection with a confirmed zero target`() {
         // given a session whose protective zero command failed and left the trainer state unknown:
-        val powerControl = FakeIndoorBikePowerControl()
-        val recoveredPowerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val recoveredPowerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = mutableClock,
                 ergProtectionProperties =
                     ergProtectionProperties(
@@ -1585,12 +2099,12 @@ class TrainingSessionCoordinatorTest {
             )
         powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
         session.tick(now.plusSeconds(1), lowCadence)
-        trainingDevice.powerControl = null
+        rideSourceCatalog.powerControl = null
         powerControl.targetPowerFailure = null
-        trainingDevice.reconnectPowerControlResult = recoveredPowerControl
+        rideSourceCatalog.reconnectPowerControlResult = recoveredPowerControl
 
         // when the connection is recovered while ERG protection is still unavailable:
         session.tick(now.plusSeconds(2), null)
@@ -1611,12 +2125,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `clears ERG protection when a workout enters an open target step`() {
         // given a workout whose next step does not request ERG resistance:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val mutableClock = MutableTestClock(now)
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = mutableClock,
                 ergProtectionProperties =
                     ergProtectionProperties(
@@ -1635,7 +2149,7 @@ class TrainingSessionCoordinatorTest {
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
         session.tick(now.plusSeconds(1), lowCadence)
 
@@ -1658,12 +2172,12 @@ class TrainingSessionCoordinatorTest {
     @Test
     fun `records a failed protective target without claiming the target was applied`() {
         // given a manual session whose trainer starts rejecting target writes after a target is active:
-        val powerControl = FakeIndoorBikePowerControl()
-        val trainingDevice = FakeTrainingDevice(powerControl)
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
         val session =
             coordinator(
-                trainingDevice = trainingDevice,
+                rideSourceCatalog = rideSourceCatalog,
                 clock = clock,
                 activityUploader = uploader,
                 ergProtectionProperties = ergProtectionProperties(),
@@ -1672,7 +2186,7 @@ class TrainingSessionCoordinatorTest {
         session.setTargetPower(sessionId, 300)
         powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        trainingDevice.emitTelemetry(lowCadence)
+        rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
 
         // when the low cadence dwell completes and the protective zero-watt command fails:
@@ -1703,17 +2217,26 @@ class TrainingSessionCoordinatorTest {
         assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
     }
 
+    private fun trainerCapabilities(): Set<RideSourceCapability> =
+        setOf(
+            RideSourceCapability.RESISTANCE_CONTROL,
+            RideSourceCapability.POWER,
+            RideSourceCapability.CADENCE,
+        )
+
     private fun coordinator(
-        trainingDevice: FakeTrainingDevice,
+        rideSourceCatalog: FakeRideSourceCatalog,
         clock: Clock,
         activityUploader: FakeActivityUploader = FakeActivityUploader(),
         ergProtectionProperties: ErgProtectionProperties = ErgProtectionProperties(),
+        telemetryProperties: TelemetryProperties = TelemetryProperties(freshness = Duration.ofSeconds(5)),
     ): TrainingSessionCoordinator =
         TrainingSessionCoordinator(
-            trainingDevice = trainingDevice,
+            rideSourceCatalog = rideSourceCatalog,
             clock = clock,
             activityUploader = activityUploader,
             ergProtectionProperties = ergProtectionProperties,
+            telemetryProperties = telemetryProperties,
         )
 
     private class MutableTestClock(
@@ -1762,8 +2285,8 @@ class TrainingSessionCoordinatorTest {
         receivedAt: Instant = now,
         cadenceRpm: Double = 90.0,
         distanceMeters: Double,
-    ): IndoorBikeTelemetry =
-        IndoorBikeTelemetry(
+    ): CyclingTelemetry =
+        CyclingTelemetry(
             powerWatts = 200,
             cadenceRpm = cadenceRpm,
             speedKph = 25.0,
@@ -1771,21 +2294,22 @@ class TrainingSessionCoordinatorTest {
             receivedAt = receivedAt,
         )
 
-    private fun heartRateSource(id: String): HeartRateSourceDescriptor =
-        HeartRateSourceDescriptor(
+    private fun heartRateSource(id: String): RideSourceDescriptor =
+        RideSourceDescriptor(
             id = id,
+            state = ConnectionPhase.CONNECTED,
+            capabilities = setOf(RideSourceCapability.HEART_RATE),
             device =
                 DeviceAdvertisement(
                     name = id,
                     endpoint = DeviceEndpoint.Bluetooth("AA:BB:CC:DD:EE:${if (id == "bridge") "01" else "02"}", "11:22:33:44:55:66"),
                 ),
-            state = ConnectionPhase.CONNECTED,
         )
 
     private fun heartRate(bpm: Int): HeartRateTelemetry =
         HeartRateTelemetry(
             heartRateBpm = bpm,
-            receivedAt = now.plusSeconds(bpm.toLong()),
+            receivedAt = now.minusMillis((200 - bpm).toLong()),
         )
 
     private fun ergProtectionProperties(
@@ -1798,7 +2322,6 @@ class TrainingSessionCoordinatorTest {
         ErgProtectionProperties(
             lowCadenceDuration = lowCadenceDuration,
             recoveryDuration = recoveryDuration,
-            telemetryFreshness = Duration.ofSeconds(5),
             targetChangeGracePeriod = Duration.ZERO,
             recoveryRetryInitialDelay = recoveryRetryInitialDelay,
             recoveryRetryMaxDelay = recoveryRetryMaxDelay,

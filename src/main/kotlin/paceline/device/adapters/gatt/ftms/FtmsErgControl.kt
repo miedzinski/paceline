@@ -4,7 +4,7 @@ import org.slf4j.LoggerFactory
 import paceline.device.adapters.gatt.GattClient
 import paceline.device.adapters.gatt.GattNotification
 import paceline.device.ports.DeviceCommunicationException
-import paceline.device.ports.IndoorBikePowerControl
+import paceline.device.ports.TrainerControl
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.Duration
@@ -20,7 +20,7 @@ class FtmsErgControl(
     private val gattClient: GattClient,
     private val controlPointCharacteristic: UUID,
     private val responseTimeout: Duration = Duration.ofSeconds(3),
-) : IndoorBikePowerControl {
+) : TrainerControl {
     private data class PendingCommand(
         val opcode: Int,
         val response: CompletableFuture<ControlPointResponse>,

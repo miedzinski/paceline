@@ -13,16 +13,16 @@ class ConnectionStateMachineTest {
     private val clock = Clock.fixed(now, ZoneOffset.UTC)
     private val device = kickrCore2Device()
 
+    private fun connectingMachine(): ConnectionStateMachine =
+        ConnectionStateMachine(
+            clock = clock,
+            initialState = ConnectionState.connecting(device, now),
+        )
+
     @Test
     fun `successful connection reaches connected after one initialization step`() {
-        // given a device that has been discovered and selected:
-        val machine = ConnectionStateMachine(clock)
-        machine.transition(ConnectionEvent.BeginDiscovery)
-        machine.transition(ConnectionEvent.DeviceDiscovered(device))
-        assertEquals(
-            ConnectionPhase.CONNECTING,
-            machine.transition(ConnectionEvent.BeginConnection(device)).phase,
-        )
+        // given a selected device whose connection is being initialized:
+        val machine = connectingMachine()
 
         // when connection setup and capability initialization complete together:
         val connected = machine.transition(ConnectionEvent.ConnectionEstablished)
@@ -34,29 +34,9 @@ class ConnectionStateMachineTest {
     }
 
     @Test
-    fun `no device is represented as unavailable`() {
-        // given a state machine that has started discovery:
-        val machine = ConnectionStateMachine(clock)
-        machine.transition(ConnectionEvent.BeginDiscovery)
-
-        // when discovery reports that no device is available:
-        val unavailable =
-            machine.transition(
-                ConnectionEvent.DiscoveryUnavailable("No matching device was found"),
-            )
-
-        // then the state includes the no-device failure:
-        assertEquals(ConnectionPhase.UNAVAILABLE, unavailable.phase)
-        assertEquals(ConnectionFailureCode.NO_DEVICE_FOUND, unavailable.failure?.code)
-    }
-
-    @Test
     fun `connection failure retains the selected device`() {
         // given a device that is being connected:
-        val machine = ConnectionStateMachine(clock)
-        machine.transition(ConnectionEvent.BeginDiscovery)
-        machine.transition(ConnectionEvent.DeviceDiscovered(device))
-        machine.transition(ConnectionEvent.BeginConnection(device))
+        val machine = connectingMachine()
 
         // when connection initialization fails:
         val failed = machine.transition(ConnectionEvent.ConnectionFailed("Connection refused"))
@@ -71,10 +51,7 @@ class ConnectionStateMachineTest {
     @Test
     fun `connection loss is visible and the device can be retried`() {
         // given a connected device:
-        val machine = ConnectionStateMachine(clock)
-        machine.transition(ConnectionEvent.BeginDiscovery)
-        machine.transition(ConnectionEvent.DeviceDiscovered(device))
-        machine.transition(ConnectionEvent.BeginConnection(device))
+        val machine = connectingMachine()
         machine.transition(ConnectionEvent.ConnectionEstablished)
 
         // when the device connection is lost:
@@ -90,11 +67,20 @@ class ConnectionStateMachineTest {
     }
 
     @Test
-    fun `connection events cannot skip discovery and connection opening`() {
-        // given a state machine in its starting state:
-        val machine = ConnectionStateMachine(clock)
+    fun `connection events cannot complete an already failed attempt`() {
+        // given a connection attempt that has already failed:
+        val machine =
+            ConnectionStateMachine(
+                clock = clock,
+                initialState =
+                    ConnectionState(
+                        phase = ConnectionPhase.FAILED,
+                        device = device,
+                        changedAt = now,
+                    ),
+            )
 
-        // when connection completion is reported before an opening attempt:
+        // when connection completion is reported without a new attempt:
         // then the invalid transition is rejected:
         assertFailsWith<InvalidConnectionTransition> {
             machine.transition(ConnectionEvent.ConnectionEstablished)

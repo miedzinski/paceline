@@ -2,11 +2,13 @@ package paceline.device.adapters.bluetooth
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
+import paceline.device.adapters.gatt.cyclingpower.CyclingPowerUuid
+import paceline.device.adapters.gatt.cyclingspeedcadence.CyclingSpeedCadenceUuid
 import paceline.device.adapters.gatt.ftms.FtmsUuid
 import paceline.device.adapters.gatt.heartrate.HeartRateUuid
-import paceline.device.domain.ConnectionFailureCode
 import paceline.device.domain.DeviceDiscoveryCandidate
 import paceline.device.domain.DeviceEndpoint
+import paceline.device.domain.DiscoveryFailureCode
 import paceline.device.ports.BluetoothDiscovery
 import paceline.device.ports.DeviceDiscoveryResult
 
@@ -23,6 +25,8 @@ class BluetoothDeviceDiscovery(
                     .discover(
                         setOf(
                             FtmsUuid.FITNESS_MACHINE_SERVICE,
+                            CyclingPowerUuid.CYCLING_POWER_SERVICE,
+                            CyclingSpeedCadenceUuid.CYCLING_SPEED_CADENCE_SERVICE,
                             HeartRateUuid.HEART_RATE_SERVICE,
                         ),
                     ).map { candidate ->
@@ -51,7 +55,7 @@ class BluetoothDeviceDiscovery(
             }
         } catch (exception: Exception) {
             DeviceDiscoveryResult.Failed(
-                code = ConnectionFailureCode.DISCOVERY_ERROR,
+                code = DiscoveryFailureCode.DISCOVERY_ERROR,
                 message = exception.message ?: "Bluetooth discovery failed",
             )
         }

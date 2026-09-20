@@ -12,12 +12,15 @@ import { EquipmentButton } from "@/components/equipment-button";
 import { EquipmentSheet } from "@/components/equipment-sheet";
 import { PacelineLogo } from "@/components/paceline-logo";
 import { AppShellContext, type AppShellContextValue } from "@/lib/app-shell";
+import { rolesAssignedToSource } from "@/lib/ride-equipment";
 import { cn } from "@/lib/utils";
 import type {
     AthleteProfile,
-    DeviceConnectionResponse,
+    DeviceConnectionsResponse,
     DeviceDiscoveryResponse,
     LibraryWorkout,
+    RideEquipmentResponse,
+    RideRole,
     TodayWorkoutsResponse,
     TrainingSessionResponse,
 } from "@/types";
@@ -25,15 +28,9 @@ import type {
 const connectionPollIntervalMs = 2_000;
 const sessionPollIntervalMs = 1_000;
 
-function createReadyConnection(): DeviceConnectionResponse {
+function createReadyConnection(): DeviceConnectionsResponse {
     return {
-        state: "READY",
-        changedAt: new Date().toISOString(),
-        device: null,
-        failure: null,
-        telemetry: null,
         connections: [],
-        heartRateSources: [],
     };
 }
 
@@ -106,6 +103,11 @@ export function AppLayout() {
     const [connectingDeviceId, setConnectingDeviceId] = useState<string | null>(
         null,
     );
+    const [equipment, setEquipment] = useState<RideEquipmentResponse | null>(
+        null,
+    );
+    const [equipmentLoading, setEquipmentLoading] = useState(false);
+    const [equipmentError, setEquipmentError] = useState<string | null>(null);
     const [isEquipmentOpen, setIsEquipmentOpen] = useState(false);
     const [actionError, setActionError] = useState<string | null>(null);
 
@@ -132,6 +134,38 @@ export function AppLayout() {
             window.clearInterval(pollHandle);
         };
     }, [refreshConnection]);
+
+    const connectionSignature = useMemo(
+        () =>
+            connection.connections
+                .map((item) =>
+                    [
+                        item.id,
+                        item.state,
+                        [...item.capabilities].sort().join(","),
+                    ].join(":"),
+                )
+                .sort()
+                .join("|"),
+        [connection.connections],
+    );
+
+    const refreshEquipment = useCallback(async () => {
+        setEquipmentLoading(true);
+        try {
+            setEquipment(await trainingApi.getEquipment());
+            setEquipmentError(null);
+        } catch (error) {
+            setEquipmentError(displayError(error));
+        } finally {
+            setEquipmentLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        const handle = window.setTimeout(() => void refreshEquipment(), 0);
+        return () => window.clearTimeout(handle);
+    }, [connectionSignature, isEquipmentOpen, isRide, refreshEquipment]);
 
     useEffect(() => {
         if (isRide) {
@@ -267,16 +301,59 @@ export function AppLayout() {
 
     const disconnectDevice = useCallback(
         async (connectionId: string) => {
+            const assignedRoles = rolesAssignedToSource(
+                equipment,
+                connectionId,
+            );
             setActionError(null);
             try {
                 await deviceApi.disconnect(connectionId);
                 await refreshConnection();
+                let roleClearError: unknown = null;
+                for (const role of assignedRoles) {
+                    try {
+                        setEquipment(
+                            await trainingApi.clearEquipmentRole(role),
+                        );
+                    } catch (error) {
+                        roleClearError ??= error;
+                    }
+                }
+                await refreshEquipment();
+                if (roleClearError !== null) {
+                    throw roleClearError;
+                }
             } catch (error) {
                 setActionError(displayError(error));
             }
         },
-        [refreshConnection],
+        [equipment, refreshConnection, refreshEquipment],
     );
+
+    const selectEquipmentRole = useCallback(
+        async (role: RideRole, sourceId: string) => {
+            setActionError(null);
+            try {
+                setEquipment(
+                    await trainingApi.selectEquipmentRole(role, sourceId),
+                );
+                setEquipmentError(null);
+            } catch (error) {
+                setActionError(displayError(error));
+            }
+        },
+        [],
+    );
+
+    const clearEquipmentRole = useCallback(async (role: RideRole) => {
+        setActionError(null);
+        try {
+            setEquipment(await trainingApi.clearEquipmentRole(role));
+            setEquipmentError(null);
+        } catch (error) {
+            setActionError(displayError(error));
+        }
+    }, []);
 
     const contextValue = useMemo<AppShellContextValue>(
         () => ({
@@ -291,6 +368,9 @@ export function AppLayout() {
             discovery,
             isDiscovering,
             connectingDeviceId,
+            equipment,
+            equipmentLoading,
+            equipmentError,
             isEquipmentOpen,
             actionError,
             openEquipment,
@@ -298,6 +378,9 @@ export function AppLayout() {
             discoverDevices,
             connectDevice,
             disconnectDevice,
+            refreshEquipment,
+            selectEquipmentRole,
+            clearEquipmentRole,
             refreshConnection,
             refreshPlan,
             refreshLibrary,
@@ -308,9 +391,13 @@ export function AppLayout() {
             connectDevice,
             connectingDeviceId,
             connection,
+            clearEquipmentRole,
             discoverDevices,
             discovery,
             disconnectDevice,
+            equipment,
+            equipmentError,
+            equipmentLoading,
             isDiscovering,
             isEquipmentOpen,
             isLibraryLoading,
@@ -321,8 +408,10 @@ export function AppLayout() {
             planError,
             profile,
             refreshConnection,
+            refreshEquipment,
             refreshLibrary,
             refreshPlan,
+            selectEquipmentRole,
             today,
         ],
     );
@@ -351,6 +440,7 @@ export function AppLayout() {
                                 ) : null}
                                 <EquipmentButton
                                     connection={connection}
+                                    equipment={equipment}
                                     onClick={openEquipment}
                                 />
                             </div>

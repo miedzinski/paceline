@@ -6,7 +6,7 @@ data class AdvertisementOption(
 )
 
 data class DiscoverySnapshot(
-    val state: ConnectionState,
+    val state: DiscoveryState,
     val devices: List<AdvertisementOption>,
-    val failure: ConnectionFailure? = null,
+    val failure: DiscoveryFailure? = null,
 )

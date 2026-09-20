@@ -1,6 +1,6 @@
 package paceline.training.domain
 
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.WorkoutStepCompletion
 import paceline.workout.domain.WorkoutStepTarget
@@ -18,7 +18,7 @@ class WorkoutExecution {
     fun attach(
         workout: ExecutableWorkout,
         progress: TrainingWorkoutProgress,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ) {
         activeWorkout = workout
         resetDistanceTracking(progress, telemetry)
@@ -82,7 +82,7 @@ class WorkoutExecution {
     fun isComplete(
         progress: TrainingWorkoutProgress,
         now: Instant,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ): Boolean =
         when (val completion = progress.step.completion) {
             is WorkoutStepCompletion.Time -> {
@@ -134,14 +134,14 @@ class WorkoutExecution {
 
     fun beginStep(
         progress: TrainingWorkoutProgress,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ) {
         resetDistanceTracking(progress, telemetry)
     }
 
     fun captureDistanceProgressAtPause(
         progress: TrainingWorkoutProgress?,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ) {
         if (progress == null || progress.completed || progress.step.completion !is WorkoutStepCompletion.Distance) {
             stepDistanceProgressAtPauseMeters = null
@@ -160,7 +160,7 @@ class WorkoutExecution {
 
     fun resumeDistanceTracking(
         progress: TrainingWorkoutProgress?,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ) {
         if (progress == null || progress.completed || progress.step.completion !is WorkoutStepCompletion.Distance) {
             stepDistanceProgressAtPauseMeters = null
@@ -183,7 +183,7 @@ class WorkoutExecution {
 
     private fun resetDistanceTracking(
         progress: TrainingWorkoutProgress,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ) {
         stepDistanceProgressAtPauseMeters = null
         stepDistanceStartMeters =

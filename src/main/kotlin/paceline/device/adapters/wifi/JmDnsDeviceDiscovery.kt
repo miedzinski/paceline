@@ -3,9 +3,9 @@ package paceline.device.adapters.wifi
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import paceline.device.config.DeviceProperties
-import paceline.device.domain.ConnectionFailureCode
 import paceline.device.domain.DeviceDiscoveryCandidate
 import paceline.device.domain.DeviceEndpoint
+import paceline.device.domain.DiscoveryFailureCode
 import paceline.device.ports.DeviceDiscoveryResult
 import paceline.device.ports.WifiDiscovery
 import javax.jmdns.JmDNS
@@ -42,7 +42,7 @@ class JmDnsDeviceDiscovery(
             }
         } catch (exception: Exception) {
             DeviceDiscoveryResult.Failed(
-                code = ConnectionFailureCode.DISCOVERY_ERROR,
+                code = DiscoveryFailureCode.DISCOVERY_ERROR,
                 message = exception.message ?: "mDNS discovery failed",
             )
         }

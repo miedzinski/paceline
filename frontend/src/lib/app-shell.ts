@@ -1,14 +1,16 @@
 import { createContext, useContext } from "react";
 import type {
     AthleteProfile,
-    DeviceConnectionResponse,
+    DeviceConnectionsResponse,
     DeviceDiscoveryResponse,
     LibraryWorkout,
+    RideEquipmentResponse,
+    RideRole,
     TodayWorkoutsResponse,
 } from "@/types";
 
 export interface AppShellContextValue {
-    connection: DeviceConnectionResponse;
+    connection: DeviceConnectionsResponse;
     profile: AthleteProfile | null;
     today: TodayWorkoutsResponse | null;
     isPlanLoading: boolean;
@@ -19,6 +21,9 @@ export interface AppShellContextValue {
     discovery: DeviceDiscoveryResponse | null;
     isDiscovering: boolean;
     connectingDeviceId: string | null;
+    equipment: RideEquipmentResponse | null;
+    equipmentLoading: boolean;
+    equipmentError: string | null;
     isEquipmentOpen: boolean;
     actionError: string | null;
     openEquipment: () => void;
@@ -26,6 +31,9 @@ export interface AppShellContextValue {
     discoverDevices: () => Promise<void>;
     connectDevice: (deviceId: string) => Promise<void>;
     disconnectDevice: (connectionId: string) => Promise<void>;
+    refreshEquipment: () => Promise<void>;
+    selectEquipmentRole: (role: RideRole, sourceId: string) => Promise<void>;
+    clearEquipmentRole: (role: RideRole) => Promise<void>;
     refreshConnection: () => Promise<void>;
     refreshPlan: () => Promise<void>;
     refreshLibrary: () => Promise<void>;

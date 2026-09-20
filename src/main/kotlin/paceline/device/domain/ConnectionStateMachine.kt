@@ -4,26 +4,11 @@ import java.time.Clock
 import java.time.Instant
 
 sealed interface ConnectionEvent {
-    data object BeginDiscovery : ConnectionEvent
-
-    data class DeviceDiscovered(
-        val device: DeviceAdvertisement,
-    ) : ConnectionEvent
-
     data class BeginConnection(
         val device: DeviceAdvertisement,
     ) : ConnectionEvent
 
     data object ConnectionEstablished : ConnectionEvent
-
-    data class DiscoveryUnavailable(
-        val message: String,
-    ) : ConnectionEvent
-
-    data class DiscoveryFailed(
-        val code: ConnectionFailureCode,
-        val message: String,
-    ) : ConnectionEvent
 
     data class ConnectionFailed(
         val message: String,
@@ -41,9 +26,9 @@ class InvalidConnectionTransition(
 
 class ConnectionStateMachine(
     private val clock: Clock = Clock.systemUTC(),
-    initialState: ConnectionState? = null,
+    initialState: ConnectionState,
 ) {
-    private var current: ConnectionState = initialState ?: ConnectionState.ready(clock.instant())
+    private var current: ConnectionState = initialState
 
     @Synchronized
     fun current(): ConnectionState = current
@@ -52,37 +37,8 @@ class ConnectionStateMachine(
     fun transition(event: ConnectionEvent): ConnectionState {
         val next =
             when (event) {
-                ConnectionEvent.BeginDiscovery -> {
-                    when (current.phase) {
-                        ConnectionPhase.READY,
-                        ConnectionPhase.DISCOVERED,
-                        ConnectionPhase.UNAVAILABLE,
-                        ConnectionPhase.FAILED,
-                        ConnectionPhase.DISCONNECTED,
-                        -> state(ConnectionPhase.DISCOVERING)
-
-                        else -> invalid(event)
-                    }
-                }
-
-                is ConnectionEvent.DeviceDiscovered -> {
-                    when (current.phase) {
-                        ConnectionPhase.DISCOVERING -> {
-                            state(
-                                phase = ConnectionPhase.DISCOVERED,
-                                device = event.device,
-                            )
-                        }
-
-                        else -> {
-                            invalid(event)
-                        }
-                    }
-                }
-
                 is ConnectionEvent.BeginConnection -> {
                     when (current.phase) {
-                        ConnectionPhase.DISCOVERED,
                         ConnectionPhase.FAILED,
                         ConnectionPhase.DISCONNECTED,
                         -> state(ConnectionPhase.CONNECTING, device = event.device)
@@ -95,40 +51,6 @@ class ConnectionStateMachine(
                     when (current.phase) {
                         ConnectionPhase.CONNECTING -> {
                             state(ConnectionPhase.CONNECTED, device = current.device)
-                        }
-
-                        else -> {
-                            invalid(event)
-                        }
-                    }
-                }
-
-                is ConnectionEvent.DiscoveryUnavailable -> {
-                    when (current.phase) {
-                        ConnectionPhase.DISCOVERING -> {
-                            state(
-                                phase = ConnectionPhase.UNAVAILABLE,
-                                failure =
-                                    ConnectionFailure(
-                                        code = ConnectionFailureCode.NO_DEVICE_FOUND,
-                                        message = event.message,
-                                    ),
-                            )
-                        }
-
-                        else -> {
-                            invalid(event)
-                        }
-                    }
-                }
-
-                is ConnectionEvent.DiscoveryFailed -> {
-                    when (current.phase) {
-                        ConnectionPhase.DISCOVERING -> {
-                            state(
-                                phase = ConnectionPhase.FAILED,
-                                failure = ConnectionFailure(event.code, event.message),
-                            )
                         }
 
                         else -> {
@@ -184,7 +106,7 @@ class ConnectionStateMachine(
 
     private fun state(
         phase: ConnectionPhase,
-        device: DeviceAdvertisement? = null,
+        device: DeviceAdvertisement = current.device,
         failure: ConnectionFailure? = null,
     ): ConnectionState =
         ConnectionState(

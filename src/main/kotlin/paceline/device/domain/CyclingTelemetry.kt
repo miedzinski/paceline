@@ -2,7 +2,7 @@ package paceline.device.domain
 
 import java.time.Instant
 
-data class IndoorBikeTelemetry(
+data class CyclingTelemetry(
     val powerWatts: Int? = null,
     val cadenceRpm: Double? = null,
     val speedKph: Double? = null,

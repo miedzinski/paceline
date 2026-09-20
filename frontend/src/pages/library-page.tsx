@@ -10,6 +10,7 @@ import { useNavigate } from "react-router";
 import { WorkoutCard } from "@/components/workout-card";
 import { WorkoutDetailSheet } from "@/components/workout-detail-sheet";
 import { useAppShell } from "@/lib/app-shell";
+import { isResistanceSelected } from "@/lib/ride-equipment";
 import type { WorkoutItem } from "@/lib/workouts";
 import { cn } from "@/lib/utils";
 
@@ -21,6 +22,7 @@ export function LibraryPage() {
         isLibraryLoading: isLoading,
         libraryError: error,
         refreshLibrary,
+        equipment,
     } = useAppShell();
     const [query, setQuery] = useState("");
     const [filter, setFilter] = useState("All");
@@ -66,6 +68,7 @@ export function LibraryPage() {
             state: {
                 workoutSelection: selection,
                 workout,
+                setupRequired: !isResistanceSelected(equipment),
             },
         });
         setSelectedWorkout(null);

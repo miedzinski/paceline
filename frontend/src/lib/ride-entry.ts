@@ -1,25 +1,37 @@
 import type { TrainingSessionState, WorkoutSelection } from "@/types";
 
-export function canAutoStartSelectedWorkout({
+export type WorkoutEntryMode = "CHECKING" | "SETUP" | "AUTO_STARTING";
+
+export function workoutEntryMode({
     sessionLoaded,
+    equipmentLoaded,
     sessionState,
     workoutSelection,
     hasErgControl,
-    heartRateSourceCount,
-    selectedHeartRateSourceId,
+    setupRequired,
 }: {
     sessionLoaded: boolean;
+    equipmentLoaded: boolean;
     sessionState: TrainingSessionState;
     workoutSelection: WorkoutSelection | null;
     hasErgControl: boolean;
-    heartRateSourceCount: number;
-    selectedHeartRateSourceId: string | null;
-}): boolean {
-    return (
-        sessionLoaded &&
-        sessionState === "NOT_STARTED" &&
-        workoutSelection !== null &&
-        hasErgControl &&
-        (heartRateSourceCount <= 1 || selectedHeartRateSourceId !== null)
-    );
+    setupRequired: boolean;
+}): WorkoutEntryMode {
+    if (workoutSelection === null) {
+        return "SETUP";
+    }
+
+    if (setupRequired) {
+        return "SETUP";
+    }
+
+    if (!sessionLoaded || !equipmentLoaded) {
+        return "CHECKING";
+    }
+
+    if (sessionState !== "NOT_STARTED" || !hasErgControl) {
+        return "SETUP";
+    }
+
+    return "AUTO_STARTING";
 }

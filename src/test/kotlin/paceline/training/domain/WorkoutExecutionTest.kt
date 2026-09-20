@@ -1,6 +1,6 @@
 package paceline.training.domain
 
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
 import paceline.workout.domain.ExecutableSport
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
@@ -86,8 +86,8 @@ class WorkoutExecutionTest {
             target = target,
         )
 
-    private fun telemetry(distanceMeters: Double): IndoorBikeTelemetry =
-        IndoorBikeTelemetry(
+    private fun telemetry(distanceMeters: Double): CyclingTelemetry =
+        CyclingTelemetry(
             powerWatts = 200,
             cadenceRpm = 90.0,
             speedKph = 25.0,

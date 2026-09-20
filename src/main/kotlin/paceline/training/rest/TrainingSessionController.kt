@@ -2,6 +2,7 @@ package paceline.training.rest
 
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
+import org.springframework.web.bind.annotation.DeleteMapping
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
@@ -10,9 +11,22 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
+import paceline.device.domain.CyclingTelemetry
+import paceline.device.domain.HeartRateTelemetry
+import paceline.rest.TelemetryProjectionResponse
+import paceline.rest.toResponse
 import paceline.training.domain.ErgProtectionState
-import paceline.training.domain.HeartRateSourceNotFoundException
-import paceline.training.domain.HeartRateSourceSelectionRequiredException
+import paceline.training.domain.RideEquipmentSelection
+import paceline.training.domain.RideEquipmentSelectionRequiredException
+import paceline.training.domain.RideEquipmentState
+import paceline.training.domain.RideEquipmentUnavailableException
+import paceline.training.domain.RideReadinessReason
+import paceline.training.domain.RideRole
+import paceline.training.domain.RideRoleState
+import paceline.training.domain.RideSourceDescriptor
+import paceline.training.domain.RideSourceIncompatibleException
+import paceline.training.domain.RideSourceNotFoundException
+import paceline.training.domain.RideSourceUnavailableException
 import paceline.training.domain.TrainingActivityUploadUnavailableException
 import paceline.training.domain.TrainingSessionAlreadyActiveException
 import paceline.training.domain.TrainingSessionCoordinator
@@ -57,14 +71,20 @@ class TrainingSessionController(
             coordinator
                 .start(
                     workout = workout,
-                    heartRateSourceId = request?.heartRateSourceId,
+                    equipment = request?.equipment?.toDomain(),
                 ).toResponse()
         } catch (exception: TrainingSessionAlreadyActiveException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
-        } catch (exception: HeartRateSourceSelectionRequiredException) {
+        } catch (exception: RideEquipmentSelectionRequiredException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
-        } catch (exception: HeartRateSourceNotFoundException) {
+        } catch (exception: RideEquipmentUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: RideSourceNotFoundException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: RideSourceUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: RideSourceIncompatibleException) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, exception.message, exception)
         } catch (exception: WorkoutNotFoundException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
         } catch (exception: WorkoutNotExecutableException) {
@@ -78,23 +98,69 @@ class TrainingSessionController(
     @GetMapping("/current", produces = [MediaType.APPLICATION_JSON_VALUE])
     fun getCurrentTrainingSession(): TrainingSessionResponse = coordinator.current().toResponse()
 
+    @GetMapping("/equipment", produces = [MediaType.APPLICATION_JSON_VALUE])
+    fun getRideEquipment(): RideEquipmentResponse = coordinator.equipment().toResponse()
+
     @PutMapping(
-        "/{sessionId}/heart-rate-source",
+        "/equipment",
         consumes = [MediaType.APPLICATION_JSON_VALUE],
         produces = [MediaType.APPLICATION_JSON_VALUE],
     )
-    fun selectHeartRateSource(
-        @PathVariable sessionId: UUID,
-        @RequestBody request: SelectHeartRateSourceRequest,
-    ): TrainingSessionResponse =
+    fun selectRideEquipment(
+        @RequestBody request: RideEquipmentRequest,
+    ): RideEquipmentResponse =
         try {
-            coordinator.selectHeartRateSource(sessionId, request.sourceId).toResponse()
-        } catch (exception: TrainingSessionNotActiveException) {
+            coordinator.selectEquipment(request.toDomain()).toResponse()
+        } catch (exception: TrainingSessionAlreadyActiveException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
-        } catch (exception: TrainingSessionMismatchException) {
+        } catch (exception: RideSourceNotFoundException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
-        } catch (exception: HeartRateSourceNotFoundException) {
+        } catch (exception: RideSourceUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: RideSourceIncompatibleException) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, exception.message, exception)
+        }
+
+    @PutMapping(
+        "/equipment/{role}",
+        consumes = [MediaType.APPLICATION_JSON_VALUE],
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun selectRideRole(
+        @PathVariable role: String,
+        @RequestBody request: RideRoleRequest,
+    ): RideEquipmentResponse =
+        try {
+            val rideRole = role.toRideRole()
+            if (request.sourceId == null) {
+                coordinator.clearEquipmentRole(rideRole)
+            } else {
+                coordinator
+                    .selectEquipment(
+                        RideEquipmentSelection().withSource(rideRole, request.sourceId),
+                    )
+            }.toResponse()
+        } catch (exception: TrainingSessionAlreadyActiveException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: RideSourceNotFoundException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
+        } catch (exception: RideSourceUnavailableException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
+        } catch (exception: RideSourceIncompatibleException) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, exception.message, exception)
+        }
+
+    @DeleteMapping(
+        "/equipment/{role}",
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun clearRideRole(
+        @PathVariable role: String,
+    ): RideEquipmentResponse =
+        try {
+            coordinator.clearEquipmentRole(role.toRideRole()).toResponse()
+        } catch (exception: TrainingSessionAlreadyActiveException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, exception.message, exception)
         }
 
     @PutMapping(
@@ -256,11 +322,18 @@ class TrainingSessionController(
 
 data class StartTrainingSessionRequest(
     val workout: WorkoutSelectionRequest? = null,
+    val equipment: RideEquipmentRequest? = null,
+)
+
+data class RideEquipmentRequest(
+    val controlSourceId: String? = null,
+    val powerSourceId: String? = null,
+    val cadenceSourceId: String? = null,
     val heartRateSourceId: String? = null,
 )
 
-data class SelectHeartRateSourceRequest(
-    val sourceId: String,
+data class RideRoleRequest(
+    val sourceId: String? = null,
 )
 
 data class WorkoutSelectionRequest(
@@ -290,10 +363,48 @@ data class TrainingSessionResponse(
     val trainerConnection: String,
     val trainerConnectionRetryAttempt: Int?,
     val trainerConnectionError: String?,
-    val heartRateSourceId: String?,
-    val heartRate: HeartRateResponse?,
+    val telemetry: TrainingSessionTelemetryResponse?,
     val workout: TrainingWorkoutResponse?,
     val activityUpload: TrainingActivityUploadResponse,
+    val equipment: RideEquipmentResponse? = null,
+)
+
+data class RideEquipmentResponse(
+    val readiness: String,
+    val ready: Boolean,
+    val readinessReasons: List<RideReadinessReasonResponse>,
+    val assignments: RideEquipmentAssignmentsResponse,
+    val roles: List<RideRoleResponse>,
+    val sources: List<RideSourceResponse>,
+)
+
+data class RideReadinessReasonResponse(
+    val code: String,
+    val role: String,
+    val sourceId: String?,
+    val compatibleSourceIds: List<String>,
+    val message: String,
+)
+
+data class RideEquipmentAssignmentsResponse(
+    val controlSourceId: String?,
+    val powerSourceId: String?,
+    val cadenceSourceId: String?,
+    val heartRateSourceId: String?,
+)
+
+data class RideRoleResponse(
+    val role: String,
+    val sourceId: String?,
+    val status: String,
+    val compatibleSourceIds: List<String>,
+)
+
+data class RideSourceResponse(
+    val id: String,
+    val state: String,
+    val name: String?,
+    val capabilities: Set<String>,
 )
 
 data class ErgProtectionResponse(
@@ -308,6 +419,19 @@ data class ErgProtectionResponse(
 data class HeartRateResponse(
     val heartRateBpm: Int,
     val receivedAt: Instant,
+)
+
+data class SessionCyclingTelemetryResponse(
+    val powerWatts: Int?,
+    val cadenceRpm: Double?,
+    val speedKph: Double?,
+    val distanceMeters: Double?,
+    val receivedAt: Instant,
+)
+
+data class TrainingSessionTelemetryResponse(
+    val cycling: TelemetryProjectionResponse<SessionCyclingTelemetryResponse>,
+    val heartRate: TelemetryProjectionResponse<HeartRateResponse>,
 )
 
 data class TrainingActivityUploadResponse(
@@ -365,6 +489,14 @@ private fun WorkoutSelectionRequest.toDomain(): WorkoutSelection =
         reference = WorkoutSourceReference(provider = provider, id = sourceId),
     )
 
+private fun RideEquipmentRequest.toDomain(): RideEquipmentSelection =
+    RideEquipmentSelection(
+        controlSourceId = controlSourceId,
+        powerSourceId = powerSourceId,
+        cadenceSourceId = cadenceSourceId,
+        heartRateSourceId = heartRateSourceId,
+    )
+
 private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
     TrainingSessionResponse(
         state = phase.name,
@@ -379,12 +511,11 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
         trainerConnection = trainerConnection.name,
         trainerConnectionRetryAttempt = trainerConnectionRetryAttempt,
         trainerConnectionError = trainerConnectionError,
-        heartRateSourceId = heartRateSourceId,
-        heartRate =
-            heartRate?.let { telemetry ->
-                HeartRateResponse(
-                    heartRateBpm = telemetry.heartRateBpm,
-                    receivedAt = telemetry.receivedAt,
+        telemetry =
+            telemetry?.let { snapshot ->
+                TrainingSessionTelemetryResponse(
+                    cycling = snapshot.cycling.toResponse(CyclingTelemetry::toResponse),
+                    heartRate = snapshot.heartRate.toResponse(HeartRateTelemetry::toResponse),
                 )
             },
         workout = workout?.toResponse(),
@@ -394,6 +525,66 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
                 remoteActivityId = activityUpload.remoteActivityId,
                 error = activityUpload.error,
             ),
+        equipment = equipment?.toResponse(),
+    )
+
+private fun CyclingTelemetry.toResponse(): SessionCyclingTelemetryResponse =
+    SessionCyclingTelemetryResponse(
+        powerWatts = powerWatts,
+        cadenceRpm = cadenceRpm,
+        speedKph = speedKph,
+        distanceMeters = distanceMeters,
+        receivedAt = receivedAt,
+    )
+
+private fun HeartRateTelemetry.toResponse(): HeartRateResponse =
+    HeartRateResponse(
+        heartRateBpm = heartRateBpm,
+        receivedAt = receivedAt,
+    )
+
+private fun RideEquipmentState.toResponse(): RideEquipmentResponse =
+    RideEquipmentResponse(
+        readiness = readiness.name,
+        ready = ready,
+        readinessReasons = readinessReasons.map(RideReadinessReason::toResponse),
+        assignments =
+            RideEquipmentAssignmentsResponse(
+                controlSourceId = selection.controlSourceId,
+                powerSourceId = selection.powerSourceId,
+                cadenceSourceId = selection.cadenceSourceId,
+                heartRateSourceId = selection.heartRateSourceId,
+            ),
+        roles =
+            RideRole.entries.map { role ->
+                role(role).toResponse()
+            },
+        sources = sources.map(RideSourceDescriptor::toResponse),
+    )
+
+private fun RideReadinessReason.toResponse(): RideReadinessReasonResponse =
+    RideReadinessReasonResponse(
+        code = code.name,
+        role = role.name,
+        sourceId = sourceId,
+        compatibleSourceIds = compatibleSourceIds,
+        message = message,
+    )
+
+private fun RideRoleState.toResponse(): RideRoleResponse =
+    RideRoleResponse(
+        role = role.name,
+        sourceId = sourceId,
+        status = status.name,
+        compatibleSourceIds = compatibleSourceIds,
+    )
+
+private fun RideSourceDescriptor.toResponse(): RideSourceResponse =
+    RideSourceResponse(
+        id = id,
+        state = state.name,
+        name = device?.name,
+        capabilities = capabilities.map { capability -> capability.name }.toSet(),
     )
 
 private fun ErgProtectionState.toResponse(): ErgProtectionResponse =
@@ -479,3 +670,29 @@ private fun WorkoutTargetSummary.toResponse(): TrainingSourceTargetResponse =
         units = units,
         target = target,
     )
+
+private fun String.toRideRole(): RideRole =
+    when (trim().uppercase().replace('-', '_')) {
+        "CONTROL", "RESISTANCE_CONTROL" -> {
+            RideRole.RESISTANCE_CONTROL
+        }
+
+        "POWER" -> {
+            RideRole.POWER
+        }
+
+        "CADENCE" -> {
+            RideRole.CADENCE
+        }
+
+        "HEART_RATE" -> {
+            RideRole.HEART_RATE
+        }
+
+        else -> {
+            throw ResponseStatusException(
+                HttpStatus.BAD_REQUEST,
+                "Unknown ride role '$this'",
+            )
+        }
+    }

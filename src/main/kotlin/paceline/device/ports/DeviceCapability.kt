@@ -1,18 +1,21 @@
 package paceline.device.ports
 
+import paceline.device.domain.CyclingMeasurement
+import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.HeartRateTelemetry
-import paceline.device.domain.IndoorBikeTelemetry
 
 interface DeviceCapability
 
-fun interface IndoorBikeTelemetryListener {
-    fun onTelemetry(telemetry: IndoorBikeTelemetry)
+fun interface CyclingTelemetryListener {
+    fun onTelemetry(telemetry: CyclingTelemetry)
 }
 
-interface IndoorBikeTelemetrySource : DeviceCapability {
-    fun addTelemetryListener(listener: IndoorBikeTelemetryListener): AutoCloseable = AutoCloseable { }
+interface CyclingTelemetrySource : DeviceCapability {
+    val measurements: Set<CyclingMeasurement>
 
-    fun latestTelemetry(): IndoorBikeTelemetry? = null
+    fun addTelemetryListener(listener: CyclingTelemetryListener): AutoCloseable = AutoCloseable { }
+
+    fun latestTelemetry(): CyclingTelemetry? = null
 }
 
 fun interface HeartRateTelemetryListener {
@@ -25,7 +28,7 @@ interface HeartRateTelemetrySource : DeviceCapability {
     fun latestHeartRate(): HeartRateTelemetry? = null
 }
 
-interface IndoorBikePowerControl :
+interface TrainerControl :
     DeviceCapability,
     AutoCloseable {
     fun requestControl()

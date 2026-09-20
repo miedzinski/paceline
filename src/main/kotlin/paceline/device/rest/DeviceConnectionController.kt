@@ -10,18 +10,21 @@ import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
 import paceline.device.domain.AdvertisementOption
-import paceline.device.domain.ConnectedDeviceSnapshot
 import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionFailure
-import paceline.device.domain.ConnectionState
+import paceline.device.domain.ConnectionPhase
+import paceline.device.domain.ConnectionSnapshot
+import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.DeviceCapabilityType
 import paceline.device.domain.DeviceEndpoint
 import paceline.device.domain.DeviceTransport
+import paceline.device.domain.DiscoveryFailure
+import paceline.device.domain.DiscoveryPhase
 import paceline.device.domain.DiscoverySnapshot
-import paceline.device.domain.HeartRateSourceDescriptor
 import paceline.device.domain.HeartRateTelemetry
-import paceline.device.domain.IndoorBikeTelemetry
 import paceline.device.domain.NotDiscoveredException
+import paceline.rest.TelemetryProjectionResponse
+import paceline.rest.toResponse
 import java.time.Instant
 
 @RestController
@@ -32,18 +35,16 @@ class DeviceConnectionController(
     @GetMapping(produces = [MediaType.APPLICATION_JSON_VALUE])
     fun discoverDevices(): DeviceDiscoveryResponse = coordinator.discover().toResponse()
 
-    @GetMapping("/connection", produces = [MediaType.APPLICATION_JSON_VALUE])
-    fun getDeviceConnection(): DeviceConnectionResponse = coordinator.toResponse()
-
     @GetMapping("/connections", produces = [MediaType.APPLICATION_JSON_VALUE])
-    fun getDeviceConnections(): DeviceConnectionResponse = coordinator.toResponse()
+    fun getDeviceConnections(): DeviceConnectionsResponse = coordinator.toResponse()
 
     @PostMapping("/{deviceId}/connection", produces = [MediaType.APPLICATION_JSON_VALUE])
     fun connectDevice(
         @PathVariable("deviceId") deviceId: String,
-    ): DeviceConnectionResponse =
+    ): DeviceConnectionsResponse =
         try {
-            coordinator.toResponse(coordinator.connect(deviceId))
+            coordinator.connect(deviceId)
+            coordinator.toResponse()
         } catch (exception: NotDiscoveredException) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, exception.message, exception)
         }
@@ -61,7 +62,7 @@ class DeviceConnectionController(
 }
 
 data class DeviceDiscoveryResponse(
-    val state: String,
+    val state: DiscoveryPhase,
     val changedAt: Instant,
     val devices: List<DeviceResponse>,
     val failure: DeviceFailureResponse?,
@@ -76,41 +77,27 @@ data class DeviceResponse(
     val address: String?,
 )
 
-data class DeviceConnectionResponse(
-    val state: String,
-    val changedAt: Instant,
-    val device: ConnectedDeviceResponse?,
-    val failure: DeviceFailureResponse?,
-    val telemetry: IndoorBikeTelemetryResponse?,
-    val connections: List<ConnectedConnectionResponse> = emptyList(),
-    val heartRateSources: List<HeartRateSourceResponse> = emptyList(),
+data class DeviceConnectionsResponse(
+    val connections: List<DeviceConnectionResponse>,
 )
 
-data class ConnectedDeviceResponse(
+data class DeviceConnectionResponse(
+    val id: String,
+    val state: ConnectionPhase,
+    val changedAt: Instant,
+    val device: DeviceIdentityResponse,
+    val failure: DeviceFailureResponse?,
+    val telemetry: TelemetryProjectionResponse<CyclingTelemetryResponse>,
+    val heartRate: TelemetryProjectionResponse<DeviceHeartRateResponse>,
+    val capabilities: Set<DeviceCapabilityType>,
+)
+
+data class DeviceIdentityResponse(
     val name: String,
     val transport: DeviceTransport,
     val host: String?,
     val port: Int?,
     val address: String?,
-    val id: String? = null,
-)
-
-data class ConnectedConnectionResponse(
-    val id: String,
-    val state: String,
-    val changedAt: Instant,
-    val device: ConnectedDeviceResponse,
-    val failure: DeviceFailureResponse?,
-    val telemetry: IndoorBikeTelemetryResponse?,
-    val heartRate: DeviceHeartRateResponse?,
-    val capabilities: Set<String>,
-)
-
-data class HeartRateSourceResponse(
-    val id: String,
-    val device: ConnectedDeviceResponse,
-    val state: String,
-    val heartRate: DeviceHeartRateResponse?,
 )
 
 data class DeviceFailureResponse(
@@ -118,10 +105,11 @@ data class DeviceFailureResponse(
     val message: String,
 )
 
-data class IndoorBikeTelemetryResponse(
+data class CyclingTelemetryResponse(
     val powerWatts: Int?,
     val cadenceRpm: Double?,
     val speedKph: Double?,
+    val distanceMeters: Double?,
     val receivedAt: Instant,
 )
 
@@ -132,66 +120,27 @@ data class DeviceHeartRateResponse(
 
 private fun DiscoverySnapshot.toResponse(): DeviceDiscoveryResponse =
     DeviceDiscoveryResponse(
-        state = state.phase.name,
+        state = state.phase,
         changedAt = state.changedAt,
         devices = devices.map(AdvertisementOption::toResponse),
         failure = (failure ?: state.failure)?.toResponse(),
     )
 
-internal fun ConnectionState.toResponse(telemetry: IndoorBikeTelemetry? = null): DeviceConnectionResponse =
+internal fun ConnectionCoordinator.toResponse(): DeviceConnectionsResponse =
+    DeviceConnectionsResponse(
+        connections = connectionSnapshots().map(ConnectionSnapshot::toResponse),
+    )
+
+private fun ConnectionSnapshot.toResponse(): DeviceConnectionResponse =
     DeviceConnectionResponse(
-        state = phase.name,
+        id = id,
+        state = phase,
         changedAt = changedAt,
-        device = device?.let(::toConnectedDeviceResponse),
-        telemetry = telemetry?.toResponse(),
+        device = device.toResponse(),
         failure = failure?.toResponse(),
-    )
-
-internal fun ConnectionCoordinator.toResponse(stateOverride: ConnectionState? = null): DeviceConnectionResponse {
-    val currentState = stateOverride ?: current()
-    val snapshots = connectedDevices()
-    val snapshotForCurrentDevice =
-        snapshots.firstOrNull { snapshot ->
-            snapshot.state.device == currentState.device &&
-                snapshot.state.phase == currentState.phase
-        }
-    return DeviceConnectionResponse(
-        state = currentState.phase.name,
-        changedAt = currentState.changedAt,
-        device =
-            currentState.device?.let { device ->
-                toConnectedDeviceResponse(
-                    device = device,
-                    id = snapshotForCurrentDevice?.id,
-                )
-            },
-        failure = currentState.failure?.toResponse(),
-        telemetry =
-            (snapshotForCurrentDevice?.telemetry ?: if (stateOverride == null) currentTelemetry() else null)
-                ?.toResponse(),
-        connections = snapshots.map(ConnectedDeviceSnapshot::toResponse),
-        heartRateSources = heartRateSources().map { source -> source.toResponse(snapshots) },
-    )
-}
-
-private fun ConnectedDeviceSnapshot.toResponse(): ConnectedConnectionResponse =
-    ConnectedConnectionResponse(
-        id = id,
-        state = state.phase.name,
-        changedAt = state.changedAt,
-        device = toConnectedDeviceResponse(state.device!!, id),
-        failure = state.failure?.toResponse(),
-        telemetry = telemetry?.toResponse(),
-        heartRate = heartRate?.toResponse(),
-        capabilities = capabilities.map(DeviceCapabilityType::name).toSet(),
-    )
-
-private fun HeartRateSourceDescriptor.toResponse(snapshots: List<ConnectedDeviceSnapshot>): HeartRateSourceResponse =
-    HeartRateSourceResponse(
-        id = id,
-        device = toConnectedDeviceResponse(device, id),
-        state = state.name,
-        heartRate = snapshots.firstOrNull { snapshot -> snapshot.id == id }?.heartRate?.toResponse(),
+        telemetry = telemetry.toResponse(CyclingTelemetry::toResponse),
+        heartRate = heartRate.toResponse(HeartRateTelemetry::toResponse),
+        capabilities = capabilities,
     )
 
 private fun ConnectionFailure.toResponse(): DeviceFailureResponse =
@@ -200,11 +149,18 @@ private fun ConnectionFailure.toResponse(): DeviceFailureResponse =
         message = message,
     )
 
-private fun IndoorBikeTelemetry.toResponse(): IndoorBikeTelemetryResponse =
-    IndoorBikeTelemetryResponse(
+private fun DiscoveryFailure.toResponse(): DeviceFailureResponse =
+    DeviceFailureResponse(
+        code = code.name,
+        message = message,
+    )
+
+private fun CyclingTelemetry.toResponse(): CyclingTelemetryResponse =
+    CyclingTelemetryResponse(
         powerWatts = powerWatts,
         cadenceRpm = cadenceRpm,
         speedKph = speedKph,
+        distanceMeters = distanceMeters,
         receivedAt = receivedAt,
     )
 
@@ -224,20 +180,13 @@ private fun AdvertisementOption.toResponse(): DeviceResponse =
         address = device.endpoint.addressOrNull(),
     )
 
-private fun toConnectedDeviceResponse(device: paceline.device.domain.DeviceAdvertisement): ConnectedDeviceResponse =
-    toConnectedDeviceResponse(device, null)
-
-private fun toConnectedDeviceResponse(
-    device: paceline.device.domain.DeviceAdvertisement,
-    id: String?,
-): ConnectedDeviceResponse =
-    ConnectedDeviceResponse(
-        name = device.name,
-        transport = device.endpoint.transport,
-        host = device.endpoint.hostOrNull(),
-        port = device.endpoint.portOrNull(),
-        address = device.endpoint.addressOrNull(),
-        id = id,
+private fun paceline.device.domain.DeviceAdvertisement.toResponse(): DeviceIdentityResponse =
+    DeviceIdentityResponse(
+        name = name,
+        transport = endpoint.transport,
+        host = endpoint.hostOrNull(),
+        port = endpoint.portOrNull(),
+        address = endpoint.addressOrNull(),
     )
 
 private fun DeviceEndpoint.hostOrNull(): String? =

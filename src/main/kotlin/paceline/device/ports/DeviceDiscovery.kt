@@ -1,7 +1,7 @@
 package paceline.device.ports
 
-import paceline.device.domain.ConnectionFailureCode
 import paceline.device.domain.DeviceDiscoveryCandidate
+import paceline.device.domain.DiscoveryFailureCode
 
 sealed interface DeviceDiscoveryResult {
     data class Found(
@@ -15,7 +15,7 @@ sealed interface DeviceDiscoveryResult {
     data object NotFound : DeviceDiscoveryResult
 
     data class Failed(
-        val code: ConnectionFailureCode,
+        val code: DiscoveryFailureCode,
         val message: String,
     ) : DeviceDiscoveryResult
 }

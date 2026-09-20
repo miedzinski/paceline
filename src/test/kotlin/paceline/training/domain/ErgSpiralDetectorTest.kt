@@ -1,6 +1,6 @@
 package paceline.training.domain
 
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
 import paceline.training.config.ErgProtectionProperties
 import java.time.Duration
 import java.time.Instant
@@ -15,14 +15,14 @@ class ErgSpiralDetectorTest {
         ErgProtectionProperties(
             lowCadenceDuration = Duration.ofSeconds(2),
             recoveryDuration = Duration.ofSeconds(2),
-            telemetryFreshness = Duration.ofSeconds(3),
             targetChangeGracePeriod = Duration.ZERO,
         )
+    private val telemetryFreshness = Duration.ofSeconds(3)
 
     @Test
     fun `requires sustained low cadence before bailing out and sustained recovery before restoring`() {
         // given an ERG detector with separate low-cadence and recovery dwell periods:
-        val detector = ErgSpiralDetector(properties)
+        val detector = ErgSpiralDetector(properties, telemetryFreshness)
 
         // when cadence stays below the protection threshold and then rises above the recovery threshold:
         detector.reset(start)
@@ -61,7 +61,7 @@ class ErgSpiralDetectorTest {
     @Test
     fun `does not trigger for a steady low cadence workout above the bailout threshold`() {
         // given an ERG detector configured below an intentional fifty-rpm low-cadence interval:
-        val detector = ErgSpiralDetector(properties)
+        val detector = ErgSpiralDetector(properties, telemetryFreshness)
         detector.reset(start)
 
         // when the rider holds fifty rpm for longer than the low-cadence dwell:
@@ -80,7 +80,7 @@ class ErgSpiralDetectorTest {
     @Test
     fun `ignores missing and stale cadence`() {
         // given an ERG detector that only accepts recent cadence observations:
-        val detector = ErgSpiralDetector(properties)
+        val detector = ErgSpiralDetector(properties, telemetryFreshness)
         detector.reset(start)
 
         // when cadence is missing or older than the configured freshness window:
@@ -88,7 +88,7 @@ class ErgSpiralDetectorTest {
             detector.evaluate(
                 start.plusSeconds(5),
                 300,
-                IndoorBikeTelemetry(receivedAt = start.plusSeconds(5)),
+                CyclingTelemetry(receivedAt = start.plusSeconds(5)),
                 protectionActive = false,
             )
         val stale =
@@ -107,7 +107,7 @@ class ErgSpiralDetectorTest {
     @Test
     fun `resets the low cadence dwell when the target context is reset`() {
         // given a low cadence observation that has not yet reached the bailout dwell:
-        val detector = ErgSpiralDetector(properties)
+        val detector = ErgSpiralDetector(properties, telemetryFreshness)
         detector.reset(start)
         assertNull(
             detector.evaluate(
@@ -135,8 +135,8 @@ class ErgSpiralDetectorTest {
     private fun telemetry(
         receivedAt: Instant,
         cadenceRpm: Double,
-    ): IndoorBikeTelemetry =
-        IndoorBikeTelemetry(
+    ): CyclingTelemetry =
+        CyclingTelemetry(
             powerWatts = 200,
             cadenceRpm = cadenceRpm,
             speedKph = 25.0,

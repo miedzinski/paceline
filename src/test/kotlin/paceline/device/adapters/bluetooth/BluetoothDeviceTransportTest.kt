@@ -5,7 +5,7 @@ import paceline.device.adapters.gatt.GattCharacteristicProperty
 import paceline.device.adapters.gatt.GattService
 import paceline.device.adapters.gatt.ftms.FtmsUuid
 import paceline.device.domain.DeviceEndpoint
-import paceline.device.ports.IndoorBikeTelemetrySource
+import paceline.device.ports.CyclingTelemetrySource
 import paceline.testsupport.FakeBluetoothAccess
 import paceline.testsupport.FakeGattClient
 import paceline.testsupport.kickrCore2Device
@@ -41,7 +41,7 @@ class BluetoothDeviceTransportTest {
         // then the device session exposes the indoor-bike capability and preserves the endpoint:
         assertEquals(endpoint, bluetooth.connectedEndpoint)
         assertEquals(true, connection.connection.isOpen())
-        assertNotNull(connection.capability<IndoorBikeTelemetrySource>())
+        assertNotNull(connection.capability<CyclingTelemetrySource>())
         assertEquals(listOf(FtmsUuid.INDOOR_BIKE_DATA), gattClient.enabledNotifications)
         connection.close()
     }

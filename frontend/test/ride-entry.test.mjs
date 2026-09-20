@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canAutoStartSelectedWorkout } from "../src/lib/ride-entry.ts";
+import { workoutEntryMode } from "../src/lib/ride-entry.ts";
 
 const workoutSelection = {
     provider: "intervals.icu",
@@ -11,53 +11,49 @@ const workoutSelection = {
 function readiness(overrides = {}) {
     return {
         sessionLoaded: true,
+        equipmentLoaded: true,
         sessionState: "NOT_STARTED",
         workoutSelection,
         hasErgControl: true,
-        heartRateSourceCount: 1,
-        selectedHeartRateSourceId: "hr-1",
+        setupRequired: false,
         ...overrides,
     };
 }
 
-test("auto-starts a selected workout when the trainer is ready", () => {
-    // given a loaded not-started session with trainer control available:
-    // when the selected workout is checked for direct start:
-    const canStart = canAutoStartSelectedWorkout(readiness());
+test("starts a workout directly when control is already available", () => {
+    // given the initial session and equipment snapshots with trainer control:
+    // when the workout entry mode is resolved:
+    const mode = workoutEntryMode(readiness());
 
-    // then the setup screen can be skipped:
-    assert.equal(canStart, true);
+    // then the workout starts without showing session setup:
+    assert.equal(mode, "AUTO_STARTING");
 });
 
-test("keeps setup visible until a trainer with ERG control is connected", () => {
-    // given a selected workout without a controllable trainer:
-    // when the selected workout is checked for direct start:
-    const canStart = canAutoStartSelectedWorkout(
-        readiness({ hasErgControl: false }),
-    );
+test("opens setup when the workout starts without trainer control", () => {
+    // given the initial equipment snapshot has no controllable source:
+    // when the workout entry mode is resolved:
+    const mode = workoutEntryMode(readiness({ hasErgControl: false }));
 
-    // then the connection setup remains necessary:
-    assert.equal(canStart, false);
+    // then equipment setup is required:
+    assert.equal(mode, "SETUP");
 });
 
-test("keeps setup visible when multiple heart-rate sources need a choice", () => {
-    // given multiple connected heart-rate sources and no selected source:
-    // when the selected workout is checked for direct start:
-    const canStart = canAutoStartSelectedWorkout(
-        readiness({ heartRateSourceCount: 2, selectedHeartRateSourceId: null }),
+test("keeps setup open after control becomes available", () => {
+    // given setup was entered because no control source was connected:
+    // when a trainer becomes available while setup is open:
+    const mode = workoutEntryMode(
+        readiness({ setupRequired: true, hasErgControl: true }),
     );
 
-    // then the source-selection step remains necessary:
-    assert.equal(canStart, false);
+    // then connecting the trainer does not start the workout:
+    assert.equal(mode, "SETUP");
 });
 
-test("does not auto-start before the current session has loaded", () => {
-    // given an apparently ready trainer before the current session response arrives:
-    // when the selected workout is checked for direct start:
-    const canStart = canAutoStartSelectedWorkout(
-        readiness({ sessionLoaded: false }),
-    );
+test("waits for the initial snapshots before choosing a workout entry", () => {
+    // given a selected workout while the initial session response is pending:
+    // when the workout entry mode is resolved:
+    const mode = workoutEntryMode(readiness({ sessionLoaded: false }));
 
-    // then the app waits for the session state before starting:
-    assert.equal(canStart, false);
+    // then neither setup nor automatic start is chosen prematurely:
+    assert.equal(mode, "CHECKING");
 });

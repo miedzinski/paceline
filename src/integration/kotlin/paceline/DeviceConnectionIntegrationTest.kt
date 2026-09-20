@@ -21,6 +21,7 @@ import paceline.device.adapters.wifi.WftnpMessageType
 import paceline.device.adapters.wifi.toWftnpBytes
 import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionPhase
+import paceline.device.domain.DiscoveryPhase
 import paceline.testsupport.NoopBluetoothAccess
 import paceline.testsupport.TestWftnpServer
 import java.net.DatagramSocket
@@ -68,14 +69,13 @@ class DeviceConnectionIntegrationTest {
     @Test
     fun `application remains ready until a device operation is requested`() {
         // given the application has started:
-        assertEquals(ConnectionPhase.READY, coordinator.current().phase)
+        assertEquals(DiscoveryPhase.READY, coordinator.discoveryState().phase)
 
         // when the current connection endpoint is requested before discovery:
         val response = connectionResponse()
 
-        // then no device protocol connection has been opened and the state is ready:
-        assertTrue(response.contains("\"state\":\"READY\""))
-        assertTrue(response.contains("\"device\":null"))
+        // then no device protocol connection has been opened and the source list is empty:
+        assertTrue(response.contains("\"connections\":[]"))
         assertEquals(0, deviceServer.acceptedConnections)
     }
 
@@ -109,12 +109,15 @@ class DeviceConnectionIntegrationTest {
 
         // and the connection endpoint exposes the notification decoded by the FTMS profile:
         val response = connectionResponse()
+        val connectionId = coordinator.connectionSnapshots().single().id
         assertTrue(response.contains("\"state\":\"CONNECTED\""))
         assertTrue(response.contains("\"name\":\"KICKR CORE 2 Integration\""))
         assertTrue(response.contains("\"powerWatts\":200"))
         assertTrue(response.contains("\"cadenceRpm\":90.0"))
         assertTrue(response.contains("\"speedKph\":25.0"))
+        assertTrue(response.contains("\"distanceMeters\":null"))
         assertTrue(response.contains("\"heartRateBpm\":120"))
+        assertTrue(response.contains("\"availability\":\"CURRENT\""))
         assertEquals(1, deviceServer.acceptedConnections)
     }
 
@@ -191,7 +194,7 @@ class DeviceConnectionIntegrationTest {
         assertTrue(response.contains("\"state\":\"FAILED\""))
         assertTrue(response.contains("\"code\":\"CONNECTION_FAILED\""))
         assertTrue(response.contains("Unable to open device protocol session"))
-        assertEquals(ConnectionPhase.FAILED, coordinator.current().phase)
+        assertEquals(ConnectionPhase.FAILED, coordinator.connectionSnapshots().single().phase)
     }
 
     @Test
@@ -218,15 +221,19 @@ class DeviceConnectionIntegrationTest {
             .await()
             .atMost(Duration.ofSeconds(10))
             .untilAsserted {
-                assertEquals(ConnectionPhase.CONNECTED, coordinator.current().phase)
-                assertTrue(coordinator.currentTelemetry() != null)
+                assertTrue(coordinator.connectionSnapshots().any { it.phase == ConnectionPhase.CONNECTED })
+                assertTrue(
+                    coordinator.connectionSnapshots().any { source ->
+                        coordinator.currentCyclingTelemetry(source.id) != null
+                    },
+                )
             }
     }
 
     private fun connectionResponse(): String =
         restClient
             .get()
-            .uri("/devices/connection")
+            .uri("/devices/connections")
             .exchange()
             .expectStatus()
             .isOk()

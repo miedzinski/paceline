@@ -1,6 +1,6 @@
 package paceline.training.domain
 
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
 import paceline.training.config.ErgProtectionProperties
 import java.time.Duration
 import java.time.Instant
@@ -22,9 +22,9 @@ class ErgProtectionCoordinatorTest {
                     ErgProtectionProperties(
                         lowCadenceDuration = Duration.ofSeconds(1),
                         recoveryDuration = Duration.ofSeconds(1),
-                        telemetryFreshness = Duration.ofSeconds(5),
                         targetChangeGracePeriod = Duration.ZERO,
                     ),
+                telemetryFreshness = Duration.ofSeconds(5),
                 setTarget = { target, _, _ ->
                     commands += target
                     true
@@ -63,8 +63,8 @@ class ErgProtectionCoordinatorTest {
     private fun telemetry(
         receivedAt: Instant,
         cadenceRpm: Double,
-    ): IndoorBikeTelemetry =
-        IndoorBikeTelemetry(
+    ): CyclingTelemetry =
+        CyclingTelemetry(
             powerWatts = 200,
             cadenceRpm = cadenceRpm,
             speedKph = 25.0,

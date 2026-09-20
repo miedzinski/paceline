@@ -1,7 +1,10 @@
 import type {
     AthleteProfile,
-    DeviceConnectionResponse,
+    DeviceConnectionsResponse,
     DeviceDiscoveryResponse,
+    RideEquipmentResponse,
+    RideEquipmentSelection,
+    RideRole,
     TodayWorkoutsResponse,
     TrainingSessionResponse,
     WorkoutSelection,
@@ -16,6 +19,7 @@ export class ApiError extends Error {
     constructor(
         message: string,
         readonly status: number,
+        readonly code: string | null = null,
     ) {
         super(message);
         this.name = "ApiError";
@@ -34,10 +38,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const parsedBody = parseBody(body);
 
     if (!response.ok) {
-        throw new ApiError(
-            errorMessage(parsedBody, response.status),
-            response.status,
-        );
+        const details = errorDetails(parsedBody, response.status);
+        throw new ApiError(details.message, response.status, details.code);
     }
 
     if (typeof parsedBody === "string") {
@@ -62,28 +64,33 @@ function parseBody(body: string): unknown {
     }
 }
 
-function errorMessage(body: unknown, status: number): string {
+function errorDetails(
+    body: unknown,
+    status: number,
+): { code: string | null; message: string } {
     if (typeof body === "object" && body !== null) {
         const bodyRecord = body as Record<string, unknown>;
+        const code =
+            typeof bodyRecord.code === "string" ? bodyRecord.code : null;
         for (const field of ["message", "detail", "title"]) {
             if (field in bodyRecord) {
                 const message = bodyRecord[field];
                 if (typeof message === "string" && message.trim().length > 0) {
-                    return message;
+                    return { code, message };
                 }
             }
         }
     }
 
-    return `Request failed (${status})`;
+    return { code: null, message: `Request failed (${status})` };
 }
 
 export const deviceApi = {
     discover: () => request<DeviceDiscoveryResponse>("/devices"),
     getConnection: () =>
-        request<DeviceConnectionResponse>("/devices/connection"),
+        request<DeviceConnectionsResponse>("/devices/connections"),
     connect: (deviceId: string) =>
-        request<DeviceConnectionResponse>(
+        request<DeviceConnectionsResponse>(
             `/devices/${encodeURIComponent(deviceId)}/connection`,
             { method: "POST" },
         ),
@@ -97,10 +104,15 @@ export const deviceApi = {
 export const trainingApi = {
     getCurrent: () =>
         request<TrainingSessionResponse>("/training-sessions/current"),
-    start: (workout?: WorkoutSelection, heartRateSourceId?: string) => {
+    getEquipment: () =>
+        request<RideEquipmentResponse>("/training-sessions/equipment"),
+    start: (
+        workout?: WorkoutSelection,
+        equipment?: RideEquipmentSelection | null,
+    ) => {
         const requestBody = {
             ...(workout ? { workout } : {}),
-            ...(heartRateSourceId ? { heartRateSourceId } : {}),
+            ...(equipment ? { equipment } : {}),
         };
         const hasBody = Object.keys(requestBody).length > 0;
 
@@ -114,14 +126,25 @@ export const trainingApi = {
                 : {}),
         });
     },
-    selectHeartRateSource: (sessionId: string, sourceId: string) =>
-        request<TrainingSessionResponse>(
-            `/training-sessions/${encodeURIComponent(sessionId)}/heart-rate-source`,
+    selectEquipment: (selection: Partial<RideEquipmentSelection>) =>
+        request<RideEquipmentResponse>("/training-sessions/equipment", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(selection),
+        }),
+    selectEquipmentRole: (role: RideRole, sourceId: string) =>
+        request<RideEquipmentResponse>(
+            `/training-sessions/equipment/${encodeURIComponent(role)}`,
             {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ sourceId }),
             },
+        ),
+    clearEquipmentRole: (role: RideRole) =>
+        request<RideEquipmentResponse>(
+            `/training-sessions/equipment/${encodeURIComponent(role)}`,
+            { method: "DELETE" },
         ),
     setErgTarget: (sessionId: string, powerWatts: number) =>
         request<TrainingSessionResponse>(

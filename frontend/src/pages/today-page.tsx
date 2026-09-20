@@ -10,12 +10,13 @@ import { useNavigate } from "react-router";
 import { useAppShell } from "@/lib/app-shell";
 import { WorkoutCard } from "@/components/workout-card";
 import { WorkoutDetailSheet } from "@/components/workout-detail-sheet";
+import { isResistanceSelected } from "@/lib/ride-equipment";
 import type { ScheduledWorkout } from "@/types";
 import type { WorkoutItem } from "@/lib/workouts";
 
 export function TodayPage() {
     const navigate = useNavigate();
-    const { profile, today, isPlanLoading, planError, refreshPlan } =
+    const { profile, today, isPlanLoading, planError, refreshPlan, equipment } =
         useAppShell();
     const [selectedWorkout, setSelectedWorkout] = useState<WorkoutItem | null>(
         null,
@@ -99,6 +100,7 @@ export function TodayPage() {
                         state: {
                             workoutSelection: selection,
                             workout: selectedWorkout,
+                            setupRequired: !isResistanceSelected(equipment),
                         },
                     });
                     setSelectedWorkout(null);

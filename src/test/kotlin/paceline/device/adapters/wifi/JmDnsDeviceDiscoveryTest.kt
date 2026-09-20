@@ -3,8 +3,8 @@ package paceline.device.adapters.wifi
 import io.mockk.every
 import io.mockk.mockk
 import paceline.device.config.DeviceProperties
-import paceline.device.domain.ConnectionFailureCode
 import paceline.device.domain.DeviceEndpoint
+import paceline.device.domain.DiscoveryFailureCode
 import paceline.device.ports.DeviceDiscoveryResult
 import java.io.IOException
 import java.time.Duration
@@ -81,7 +81,7 @@ class JmDnsDeviceDiscoveryTest {
         val failed = assertIs<DeviceDiscoveryResult.Failed>(result)
 
         // then the technical error is exposed through the discovery port:
-        assertEquals(ConnectionFailureCode.DISCOVERY_ERROR, failed.code)
+        assertEquals(DiscoveryFailureCode.DISCOVERY_ERROR, failed.code)
         assertEquals("multicast unavailable", failed.message)
     }
 

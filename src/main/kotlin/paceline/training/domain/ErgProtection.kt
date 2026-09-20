@@ -1,6 +1,7 @@
 package paceline.training.domain
 
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.CyclingTelemetry
+import paceline.device.domain.isTelemetryFresh
 import paceline.training.config.ErgProtectionProperties
 import java.time.Duration
 import java.time.Instant
@@ -90,6 +91,7 @@ sealed interface ErgProtectionDecision {
 
 class ErgSpiralDetector(
     private val properties: ErgProtectionProperties,
+    private val telemetryFreshness: Duration,
 ) {
     private var lowCadenceSince: Instant? = null
     private var recoveryCadenceSince: Instant? = null
@@ -104,7 +106,7 @@ class ErgSpiralDetector(
     fun evaluate(
         now: Instant,
         requestedTargetPowerWatts: Int?,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
         protectionActive: Boolean,
     ): ErgProtectionDecision? {
         if (!properties.enabled || requestedTargetPowerWatts == null || requestedTargetPowerWatts <= 0) {
@@ -134,7 +136,7 @@ class ErgSpiralDetector(
 
     fun freshRecoveryCadence(
         now: Instant,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ): Double? = freshCadence(now, telemetry)?.takeIf { cadence -> cadence >= properties.recoveryCadenceRpm }
 
     private fun evaluateBailout(
@@ -177,12 +179,12 @@ class ErgSpiralDetector(
 
     private fun freshCadence(
         now: Instant,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ): Double? {
         if (telemetry == null || telemetry.receivedAt.isAfter(now)) {
             return null
         }
-        if (Duration.between(telemetry.receivedAt, now) > properties.telemetryFreshness) {
+        if (!isTelemetryFresh(telemetry.receivedAt, now, telemetryFreshness)) {
             return null
         }
         return telemetry.cadenceRpm?.takeIf { cadence -> cadence.isFinite() && cadence >= 0.0 }

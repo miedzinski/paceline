@@ -2,15 +2,16 @@ package paceline.device.domain
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
+import paceline.config.TelemetryProperties
 import paceline.device.ports.BluetoothDiscovery
+import paceline.device.ports.CyclingTelemetryListener
+import paceline.device.ports.CyclingTelemetrySource
 import paceline.device.ports.DeviceCommunication
 import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
 import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.HeartRateTelemetrySource
-import paceline.device.ports.IndoorBikePowerControl
-import paceline.device.ports.IndoorBikeTelemetryListener
-import paceline.device.ports.IndoorBikeTelemetrySource
+import paceline.device.ports.TrainerControl
 import paceline.device.ports.WifiDiscovery
 import java.time.Clock
 import java.util.UUID
@@ -33,19 +34,31 @@ class ConnectionCoordinator(
     private val bluetoothDiscovery: BluetoothDiscovery,
     private val communication: DeviceCommunication,
     private val clock: Clock = Clock.systemUTC(),
+    private val telemetryProperties: TelemetryProperties = TelemetryProperties(),
 ) : AutoCloseable {
     private data class ManagedConnection(
         val id: String,
-        val session: DeviceConnectionSession,
         val stateMachine: ConnectionStateMachine,
+        var session: DeviceConnectionSession? = null,
+        var capabilities: Set<DeviceCapabilityType> = emptySet(),
+        var lastCyclingTelemetry: CyclingTelemetry? = null,
+        var lastHeartRate: HeartRateTelemetry? = null,
+    ) {
+        val device: DeviceAdvertisement
+            get() = stateMachine.current().device
+    }
+
+    private data class ConnectionRecovery(
+        val connectionId: String,
+        val device: DeviceAdvertisement,
+        val generation: Long,
+        val future: CompletableFuture<DeviceConnectionSession?>,
     )
 
     private val logger = LoggerFactory.getLogger(javaClass)
-    private val discoveryStateMachine = ConnectionStateMachine(clock = clock)
+    private val discoveryStateMachine = DiscoveryStateMachine(clock)
     private val discoveredDevices = linkedMapOf<String, DeviceAdvertisement>()
     private val connections = linkedMapOf<String, ManagedConnection>()
-    private var primaryTrainingConnectionId: String? = null
-    private var lastConnectionState = discoveryStateMachine.current()
     private val recoveryExecutor: ExecutorService =
         Executors.newCachedThreadPool { runnable ->
             Thread(runnable, "paceline-trainer-recovery").apply {
@@ -53,80 +66,59 @@ class ConnectionCoordinator(
             }
         }
     private var connectionRecoveryGeneration = 0L
-    private var primaryConnectionRecovery: PrimaryConnectionRecovery? = null
-
-    private data class PrimaryConnectionRecovery(
-        val connectionId: String,
-        val device: DeviceAdvertisement,
-        val generation: Long,
-        val future: CompletableFuture<IndoorBikePowerControl?>,
-    )
+    private val connectionRecoveries = linkedMapOf<String, ConnectionRecovery>()
 
     @Synchronized
-    fun current(): ConnectionState {
+    fun discoveryState(): DiscoveryState = discoveryStateMachine.current()
+
+    @Synchronized
+    fun connectionSnapshots(): List<ConnectionSnapshot> {
         refreshConnectionStates()
-        return primaryTrainingConnection()?.stateMachine?.current()
-            ?: connections.values
-                .firstOrNull()
-                ?.stateMachine
-                ?.current()
-            ?: lastConnectionState
+        return connections.values.map(::snapshot)
     }
 
     @Synchronized
-    fun currentTelemetry(): IndoorBikeTelemetry? {
+    fun currentCyclingTelemetry(connectionId: String): CyclingTelemetry? {
         refreshConnectionStates()
-        val managed = primaryTrainingConnection() ?: return null
-        if (!isConnected(managed)) {
-            return null
+        return connectedConnection(connectionId)?.let(::latestCyclingTelemetry)
+    }
+
+    @Synchronized
+    fun currentTrainerControl(connectionId: String): TrainerControl? {
+        refreshConnectionStates()
+        return connectedConnection(connectionId)?.session?.capability<TrainerControl>()
+    }
+
+    @Synchronized
+    fun hasCyclingTelemetry(connectionId: String): Boolean {
+        refreshConnectionStates()
+        return connections[connectionId]
+            ?.let { managed -> isConnected(managed) && cyclingTelemetrySources(managed).isNotEmpty() }
+            ?: false
+    }
+
+    @Synchronized
+    fun addCyclingTelemetryListener(
+        connectionId: String,
+        listener: CyclingTelemetryListener,
+    ): AutoCloseable {
+        refreshConnectionStates()
+        val sources = connectedConnection(connectionId)?.let(::cyclingTelemetrySources).orEmpty()
+        if (sources.isEmpty()) {
+            return AutoCloseable { }
         }
-        return managed.session.capability<IndoorBikeTelemetrySource>()?.latestTelemetry()
-    }
 
-    @Synchronized
-    fun currentPowerControl(): IndoorBikePowerControl? {
-        refreshConnectionStates()
-        val managed = primaryTrainingConnection() ?: return null
-        if (!isConnected(managed)) {
-            return null
-        }
-        return managed.session.capability<IndoorBikePowerControl>()
-    }
-
-    @Synchronized
-    fun hasPrimaryTrainingTelemetry(): Boolean {
-        refreshConnectionStates()
-        val managed = primaryTrainingConnection() ?: return false
-        return isConnected(managed) && managed.session.capability<IndoorBikeTelemetrySource>() != null
-    }
-
-    @Synchronized
-    fun addTelemetryListener(listener: IndoorBikeTelemetryListener): AutoCloseable {
-        refreshConnectionStates()
-        val managed = primaryTrainingConnection()
-        return if (managed != null && isConnected(managed)) {
-            managed.session
-                .capability<IndoorBikeTelemetrySource>()
-                ?.addTelemetryListener(listener)
-                ?: AutoCloseable { }
-        } else {
-            AutoCloseable { }
-        }
-    }
-
-    @Synchronized
-    fun heartRateSources(): List<HeartRateSourceDescriptor> {
-        refreshConnectionStates()
-        return connections.values.mapNotNull { managed ->
-            if (managed.session.capability<HeartRateTelemetrySource>() == null) {
-                null
-            } else {
-                HeartRateSourceDescriptor(
-                    id = managed.id,
-                    device = managed.session.connection.device,
-                    state = managed.stateMachine.current().phase,
-                )
+        val registrations = mutableListOf<AutoCloseable>()
+        try {
+            sources.forEach { source ->
+                registrations += source.addTelemetryListener(listener)
             }
+        } catch (exception: Exception) {
+            registrations.asReversed().forEach(::closeQuietly)
+            throw exception
+        }
+        return AutoCloseable {
+            registrations.asReversed().forEach(::closeQuietly)
         }
     }
 
@@ -137,7 +129,10 @@ class ConnectionCoordinator(
         if (!isConnected(managed)) {
             return null
         }
-        return managed.session.capability<HeartRateTelemetrySource>()?.latestHeartRate()
+        return managed.session
+            ?.capability<HeartRateTelemetrySource>()
+            ?.latestHeartRate()
+            ?.also { managed.lastHeartRate = it }
     }
 
     @Synchronized
@@ -149,7 +144,7 @@ class ConnectionCoordinator(
         val managed = connections[sourceId]
         return if (managed != null && isConnected(managed)) {
             managed.session
-                .capability<HeartRateTelemetrySource>()
+                ?.capability<HeartRateTelemetrySource>()
                 ?.addHeartRateListener(listener)
                 ?: AutoCloseable { }
         } else {
@@ -158,208 +153,150 @@ class ConnectionCoordinator(
     }
 
     @Synchronized
-    fun connectedDevices(): List<ConnectedDeviceSnapshot> {
-        refreshConnectionStates()
-        return connections.values.map { managed ->
-            val indoorBike = managed.session.capability<IndoorBikeTelemetrySource>()
-            val powerControl = managed.session.capability<IndoorBikePowerControl>()
-            val heartRate = managed.session.capability<HeartRateTelemetrySource>()
-            val capabilities =
-                buildSet {
-                    if (indoorBike != null) add(DeviceCapabilityType.INDOOR_BIKE_TELEMETRY)
-                    if (powerControl != null) add(DeviceCapabilityType.ERG_POWER_CONTROL)
-                    if (heartRate != null) add(DeviceCapabilityType.HEART_RATE)
-                }
-            ConnectedDeviceSnapshot(
-                id = managed.id,
-                state = managed.stateMachine.current(),
-                capabilities = capabilities,
-                telemetry = if (isConnected(managed)) indoorBike?.latestTelemetry() else null,
-                heartRate = if (isConnected(managed)) heartRate?.latestHeartRate() else null,
-            )
-        }
-    }
-
-    @Synchronized
     fun discover(): DiscoverySnapshot {
         refreshConnectionStates()
-        val connectionRemainsActive = hasActiveConnection()
-        if (!connectionRemainsActive) {
-            discoveryStateMachine.transitionIfPossible(ConnectionEvent.BeginDiscovery)
-        }
+        discoveryStateMachine.transition(DiscoveryEvent.Begin)
 
         val result =
             try {
                 discoverFromSources()
             } catch (exception: Exception) {
                 DeviceDiscoveryResult.Failed(
-                    code = ConnectionFailureCode.DISCOVERY_ERROR,
+                    code = DiscoveryFailureCode.DISCOVERY_ERROR,
                     message = exception.message ?: "Device discovery failed",
                 )
             }
 
         return when (result) {
             is DeviceDiscoveryResult.Found -> {
-                val discovered = result.candidates.map(DeviceDiscoveryCandidate::toDeviceAdvertisement)
-                if (discovered.isEmpty()) {
-                    discoveredDevices.clear()
-                    val message = "No device was found on the configured network or Bluetooth transports"
-                    if (connectionRemainsActive) {
-                        discoverySnapshot(
-                            state = current(),
-                            failure = ConnectionFailure(ConnectionFailureCode.NO_DEVICE_FOUND, message),
-                        )
-                    } else {
-                        discoverySnapshot(
-                            publishDiscovery(ConnectionEvent.DiscoveryUnavailable(message)),
-                        )
-                    }
-                } else {
-                    discoveredDevices.clear()
-                    discovered.forEach { device ->
+                discoveredDevices.clear()
+                result.candidates
+                    .map(DeviceDiscoveryCandidate::toDeviceAdvertisement)
+                    .forEach { device ->
                         discoveredDevices[UUID.randomUUID().toString()] = device
                     }
-                    discoverySnapshot(
-                        if (connectionRemainsActive) {
-                            current()
-                        } else {
-                            publishDiscovery(ConnectionEvent.DeviceDiscovered(discovered.first()))
-                        },
-                    )
-                }
+                discoverySnapshot(discoveryStateMachine.transition(DiscoveryEvent.DevicesFound))
             }
 
             DeviceDiscoveryResult.NotFound -> {
                 discoveredDevices.clear()
-                val message = "No device was found on the configured network or Bluetooth transports"
-                if (connectionRemainsActive) {
-                    discoverySnapshot(
-                        state = current(),
-                        failure = ConnectionFailure(ConnectionFailureCode.NO_DEVICE_FOUND, message),
-                    )
-                } else {
-                    discoverySnapshot(
-                        publishDiscovery(ConnectionEvent.DiscoveryUnavailable(message)),
-                    )
-                }
+                discoverySnapshot(
+                    discoveryStateMachine.transition(
+                        DiscoveryEvent.Unavailable(
+                            "No device was found on the configured network or Bluetooth transports",
+                        ),
+                    ),
+                )
             }
 
             is DeviceDiscoveryResult.Failed -> {
                 discoveredDevices.clear()
-                if (connectionRemainsActive) {
-                    discoverySnapshot(
-                        state = current(),
-                        failure = ConnectionFailure(result.code, result.message),
-                    )
-                } else {
-                    discoverySnapshot(
-                        publishDiscovery(ConnectionEvent.DiscoveryFailed(result.code, result.message)),
-                    )
-                }
+                discoverySnapshot(
+                    discoveryStateMachine.transition(DiscoveryEvent.Failed(result.code, result.message)),
+                )
             }
         }
     }
 
     @Synchronized
-    fun connect(deviceId: String): ConnectionState {
+    fun connect(deviceId: String): ConnectionSnapshot {
         val device =
             discoveredDevices[deviceId]
                 ?: throw NotDiscoveredException(deviceId)
 
         invalidateRecoveryFor(device)
         refreshConnectionStates()
+        val connectingConnections =
+            connections.values.filter {
+                sameDevice(it.device, device) &&
+                    it.stateMachine.current().phase == ConnectionPhase.CONNECTING
+            }
+        connectingConnections.forEach(::removeConnection)
         val existing =
             connections.values.firstOrNull {
-                sameDevice(it.session.connection.device, device) && isConnected(it)
+                sameDevice(it.device, device) && isConnected(it)
             }
         if (existing != null) {
-            return existing.stateMachine.current()
+            return snapshot(existing)
         }
 
-        connections
-            .filterValues { sameDevice(it.session.connection.device, device) }
-            .values
-            .toList()
-            .forEach { managed ->
-                closeConnection(managed.session)
-                connections.remove(managed.id)
-                if (primaryTrainingConnectionId == managed.id) {
-                    primaryTrainingConnectionId = null
+        val managed =
+            connections.values
+                .lastOrNull {
+                    sameDevice(it.device, device) &&
+                        it.stateMachine.current().phase in
+                        setOf(ConnectionPhase.FAILED, ConnectionPhase.DISCONNECTED)
                 }
-            }
+                ?: ManagedConnection(
+                    id = UUID.randomUUID().toString(),
+                    stateMachine =
+                        ConnectionStateMachine(
+                            clock = clock,
+                            initialState = ConnectionState.connecting(device, clock.instant()),
+                        ),
+                ).also { connections[it.id] = it }
 
-        val attemptStateMachine =
-            ConnectionStateMachine(
-                initialState =
-                    ConnectionState(
-                        phase = ConnectionPhase.DISCOVERED,
-                        device = device,
-                        changedAt = clock.instant(),
-                    ),
-                clock = clock,
-            )
-        attemptStateMachine.transition(ConnectionEvent.BeginConnection(device))
+        if (managed.stateMachine.current().phase != ConnectionPhase.CONNECTING) {
+            closeConnection(managed.session)
+            managed.session = null
+            managed.stateMachine.transition(ConnectionEvent.BeginConnection(device))
+        }
+
         return try {
             val session = communication.connect(device)
-            val managed =
-                ManagedConnection(
-                    id = UUID.randomUUID().toString(),
-                    session = session,
-                    stateMachine = attemptStateMachine,
-                )
-            val connectedState = attemptStateMachine.transition(ConnectionEvent.ConnectionEstablished)
-            connections[managed.id] = managed
-            if (primaryTrainingConnectionId == null && session.capability<IndoorBikePowerControl>() != null) {
-                primaryTrainingConnectionId = managed.id
+            if (!session.connection.isOpen()) {
+                closeConnection(session)
+                throw IllegalStateException("Device communication returned a closed connection")
             }
-            lastConnectionState = connectedState
-            connectedState
+            managed.session = session
+            managed.capabilities = capabilitiesOf(session)
+            managed.stateMachine.transition(ConnectionEvent.ConnectionEstablished)
+            snapshot(managed)
         } catch (exception: Exception) {
-            attemptStateMachine
-                .transition(
-                    ConnectionEvent.ConnectionFailed(
-                        exception.message ?: "Device connection failed",
-                    ),
-                ).also { lastConnectionState = it }
+            managed.session?.let(::closeConnection)
+            managed.session = null
+            managed.stateMachine.transition(
+                ConnectionEvent.ConnectionFailed(
+                    exception.message ?: "Device connection failed",
+                ),
+            )
+            snapshot(managed)
         }
     }
 
     @Synchronized
-    fun reconnectPrimaryTrainingConnection(force: Boolean = false): CompletionStage<IndoorBikePowerControl?> {
+    fun reconnectConnection(
+        connectionId: String,
+        force: Boolean = false,
+    ): CompletionStage<DeviceConnectionSession?> {
         refreshConnectionStates()
-        val connectionId = primaryTrainingConnectionId ?: return CompletableFuture.completedFuture(null)
-        val inFlight = primaryConnectionRecovery
-        if (inFlight?.connectionId == connectionId) {
+        val inFlight = connectionRecoveries[connectionId]
+        if (inFlight != null) {
             return inFlight.future
         }
 
         val managed = connections[connectionId] ?: return CompletableFuture.completedFuture(null)
         val currentState = managed.stateMachine.current()
-        if (currentState.phase == ConnectionPhase.CONNECTED && managed.session.connection.isOpen()) {
-            val existingControl = managed.session.capability<IndoorBikePowerControl>()
-            if (existingControl != null && !force) {
-                return CompletableFuture.completedFuture(existingControl)
+        if (currentState.phase == ConnectionPhase.CONNECTED && managed.session?.connection?.isOpen() == true) {
+            if (!force) {
+                return CompletableFuture.completedFuture(managed.session)
             }
-            managed.stateMachine
-                .transition(
-                    ConnectionEvent.ConnectionLost(
-                        if (force) {
-                            "The trainer telemetry stream is stale"
-                        } else {
-                            "The connected device no longer exposes ERG control"
-                        },
-                    ),
-                ).also { lastConnectionState = it }
+            managed.stateMachine.transition(
+                ConnectionEvent.ConnectionLost(
+                    "The trainer telemetry stream is stale",
+                ),
+            )
         }
 
-        val device = currentState.device ?: managed.session.connection.device
+        val device = currentState.device
         closeConnection(managed.session)
+        managed.session = null
         managed.stateMachine.transition(ConnectionEvent.BeginConnection(device))
 
         val generation = ++connectionRecoveryGeneration
-        val future = CompletableFuture<IndoorBikePowerControl?>()
-        primaryConnectionRecovery =
-            PrimaryConnectionRecovery(
+        val future = CompletableFuture<DeviceConnectionSession?>()
+        connectionRecoveries[connectionId] =
+            ConnectionRecovery(
                 connectionId = connectionId,
                 device = device,
                 generation = generation,
@@ -369,10 +306,10 @@ class ConnectionCoordinator(
             recoveryExecutor.execute {
                 val connectionResult = runCatching { communication.connect(device) }
                 synchronized(this) {
+                    val recovery = connectionRecoveries[connectionId]
                     val isCurrentAttempt =
-                        connectionRecoveryGeneration == generation &&
-                            primaryTrainingConnectionId == connectionId &&
-                            connections[connectionId]?.session === managed.session
+                        recovery?.generation == generation &&
+                            connections[connectionId] === managed
                     val session = connectionResult.getOrNull()
                     if (!isCurrentAttempt) {
                         session?.let(::closeConnection)
@@ -381,50 +318,39 @@ class ConnectionCoordinator(
                         val failure =
                             connectionResult.exceptionOrNull()
                                 ?: IllegalStateException("Device reconnection failed")
-                        managed.stateMachine
-                            .transition(
-                                ConnectionEvent.ConnectionFailed(
-                                    failure.message ?: "Device reconnection failed",
-                                ),
-                            ).also { lastConnectionState = it }
+                        managed.stateMachine.transition(
+                            ConnectionEvent.ConnectionFailed(
+                                failure.message ?: "Device reconnection failed",
+                            ),
+                        )
+                        future.completeExceptionally(failure)
+                    } else if (!session.connection.isOpen()) {
+                        closeConnection(session)
+                        val failure = IllegalStateException("Device communication returned a closed connection")
+                        managed.stateMachine.transition(
+                            ConnectionEvent.ConnectionFailed(
+                                failure.message ?: "Device reconnection failed",
+                            ),
+                        )
                         future.completeExceptionally(failure)
                     } else {
-                        val powerControl = session.capability<IndoorBikePowerControl>()
-                        if (powerControl == null) {
-                            val failure = IllegalStateException("The reconnected device does not expose ERG power control")
-                            closeConnection(session)
-                            managed.stateMachine
-                                .transition(
-                                    ConnectionEvent.ConnectionFailed(
-                                        failure.message ?: "The reconnected device does not expose ERG power control",
-                                    ),
-                                ).also { lastConnectionState = it }
-                            future.completeExceptionally(failure)
-                        } else {
-                            val connectedState = managed.stateMachine.transition(ConnectionEvent.ConnectionEstablished)
-                            connections[connectionId] =
-                                ManagedConnection(
-                                    id = connectionId,
-                                    session = session,
-                                    stateMachine = managed.stateMachine,
-                                )
-                            lastConnectionState = connectedState
-                            future.complete(powerControl)
-                        }
+                        managed.session = session
+                        managed.capabilities = capabilitiesOf(session)
+                        managed.stateMachine.transition(ConnectionEvent.ConnectionEstablished)
+                        future.complete(session)
                     }
-                    if (primaryConnectionRecovery?.generation == generation) {
-                        primaryConnectionRecovery = null
+                    if (connectionRecoveries[connectionId]?.generation == generation) {
+                        connectionRecoveries.remove(connectionId)
                     }
                 }
             }
         } catch (exception: Exception) {
-            managed.stateMachine
-                .transition(
-                    ConnectionEvent.ConnectionFailed(
-                        exception.message ?: "Device reconnection could not be scheduled",
-                    ),
-                ).also { lastConnectionState = it }
-            primaryConnectionRecovery = null
+            managed.stateMachine.transition(
+                ConnectionEvent.ConnectionFailed(
+                    exception.message ?: "Device reconnection could not be scheduled",
+                ),
+            )
+            connectionRecoveries.remove(connectionId)
             future.completeExceptionally(exception)
         }
         return future
@@ -435,30 +361,66 @@ class ConnectionCoordinator(
         val managed =
             connections[connectionId]
                 ?: throw ConnectionNotFoundException(connectionId)
-        invalidateRecoveryFor(managed.session.connection.device, connectionId)
-        val disconnectedState =
-            if (managed.stateMachine.current().phase == ConnectionPhase.CONNECTED) {
-                managed.stateMachine.transition(ConnectionEvent.ConnectionLost("The device connection was closed"))
-            } else {
-                managed.stateMachine.current()
-            }
+        invalidateRecoveryFor(managed.device, connectionId)
         closeConnection(managed.session)
-        connections.remove(connectionId)
-        if (primaryTrainingConnectionId == connectionId) {
-            primaryTrainingConnectionId = null
-        }
-        lastConnectionState = disconnectedState
+        removeConnection(managed)
     }
 
     @Synchronized
     override fun close() {
-        connectionRecoveryGeneration += 1
-        primaryConnectionRecovery = null
+        connectionRecoveries.values.forEach { recovery ->
+            recovery.future.complete(null)
+        }
+        connectionRecoveries.clear()
         connections.values.forEach { managed -> closeConnection(managed.session) }
         connections.clear()
-        primaryTrainingConnectionId = null
         recoveryExecutor.shutdownNow()
     }
+
+    private fun snapshot(managed: ManagedConnection): ConnectionSnapshot {
+        refreshPublishedCapabilities(managed)
+        val state = managed.stateMachine.current()
+        val connected = isConnected(managed)
+        val heartRate = managed.session?.capability<HeartRateTelemetrySource>()
+        val cyclingTelemetry = if (connected) latestCyclingTelemetry(managed) else null
+        val latestCyclingTelemetry = cyclingTelemetry ?: managed.lastCyclingTelemetry
+        val latestHeartRate =
+            if (connected) {
+                heartRate?.latestHeartRate()?.also { managed.lastHeartRate = it }
+            } else {
+                null
+            } ?: managed.lastHeartRate
+        val now = clock.instant()
+        if (cyclingTelemetry != null) {
+            managed.lastCyclingTelemetry = cyclingTelemetry
+        }
+        return ConnectionSnapshot(
+            id = managed.id,
+            device = state.device,
+            phase = state.phase,
+            changedAt = state.changedAt,
+            failure = state.failure,
+            capabilities = managed.capabilities,
+            telemetry =
+                projectTelemetry(
+                    sample = latestCyclingTelemetry,
+                    connected = connected,
+                    now = now,
+                    freshness = telemetryProperties.freshness,
+                    receivedAt = CyclingTelemetry::receivedAt,
+                ),
+            heartRate =
+                projectTelemetry(
+                    sample = latestHeartRate,
+                    connected = connected,
+                    now = now,
+                    freshness = telemetryProperties.freshness,
+                    receivedAt = HeartRateTelemetry::receivedAt,
+                ),
+        )
+    }
+
+    private fun connectedConnection(connectionId: String): ManagedConnection? = connections[connectionId]?.takeIf(::isConnected)
 
     private fun discoverFromSources(): DeviceDiscoveryResult {
         val results = listOf(wifiDiscovery.discover(), bluetoothDiscovery.discover())
@@ -477,14 +439,11 @@ class ConnectionCoordinator(
             ?: DeviceDiscoveryResult.NotFound
     }
 
-    private fun discoverySnapshot(
-        state: ConnectionState,
-        failure: ConnectionFailure? = null,
-    ): DiscoverySnapshot =
+    private fun discoverySnapshot(state: DiscoveryState): DiscoverySnapshot =
         DiscoverySnapshot(
             state = state,
             devices = discoveredDevices.toOptions(),
-            failure = failure,
+            failure = state.failure,
         )
 
     private fun Map<String, DeviceAdvertisement>.toOptions(): List<AdvertisementOption> =
@@ -492,50 +451,100 @@ class ConnectionCoordinator(
             AdvertisementOption(id = id, device = device)
         }
 
-    private fun publishDiscovery(event: ConnectionEvent): ConnectionState =
-        discoveryStateMachine.transition(event).also { lastConnectionState = it }
-
     private fun refreshConnectionStates() {
         connections.values.forEach { managed ->
+            refreshPublishedCapabilities(managed)
             if (
                 managed.stateMachine.current().phase == ConnectionPhase.CONNECTED &&
-                !managed.session.connection.isOpen()
+                managed.session?.connection?.isOpen() == false
             ) {
-                managed.stateMachine
-                    .transition(ConnectionEvent.ConnectionLost("The device connection is no longer open"))
-                    .also { state ->
-                        if (managed.id == primaryTrainingConnectionId) {
-                            lastConnectionState = state
-                        }
-                    }
+                managed.stateMachine.transition(
+                    ConnectionEvent.ConnectionLost("The device connection is no longer open"),
+                )
             }
         }
     }
 
-    private fun hasActiveConnection(): Boolean = connections.values.any(::isConnected)
-
-    private fun primaryTrainingConnection(): ManagedConnection? = primaryTrainingConnectionId?.let(connections::get)
+    private fun refreshPublishedCapabilities(managed: ManagedConnection) {
+        if (managed.stateMachine.current().phase != ConnectionPhase.CONNECTED) {
+            return
+        }
+        managed.session?.let { session ->
+            managed.capabilities = capabilitiesOf(session)
+        }
+    }
 
     private fun isConnected(managed: ManagedConnection): Boolean =
         managed.stateMachine.current().phase == ConnectionPhase.CONNECTED &&
-            managed.session.connection.isOpen()
+            managed.session?.connection?.isOpen() == true
 
-    private fun closeConnection(deviceConnection: DeviceConnectionSession) {
+    private fun removeConnection(managed: ManagedConnection) {
+        closeConnection(managed.session)
+        connections.remove(managed.id)
+    }
+
+    private fun closeConnection(deviceConnection: DeviceConnectionSession?) {
+        deviceConnection?.let(::closeQuietly)
+    }
+
+    private fun closeQuietly(closeable: AutoCloseable) {
         try {
-            deviceConnection.close()
+            closeable.close()
         } catch (exception: Exception) {
             logger.warn("Failed to close device connection", exception)
         }
+    }
+
+    private fun capabilitiesOf(session: DeviceConnectionSession): Set<DeviceCapabilityType> {
+        val cyclingSources = session.capabilities<CyclingTelemetrySource>()
+        val hasPower = cyclingSources.any { CyclingMeasurement.POWER in it.measurements }
+        val hasCadence = cyclingSources.any { CyclingMeasurement.CADENCE in it.measurements }
+        return buildSet {
+            when {
+                hasPower && hasCadence -> add(DeviceCapabilityType.CYCLING_TELEMETRY)
+                hasPower -> add(DeviceCapabilityType.POWER_TELEMETRY)
+                hasCadence -> add(DeviceCapabilityType.CADENCE_TELEMETRY)
+            }
+            if (session.capability<TrainerControl>() != null) add(DeviceCapabilityType.ERG_POWER_CONTROL)
+            if (session.capability<HeartRateTelemetrySource>() != null) add(DeviceCapabilityType.HEART_RATE)
+        }
+    }
+
+    private fun cyclingTelemetrySources(managed: ManagedConnection): List<CyclingTelemetrySource> =
+        managed.session?.capabilities<CyclingTelemetrySource>().orEmpty()
+
+    private fun latestCyclingTelemetry(managed: ManagedConnection): CyclingTelemetry? {
+        val samples = cyclingTelemetrySources(managed).mapNotNull { it.latestTelemetry() }
+        if (samples.isEmpty()) {
+            return null
+        }
+
+        fun <T> latestValue(selector: (CyclingTelemetry) -> T?): T? =
+            samples
+                .filter { selector(it) != null }
+                .maxByOrNull { it.receivedAt }
+                ?.let(selector)
+
+        return CyclingTelemetry(
+            powerWatts = latestValue { it.powerWatts },
+            cadenceRpm = latestValue { it.cadenceRpm },
+            speedKph = latestValue { it.speedKph },
+            distanceMeters = latestValue { it.distanceMeters },
+            receivedAt = samples.maxOf { it.receivedAt },
+        )
     }
 
     private fun invalidateRecoveryFor(
         device: DeviceAdvertisement,
         connectionId: String? = null,
     ) {
-        val recovery = primaryConnectionRecovery ?: return
-        if (sameDevice(recovery.device, device) && (connectionId == null || recovery.connectionId == connectionId)) {
-            connectionRecoveryGeneration += 1
-            primaryConnectionRecovery = null
+        val matchingRecoveries =
+            connectionRecoveries.values.filter { recovery ->
+                sameDevice(recovery.device, device) &&
+                    (connectionId == null || recovery.connectionId == connectionId)
+            }
+        matchingRecoveries.forEach { recovery ->
+            connectionRecoveries.remove(recovery.connectionId)
             recovery.future.complete(null)
         }
     }
@@ -562,6 +571,11 @@ class ConnectionCoordinator(
         }
 
         return when {
+            first.endpoint is DeviceEndpoint.Wifi && second.endpoint is DeviceEndpoint.Wifi -> {
+                first.endpoint.host.equals(second.endpoint.host, ignoreCase = true) &&
+                    first.endpoint.port == second.endpoint.port
+            }
+
             first.endpoint is DeviceEndpoint.Bluetooth && second.endpoint is DeviceEndpoint.Bluetooth -> {
                 first.endpoint.address.equals(second.endpoint.address, ignoreCase = true) &&
                     first.endpoint.adapterAddress.equals(second.endpoint.adapterAddress, ignoreCase = true)
@@ -583,8 +597,4 @@ class ConnectionCoordinator(
                 "bluetooth-address",
             )
     }
-}
-
-private fun ConnectionStateMachine.transitionIfPossible(event: ConnectionEvent) {
-    runCatching { transition(event) }
 }

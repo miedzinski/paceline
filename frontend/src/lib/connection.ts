@@ -1,4 +1,4 @@
-import type { ConnectedDevice, Device, DeviceEndpoint } from "@/types";
+import type { Device, DeviceEndpoint, DeviceIdentity } from "@/types";
 
 const phaseLabels: Record<string, string> = {
     READY: "Ready",
@@ -70,7 +70,7 @@ export function deviceEndpointLabel(endpoint: DeviceEndpoint): string {
 }
 
 export function sameDevice(
-    connectedDevice: ConnectedDevice | null,
+    connectedDevice: DeviceIdentity | null,
     discoveredDevice: Device,
 ): boolean {
     if (

@@ -16,6 +16,8 @@ data class DeviceConnectionSession(
 ) : AutoCloseable {
     inline fun <reified T : DeviceCapability> capability(): T? = capabilities.filterIsInstance<T>().firstOrNull()
 
+    inline fun <reified T : DeviceCapability> capabilities(): List<T> = capabilities.filterIsInstance<T>()
+
     override fun close() {
         connection.close()
     }

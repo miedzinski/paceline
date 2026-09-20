@@ -1,8 +1,8 @@
 package paceline.testsupport
 
-import paceline.device.ports.IndoorBikePowerControl
+import paceline.device.ports.TrainerControl
 
-class FakeIndoorBikePowerControl : IndoorBikePowerControl {
+class FakeTrainerControl : TrainerControl {
     var requestControlCalls = 0
         private set
     var freeRideCalls = 0

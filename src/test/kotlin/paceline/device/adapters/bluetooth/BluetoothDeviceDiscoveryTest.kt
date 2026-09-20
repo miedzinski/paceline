@@ -1,5 +1,7 @@
 package paceline.device.adapters.bluetooth
 
+import paceline.device.adapters.gatt.cyclingpower.CyclingPowerUuid
+import paceline.device.adapters.gatt.cyclingspeedcadence.CyclingSpeedCadenceUuid
 import paceline.device.adapters.gatt.ftms.FtmsUuid
 import paceline.device.adapters.gatt.heartrate.HeartRateUuid
 import paceline.device.domain.DeviceEndpoint
@@ -38,7 +40,12 @@ class BluetoothDeviceDiscoveryTest {
         assertEquals("bluetooth", found.candidates.single().metadata["transport"])
         assertEquals("-48", found.candidates.single().metadata["rssi"])
         assertEquals(
-            setOf(FtmsUuid.FITNESS_MACHINE_SERVICE, HeartRateUuid.HEART_RATE_SERVICE),
+            setOf(
+                FtmsUuid.FITNESS_MACHINE_SERVICE,
+                CyclingPowerUuid.CYCLING_POWER_SERVICE,
+                CyclingSpeedCadenceUuid.CYCLING_SPEED_CADENCE_SERVICE,
+                HeartRateUuid.HEART_RATE_SERVICE,
+            ),
             bluetooth.requestedServiceUuids,
         )
     }

@@ -16,6 +16,8 @@ import com.garmin.fit.WktStepDuration
 import com.garmin.fit.WktStepTarget
 import com.garmin.fit.WorkoutMesg
 import com.garmin.fit.WorkoutStepMesg
+import paceline.training.domain.RecordedCyclingObservation
+import paceline.training.domain.RecordedHeartRateObservation
 import paceline.training.domain.RecordedTrainingActivity
 import paceline.training.domain.RecordedTrainingActivitySegment
 import paceline.training.domain.TrainingActivityEvent
@@ -86,6 +88,67 @@ class FitActivityFileEncoderTest {
         assertEquals(90.toShort(), records[0].getFieldShortValue(RecordMesg.CadenceFieldNum))
         assertEquals(144.toShort(), records[0].getFieldShortValue(RecordMesg.HeartRateFieldNum))
         assertTrue(records[1].getFieldFloatValue(RecordMesg.Time128FieldNum) > 0.0f)
+    }
+
+    @Test
+    fun `activity export combines exact timestamps without filling sparse raw fields`() {
+        // given separate sparse cycling and heart-rate raw streams with a gap between cycling observations:
+        val firstAt = Instant.parse("2026-09-14T12:00:00Z")
+        val secondAt = Instant.parse("2026-09-14T12:00:02Z")
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+                startedAt = firstAt,
+                stoppedAt = Instant.parse("2026-09-14T12:00:03Z"),
+                name = "Sparse ride",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples = emptyList(),
+                cyclingObservations =
+                    listOf(
+                        RecordedCyclingObservation(
+                            receivedAt = firstAt,
+                            powerWatts = 200,
+                            cadenceRpm = null,
+                            speedKph = null,
+                            distanceMeters = null,
+                            sourceId = "trainer",
+                            powerSourceId = "trainer",
+                        ),
+                        RecordedCyclingObservation(
+                            receivedAt = secondAt,
+                            powerWatts = null,
+                            cadenceRpm = 90.0,
+                            speedKph = null,
+                            distanceMeters = null,
+                            sourceId = "cadence",
+                            cadenceSourceId = "cadence",
+                        ),
+                    ),
+                heartRateObservations =
+                    listOf(
+                        RecordedHeartRateObservation(
+                            receivedAt = firstAt,
+                            heartRateBpm = 145,
+                            sourceId = "strap",
+                        ),
+                    ),
+            )
+
+        // when the raw activity is encoded as FIT:
+        val records = decode(encoder.encode(activity)).filter { it.name == "record" }
+
+        // then the exporter combines only the exact timestamp and leaves absent fields unset:
+        assertEquals(2, records.size)
+        assertEquals(200, records[0].getFieldIntegerValue(RecordMesg.PowerFieldNum))
+        assertEquals(145.toShort(), records[0].getFieldShortValue(RecordMesg.HeartRateFieldNum))
+        assertNull(records[0].getFieldShortValue(RecordMesg.CadenceFieldNum))
+        assertNull(records[0].getFieldFloatValue(RecordMesg.SpeedFieldNum))
+        assertNull(records[0].getFieldFloatValue(RecordMesg.DistanceFieldNum))
+        assertNull(records[1].getFieldIntegerValue(RecordMesg.PowerFieldNum))
+        assertEquals(90.toShort(), records[1].getFieldShortValue(RecordMesg.CadenceFieldNum))
+        assertNull(records[1].getFieldFloatValue(RecordMesg.SpeedFieldNum))
+        assertNull(records[1].getFieldFloatValue(RecordMesg.DistanceFieldNum))
     }
 
     @Test
@@ -329,6 +392,53 @@ class FitActivityFileEncoderTest {
         assertEquals(2, events[2].getFieldIntegerValue(EventMesg.Data16FieldNum))
         assertNull(events[3].getFieldIntegerValue(EventMesg.Data16FieldNum))
         assertEquals(200, events[4].getFieldIntegerValue(EventMesg.Data16FieldNum))
+    }
+
+    @Test
+    fun `activity file exports pause and resume markers without synthetic samples`() {
+        // given a ride with a pause gap and no telemetry during that interval:
+        val start = Instant.parse("2026-09-14T12:00:00Z")
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.fromString("99999999-9999-9999-9999-999999999999"),
+                startedAt = start,
+                stoppedAt = start.plusSeconds(4),
+                name = "Paused ride",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples =
+                    listOf(
+                        sample(start.toString(), 1_000.0, 200),
+                        sample(start.plusSeconds(4).toString(), 1_001.0, 205),
+                    ),
+                events =
+                    listOf(
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.TRAINING_PAUSED,
+                            occurredAt = start.plusSeconds(1),
+                        ),
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.TRAINING_RESUMED,
+                            occurredAt = start.plusSeconds(3),
+                        ),
+                    ),
+            )
+
+        // when the activity is encoded as FIT:
+        val messages = decode(encoder.encode(activity))
+        val events = messages.filter { it.name == "event" }
+        val records = messages.filter { it.name == "record" }
+
+        // then the pause lifecycle is exported as markers and the gap remains a gap:
+        assertEquals(2, records.size)
+        assertEquals(
+            listOf(EventType.START, EventType.MARKER, EventType.MARKER, EventType.STOP_ALL),
+            events.map { EventType.getByValue(it.getFieldShortValue(EventMesg.EventTypeFieldNum)) },
+        )
+        assertEquals(
+            listOf(Event.TIMER, Event.USER_MARKER, Event.USER_MARKER, Event.TIMER),
+            events.map { Event.getByValue(it.getFieldShortValue(EventMesg.EventFieldNum)) },
+        )
     }
 
     private fun decode(file: ActivityFile): List<Mesg> {

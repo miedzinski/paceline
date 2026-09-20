@@ -14,9 +14,14 @@ class FakeGattClient(
     private val listeners = CopyOnWriteArrayList<(GattNotification) -> Unit>()
     val enabledNotifications = mutableListOf<UUID>()
     val writes = mutableListOf<Pair<UUID, ByteArray>>()
+    var discoverServicesCalls = 0
+        private set
     var onWrite: ((UUID, ByteArray) -> Unit)? = null
 
-    override fun discoverServices(): List<GattService> = services
+    override fun discoverServices(): List<GattService> {
+        discoverServicesCalls += 1
+        return services
+    }
 
     override fun addNotificationListener(listener: (GattNotification) -> Unit): AutoCloseable {
         check(open.get()) { "Fake GATT client is closed" }

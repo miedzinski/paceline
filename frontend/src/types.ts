@@ -1,5 +1,11 @@
 export type DeviceTransport = "WIFI" | "BLUETOOTH";
 
+export type DiscoveryPhase =
+    "READY" | "DISCOVERING" | "DISCOVERED" | "UNAVAILABLE" | "FAILED";
+
+export type ConnectionPhase =
+    "CONNECTING" | "CONNECTED" | "FAILED" | "DISCONNECTED";
+
 export interface AthleteProfile {
     athleteId: string | null;
     name: string | null;
@@ -39,27 +45,35 @@ export interface DeviceFailure {
 }
 
 export interface DeviceDiscoveryResponse {
-    state: string;
+    state: DiscoveryPhase;
     changedAt: string;
     devices: Device[];
     failure: DeviceFailure | null;
 }
 
-export interface ConnectedDevice extends DeviceEndpoint {
+export interface DeviceIdentity extends DeviceEndpoint {
     name: string;
-    id?: string | null;
 }
 
-export interface IndoorBikeTelemetry {
+export interface CyclingTelemetry {
     powerWatts: number | null;
     cadenceRpm: number | null;
     speedKph: number | null;
+    distanceMeters?: number | null;
     receivedAt: string;
 }
 
 export interface DeviceHeartRate {
     heartRateBpm: number;
     receivedAt: string;
+}
+
+export type TelemetryAvailability = "CURRENT" | "UNAVAILABLE" | "INTERRUPTED";
+
+export interface TelemetryProjection<T> {
+    availability: TelemetryAvailability;
+    sample: T | null;
+    lastReceivedAt: string | null;
 }
 
 export interface RidePoint {
@@ -70,32 +84,70 @@ export interface RidePoint {
     heartRateBpm: number | null;
 }
 
-export interface ConnectedConnection {
+export interface DeviceConnection {
     id: string;
-    state: string;
+    state: ConnectionPhase;
     changedAt: string;
-    device: ConnectedDevice;
+    device: DeviceIdentity;
     failure: DeviceFailure | null;
-    telemetry: IndoorBikeTelemetry | null;
-    heartRate: DeviceHeartRate | null;
+    telemetry: TelemetryProjection<CyclingTelemetry>;
+    heartRate: TelemetryProjection<DeviceHeartRate>;
     capabilities: string[];
 }
 
-export interface HeartRateSource {
-    id: string;
-    device: ConnectedDevice;
-    state: string;
-    heartRate: DeviceHeartRate | null;
+export interface DeviceConnectionsResponse {
+    connections: DeviceConnection[];
 }
 
-export interface DeviceConnectionResponse {
-    state: string;
-    changedAt: string;
-    device: ConnectedDevice | null;
-    failure: DeviceFailure | null;
-    telemetry: IndoorBikeTelemetry | null;
-    connections: ConnectedConnection[];
-    heartRateSources: HeartRateSource[];
+export type RideRole =
+    "RESISTANCE_CONTROL" | "POWER" | "CADENCE" | "HEART_RATE";
+
+export type RideRoleStatus =
+    "SELECTED" | "AMBIGUOUS" | "UNAVAILABLE" | "OPTIONAL";
+
+export type RideReadiness = "READY" | "SELECTION_REQUIRED" | "UNAVAILABLE";
+
+export interface RideEquipmentSelection {
+    controlSourceId: string | null;
+    powerSourceId: string | null;
+    cadenceSourceId: string | null;
+    heartRateSourceId: string | null;
+}
+
+export interface RideRoleState {
+    role: RideRole;
+    sourceId: string | null;
+    status: RideRoleStatus;
+    compatibleSourceIds: string[];
+}
+
+export interface RideEquipmentSource {
+    id: string;
+    state: ConnectionPhase;
+    name: string | null;
+    capabilities: string[];
+}
+
+export interface RideReadinessReason {
+    code: string;
+    role: RideRole;
+    sourceId: string | null;
+    compatibleSourceIds: string[];
+    message: string;
+}
+
+export interface RideEquipmentResponse {
+    readiness: RideReadiness;
+    ready: boolean;
+    readinessReasons: RideReadinessReason[];
+    assignments: RideEquipmentSelection;
+    roles: RideRoleState[];
+    sources: RideEquipmentSource[];
+}
+
+export interface TrainingSessionTelemetry {
+    cycling: TelemetryProjection<CyclingTelemetry>;
+    heartRate: TelemetryProjection<DeviceHeartRate>;
 }
 
 export interface TrainingSessionResponse {
@@ -111,10 +163,10 @@ export interface TrainingSessionResponse {
     trainerConnection: TrainerConnectionStatus;
     trainerConnectionRetryAttempt: number | null;
     trainerConnectionError: string | null;
-    heartRateSourceId: string | null;
-    heartRate: DeviceHeartRate | null;
+    telemetry: TrainingSessionTelemetry | null;
     workout: TrainingWorkoutResponse | null;
     activityUpload: TrainingActivityUploadResponse;
+    equipment: RideEquipmentResponse | null;
 }
 
 export type TrainingControlMode = "ERG" | "FREE_RIDE";

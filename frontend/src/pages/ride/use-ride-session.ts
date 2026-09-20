@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { ApiError, trainingApi } from "@/api";
 import { useAppShell } from "@/lib/app-shell";
@@ -6,11 +6,15 @@ import {
     adjustManualErgTargetWatts,
     initialManualErgTargetWatts,
 } from "@/lib/manual-erg";
-import { canAutoStartSelectedWorkout } from "@/lib/ride-entry";
+import {
+    roleState,
+    liveSessionTelemetry,
+    sourceConnection,
+} from "@/lib/ride-equipment";
+import { workoutEntryMode, type WorkoutEntryMode } from "@/lib/ride-entry";
 import { workoutDefinitionFromSession } from "@/lib/training-workout";
 import type { WorkoutItem } from "@/lib/workouts";
 import type {
-    HeartRateSource,
     RidePoint,
     TrainingSessionResponse,
     WorkoutDefinition,
@@ -22,6 +26,7 @@ const sessionPollIntervalMs = 1_000;
 interface RideLocationState {
     workoutSelection?: WorkoutSelection | null;
     workout?: WorkoutItem | null;
+    setupRequired?: boolean;
 }
 
 function createNotStartedSession(): TrainingSessionResponse {
@@ -45,14 +50,14 @@ function createNotStartedSession(): TrainingSessionResponse {
         trainerConnection: "NOT_ACTIVE",
         trainerConnectionRetryAttempt: null,
         trainerConnectionError: null,
-        heartRateSourceId: null,
-        heartRate: null,
+        telemetry: null,
         workout: null,
         activityUpload: {
             state: "UNAVAILABLE",
             remoteActivityId: null,
             error: null,
         },
+        equipment: null,
     };
 }
 
@@ -74,28 +79,38 @@ function activeWorkoutDefinition(
     return selectedWorkout?.workout ?? null;
 }
 
-function connectedHeartRateSources(
-    sources: HeartRateSource[],
-): HeartRateSource[] {
-    return sources.filter((source) => source.state === "CONNECTED");
+function workoutSelectionKey(
+    selection: WorkoutSelection | null,
+): string | null {
+    return selection === null
+        ? null
+        : `${selection.provider}:${selection.sourceType}:${selection.sourceId}`;
 }
 
 export function useRideSession() {
     const navigate = useNavigate();
     const location = useLocation();
-    const { connection, openEquipment, profile } = useAppShell();
+    const {
+        connection,
+        openEquipment,
+        profile,
+        equipment,
+        equipmentLoading,
+        equipmentError,
+    } = useAppShell();
     const routeState = (location.state as RideLocationState | null) ?? null;
     const selectedWorkout = routeState?.workout ?? null;
     const workoutSelection = routeState?.workoutSelection ?? null;
+    const selectedWorkoutKey = workoutSelectionKey(workoutSelection);
+    const setupRequired =
+        workoutSelection === null ? false : (routeState?.setupRequired ?? true);
 
     const [session, setSession] = useState<TrainingSessionResponse>(
         createNotStartedSession,
     );
     const [trace, setTrace] = useState<RidePoint[]>([]);
     const [now, setNow] = useState(0);
-    const [pendingHeartRateSourceId, setPendingHeartRateSourceId] = useState<
-        string | null
-    >(null);
+    const [sessionLoaded, setSessionLoaded] = useState(false);
     const [isStarting, setIsStarting] = useState(false);
     const [isPausing, setIsPausing] = useState(false);
     const [isResuming, setIsResuming] = useState(false);
@@ -109,12 +124,28 @@ export function useRideSession() {
     const [isDiscarding, setIsDiscarding] = useState(false);
     const [stopPromptOpen, setStopPromptOpen] = useState(false);
     const [postRideOpen, setPostRideOpen] = useState(false);
-    const [sessionLoaded, setSessionLoaded] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [automaticStartFailedKey, setAutomaticStartFailedKey] = useState<
+        string | null
+    >(null);
     const sessionRefreshGeneration = useRef(0);
-    const autoStartKeyRef = useRef<string | null>(null);
-    const liveTelemetry =
-        session.trainerConnection === "CONNECTED" ? connection.telemetry : null;
+    const automaticStartKey = useRef<string | null>(null);
+    const liveTelemetry = liveSessionTelemetry(
+        session.trainerConnection,
+        session.telemetry,
+    );
+    const cyclingProjection =
+        liveTelemetry ??
+        (session.state === "STOPPED"
+            ? (session.telemetry?.cycling ?? null)
+            : null);
+    const telemetry = {
+        cycling: cyclingProjection?.sample ?? null,
+        cyclingAvailability: cyclingProjection?.availability ?? "UNAVAILABLE",
+        heartRate: session.telemetry?.heartRate.sample ?? null,
+        heartRateAvailability:
+            session.telemetry?.heartRate.availability ?? "UNAVAILABLE",
+    };
 
     const refreshSession = useCallback(async () => {
         const requestGeneration = ++sessionRefreshGeneration.current;
@@ -132,8 +163,10 @@ export function useRideSession() {
             }
         } catch (refreshError) {
             setError(displayError(refreshError));
+            setSessionLoaded(true);
+            setAutomaticStartFailedKey(selectedWorkoutKey);
         }
-    }, []);
+    }, [selectedWorkoutKey]);
 
     useEffect(() => {
         const initialRefresh = window.setTimeout(
@@ -177,14 +210,14 @@ export function useRideSession() {
             return;
         }
 
-        const telemetry = liveTelemetry;
-        const heartRate = session.heartRate;
-        if (telemetry === null && heartRate === null) {
+        const cycling = telemetry.cycling;
+        const heartRate = telemetry.heartRate;
+        if (cycling === null && heartRate === null) {
             return;
         }
 
         const telemetryTime =
-            telemetry === null ? 0 : Date.parse(telemetry.receivedAt);
+            cycling === null ? 0 : Date.parse(cycling.receivedAt);
         const heartRateTime =
             heartRate === null ? 0 : Date.parse(heartRate.receivedAt);
         const sampleTimes = [telemetryTime, heartRateTime].filter(
@@ -196,50 +229,35 @@ export function useRideSession() {
             setTrace((current) => {
                 const point: RidePoint = {
                     timestamp,
-                    powerWatts: telemetry?.powerWatts ?? null,
-                    cadenceRpm: telemetry?.cadenceRpm ?? null,
-                    speedKph: telemetry?.speedKph ?? null,
+                    powerWatts: cycling?.powerWatts ?? null,
+                    cadenceRpm: cycling?.cadenceRpm ?? null,
+                    speedKph: cycling?.speedKph ?? null,
                     heartRateBpm: heartRate?.heartRateBpm ?? null,
                 };
                 const lastPoint = current.at(-1);
                 if (lastPoint?.timestamp === timestamp) {
-                    return [
-                        ...current.slice(0, -1),
-                        {
-                            ...lastPoint,
-                            ...point,
-                            powerWatts:
-                                point.powerWatts ?? lastPoint.powerWatts,
-                            cadenceRpm:
-                                point.cadenceRpm ?? lastPoint.cadenceRpm,
-                            speedKph: point.speedKph ?? lastPoint.speedKph,
-                            heartRateBpm:
-                                point.heartRateBpm ?? lastPoint.heartRateBpm,
-                        },
-                    ];
+                    return [...current.slice(0, -1), point];
                 }
                 return [...current, point].slice(-600);
             });
         }, 0);
         return () => window.clearTimeout(updateHandle);
-    }, [liveTelemetry, session.heartRate, session.state]);
+    }, [session.state, telemetry.cycling, telemetry.heartRate]);
 
-    const connectedSources = useMemo(
-        () => connectedHeartRateSources(connection.heartRateSources),
-        [connection.heartRateSources],
-    );
-    const trainer = connection.connections.find(
-        (item) =>
-            item.state === "CONNECTED" &&
-            item.capabilities.includes("INDOOR_BIKE_TELEMETRY"),
-    );
-    const hasErgControl =
-        trainer?.capabilities.includes("ERG_POWER_CONTROL") ?? false;
+    const controlRole =
+        equipment === null ? null : roleState(equipment, "RESISTANCE_CONTROL");
+    const trainer =
+        equipment === null
+            ? null
+            : sourceConnection(
+                  connection,
+                  equipment.assignments.controlSourceId,
+              );
+    const hasErgControl = controlRole?.status === "SELECTED";
     const selectedHeartRateSourceId =
-        session.state === "ACTIVE" || session.state === "PAUSED"
-            ? session.heartRateSourceId
-            : (pendingHeartRateSourceId ??
-              (connectedSources.length === 1 ? connectedSources[0].id : null));
+        session.equipment?.assignments.heartRateSourceId ??
+        equipment?.assignments.heartRateSourceId ??
+        null;
     const definition =
         workoutDefinitionFromSession(session.workout) ??
         activeWorkoutDefinition(selectedWorkout);
@@ -247,22 +265,17 @@ export function useRideSession() {
     const isActive = session.state === "ACTIVE";
     const isPaused = session.state === "PAUSED";
     const isStopped = session.state === "STOPPED";
-    const autoStartKey =
-        workoutSelection === null
-            ? null
-            : `${workoutSelection.provider}:${workoutSelection.sourceType}:${workoutSelection.sourceId}`;
-    const canAutoStartWorkout =
-        error === null &&
-        canAutoStartSelectedWorkout({
-            sessionLoaded,
-            sessionState: session.state,
-            workoutSelection,
-            hasErgControl,
-            heartRateSourceCount: connectedSources.length,
-            selectedHeartRateSourceId,
-        });
-    const isAutoStartingWorkout = isPreparingNewWorkout && isStarting;
-    const currentPower = liveTelemetry?.powerWatts ?? null;
+    const equipmentLoaded = equipment !== null || equipmentError !== null;
+    const currentWorkoutEntryMode: WorkoutEntryMode = workoutEntryMode({
+        sessionLoaded,
+        equipmentLoaded,
+        sessionState: session.state,
+        workoutSelection,
+        hasErgControl,
+        setupRequired:
+            setupRequired || automaticStartFailedKey === selectedWorkoutKey,
+    });
+    const currentPower = telemetry.cycling?.powerWatts ?? null;
     const requestedTarget =
         session.controlMode === "FREE_RIDE"
             ? null
@@ -282,70 +295,90 @@ export function useRideSession() {
                   ),
               );
 
-    const startSession = useCallback(async () => {
-        if (!hasErgControl) {
-            openEquipment();
-            return;
-        }
+    const startSession = useCallback(
+        async ({ automatic = false }: { automatic?: boolean } = {}) => {
+            if (equipment === null || equipmentLoading) {
+                setError(equipmentError ?? "Checking connected equipment…");
+                if (automatic) {
+                    setAutomaticStartFailedKey(selectedWorkoutKey);
+                }
+                return;
+            }
 
-        if (connectedSources.length > 1 && selectedHeartRateSourceId === null) {
-            setError("Choose a heart-rate source before starting the ride");
-            return;
-        }
+            if (!hasErgControl) {
+                if (automatic) {
+                    setAutomaticStartFailedKey(selectedWorkoutKey);
+                } else {
+                    openEquipment();
+                }
+                return;
+            }
 
-        setIsStarting(true);
-        setError(null);
-        sessionRefreshGeneration.current += 1;
-        setTrace([]);
-        setNow(0);
-        try {
-            const result = await trainingApi.start(
-                workoutSelection ?? undefined,
-                selectedHeartRateSourceId ?? undefined,
-            );
+            setIsStarting(true);
+            setError(null);
             sessionRefreshGeneration.current += 1;
-            setPendingHeartRateSourceId(result.heartRateSourceId);
-            let nextSession = result;
-            if (result.workout === null && result.sessionId !== null) {
-                const initialTarget = initialManualErgTargetWatts(profile);
-                if (initialTarget !== null) {
-                    try {
-                        nextSession = await trainingApi.setErgTarget(
-                            result.sessionId,
-                            initialTarget,
-                        );
-                    } catch (targetError) {
-                        setError(displayError(targetError));
+            setTrace([]);
+            setNow(0);
+            try {
+                const result = await trainingApi.start(
+                    workoutSelection ?? undefined,
+                    equipment.assignments,
+                );
+                sessionRefreshGeneration.current += 1;
+                let nextSession = result;
+                if (result.workout === null && result.sessionId !== null) {
+                    const initialTarget = initialManualErgTargetWatts(profile);
+                    if (initialTarget !== null) {
+                        try {
+                            nextSession = await trainingApi.setErgTarget(
+                                result.sessionId,
+                                initialTarget,
+                            );
+                        } catch (targetError) {
+                            setError(displayError(targetError));
+                        }
                     }
                 }
+                setSession(nextSession);
+            } catch (startError) {
+                setError(displayError(startError));
+                if (automatic) {
+                    setAutomaticStartFailedKey(selectedWorkoutKey);
+                }
+            } finally {
+                setIsStarting(false);
             }
-            setSession(nextSession);
-        } catch (startError) {
-            setError(displayError(startError));
-        } finally {
-            setIsStarting(false);
-        }
-    }, [
-        connectedSources.length,
-        hasErgControl,
-        openEquipment,
-        profile,
-        selectedHeartRateSourceId,
-        workoutSelection,
-    ]);
+        },
+        [
+            equipment,
+            equipmentError,
+            equipmentLoading,
+            hasErgControl,
+            openEquipment,
+            profile,
+            selectedWorkoutKey,
+            workoutSelection,
+        ],
+    );
 
     useEffect(() => {
         if (
-            !canAutoStartWorkout ||
-            autoStartKey === null ||
-            autoStartKeyRef.current === autoStartKey
+            currentWorkoutEntryMode !== "AUTO_STARTING" ||
+            session.state !== "NOT_STARTED" ||
+            selectedWorkoutKey === null ||
+            automaticStartKey.current === selectedWorkoutKey
         ) {
             return;
         }
 
-        autoStartKeyRef.current = autoStartKey;
-        void startSession();
-    }, [autoStartKey, canAutoStartWorkout, startSession]);
+        automaticStartKey.current = selectedWorkoutKey;
+        void startSession({ automatic: true });
+    }, [
+        currentWorkoutEntryMode,
+        selectedWorkoutKey,
+        session.state,
+        startSession,
+    ]);
 
     const pauseSession = useCallback(async () => {
         if (session.sessionId === null) {
@@ -487,31 +520,6 @@ export function useRideSession() {
         ],
     );
 
-    const selectHeartRateSource = useCallback(
-        async (sourceId: string) => {
-            if (sourceId === "") {
-                return;
-            }
-
-            setPendingHeartRateSourceId(sourceId);
-            if (!isActive || session.sessionId === null) {
-                return;
-            }
-
-            try {
-                setSession(
-                    await trainingApi.selectHeartRateSource(
-                        session.sessionId,
-                        sourceId,
-                    ),
-                );
-            } catch (selectionError) {
-                setError(displayError(selectionError));
-            }
-        },
-        [isActive, session.sessionId],
-    );
-
     const navigateHome = useCallback(() => navigate("/"), [navigate]);
 
     const uploadActivity = useCallback(async () => {
@@ -578,13 +586,20 @@ export function useRideSession() {
         postRideOpen,
         error,
         liveTelemetry,
-        connectedSources,
+        telemetry,
+        equipment,
+        equipmentError,
+        equipmentLoading,
         trainer,
         hasErgControl,
         selectedHeartRateSourceId,
         definition,
         isPreparingNewWorkout,
-        isAutoStartingWorkout,
+        workoutEntryMode: currentWorkoutEntryMode,
+        isWaitingToStartWorkout:
+            isPreparingNewWorkout &&
+            session.state === "NOT_STARTED" &&
+            currentWorkoutEntryMode !== "SETUP",
         isActive,
         isPaused,
         isStopped,
@@ -600,7 +615,6 @@ export function useRideSession() {
         advanceStep,
         adjustManualTarget,
         adjustWorkoutTarget,
-        selectHeartRateSource,
         uploadActivity,
         discardActivity,
     };

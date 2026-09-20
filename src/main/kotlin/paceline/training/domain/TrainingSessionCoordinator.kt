@@ -2,12 +2,17 @@ package paceline.training.domain
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
+import paceline.config.TelemetryProperties
+import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.HeartRateTelemetry
-import paceline.device.domain.IndoorBikeTelemetry
+import paceline.device.domain.TelemetryProjection
+import paceline.device.domain.isTelemetryFresh
 import paceline.training.config.ErgProtectionProperties
 import paceline.training.ports.ActivityUploadException
 import paceline.training.ports.ActivityUploader
-import paceline.training.ports.TrainingDevice
+import paceline.training.ports.ConnectedRideSource
+import paceline.training.ports.RideSourceCatalog
+import paceline.training.ports.SelectedRideEquipment
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.WorkoutStepCompletion
 import java.time.Clock
@@ -17,21 +22,23 @@ import java.util.UUID
 
 @Component
 class TrainingSessionCoordinator(
-    private val trainingDevice: TrainingDevice,
+    private val rideSourceCatalog: RideSourceCatalog,
     private val clock: Clock = Clock.systemUTC(),
     private val activityUploader: ActivityUploader,
     private val ergProtectionProperties: ErgProtectionProperties,
+    private val telemetryProperties: TelemetryProperties = TelemetryProperties(),
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     private var state = TrainingSessionState.notStarted(clock.instant())
     private val workoutExecution = WorkoutExecution()
-    private val activitySession = TrainingActivitySession(trainingDevice)
-    private val heartRateSourceSelection = HeartRateSourceSelection(trainingDevice)
+    private val rideEquipment = RideEquipmentSelector()
+    private val activitySession = TrainingActivitySession()
+    private var lastCyclingReceivedAt: Instant? = null
+    private var lastHeartRateReceivedAt: Instant? = null
     private val trainerConnection =
-        TrainerConnectionManager(
-            trainingDevice = trainingDevice,
+        TrainerControlCoordinator(
             clock = clock,
-            telemetryFreshness = ergProtectionProperties.telemetryFreshness,
+            telemetryFreshness = telemetryProperties.freshness,
             onInterrupted = ::onTrainerConnectionInterrupted,
             onRecovered = ::onTrainerConnectionRecovered,
             recordActivityEvent = ::recordActivityEvent,
@@ -39,6 +46,7 @@ class TrainingSessionCoordinator(
     private val ergProtection =
         ErgProtectionCoordinator(
             properties = ergProtectionProperties,
+            telemetryFreshness = telemetryProperties.freshness,
             setTarget = { powerWatts, description, at ->
                 trainerConnection.trySetTargetForExecution(powerWatts, description, at)
             },
@@ -47,14 +55,34 @@ class TrainingSessionCoordinator(
 
     @Synchronized
     fun current(): TrainingSessionState {
-        refreshHeartRate()
+        refreshRideEquipment()
+        refreshTelemetry()
         return state
+    }
+
+    @Synchronized
+    fun equipment(): RideEquipmentState = rideEquipment.current(rideSourceCatalog.sources())
+
+    @Synchronized
+    fun selectEquipment(selection: RideEquipmentSelection): RideEquipmentState {
+        if (state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED)) {
+            throw TrainingSessionAlreadyActiveException()
+        }
+        return rideEquipment.apply(selection, rideSourceCatalog.sources())
+    }
+
+    @Synchronized
+    fun clearEquipmentRole(role: RideRole): RideEquipmentState {
+        if (state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED)) {
+            throw TrainingSessionAlreadyActiveException()
+        }
+        return rideEquipment.clear(role, rideSourceCatalog.sources())
     }
 
     @Synchronized
     fun start(
         workout: ExecutableWorkout? = null,
-        heartRateSourceId: String? = null,
+        equipment: RideEquipmentSelection? = null,
     ): TrainingSessionState {
         if (state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED)) {
             throw TrainingSessionAlreadyActiveException()
@@ -65,16 +93,20 @@ class TrainingSessionCoordinator(
             )
         }
 
-        val selectedHeartRateSourceId = heartRateSourceSelection.resolve(heartRateSourceId)
-
-        val powerControl =
-            trainerConnection.powerControlForStart()
+        val resolvedEquipment = resolveRideEquipment(equipment)
+        val selectedEquipment = bindRideEquipment(resolvedEquipment)
+        val trainer = selectedEquipment.trainerControlConnection
+        val trainerControl =
+            trainer.control()
                 ?: throw TrainingSessionUnavailableException(
-                    "A connected device with ERG power control is required to start a training session",
+                    "A connected trainer with resistance control is required to start a training session",
                 )
-        trainerConnection.requestControl(powerControl, reason = "")
+        val initialControlTelemetry = selectedEquipment.controlTelemetry?.current()
+        trainerConnection.requestControl(trainerControl, reason = "")
 
         val now = clock.instant()
+        lastCyclingReceivedAt = null
+        lastHeartRateReceivedAt = null
         ergProtection.reset(now)
         val progress = workout?.let { TrainingWorkoutProgress.firstStep(it, now) }
         val initialFreeRide = workout == null || progress?.let(workoutExecution::isFreeRide) == true
@@ -83,15 +115,20 @@ class TrainingSessionCoordinator(
                 ?.takeUnless(workoutExecution::isFreeRide)
                 ?.let { workoutExecution.targetPower(it, now, DEFAULT_WORKOUT_POWER_TARGET_PERCENT) }
         if (initialFreeRide) {
-            trainerConnection.setFreeRide(powerControl, "initial Free Ride")
+            trainerConnection.setFreeRide(trainerControl, "initial Free Ride")
         } else if (initialTarget != null) {
-            trainerConnection.setTarget(powerControl, initialTarget, "initial workout")
+            trainerConnection.setTarget(trainerControl, initialTarget, "initial workout")
         }
 
         val sessionId = UUID.randomUUID()
-        trainerConnection.beginSession(sessionId, powerControl)
+        trainerConnection.beginSession(
+            sessionId = sessionId,
+            trainer = trainer,
+            trainerControl = trainerControl,
+            trainerTelemetry = selectedEquipment.controlTelemetry,
+        )
         if (workout != null && progress != null) {
-            workoutExecution.attach(workout, progress, trainingDevice.currentTelemetry())
+            workoutExecution.attach(workout, progress, initialControlTelemetry)
         } else {
             workoutExecution.clear()
         }
@@ -106,19 +143,27 @@ class TrainingSessionCoordinator(
                     ergRequestedTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
                     ergTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
                     workoutPowerTargetPercent = workout?.let { DEFAULT_WORKOUT_POWER_TARGET_PERCENT },
-                    heartRateSourceId = selectedHeartRateSourceId,
-                    heartRate = selectedHeartRateSourceId?.let(trainingDevice::currentHeartRate),
+                    equipment = resolvedEquipment,
                 )
         activitySession.start(
             sessionId = sessionId,
             startedAt = now,
             workout = workout,
-            heartRateSourceId = selectedHeartRateSourceId,
             initialTargetPowerWatts = initialTarget,
             onTelemetry = trainerConnection::observeTelemetry,
             onHeartRate = ::onHeartRate,
+            equipment = selectedEquipment,
+            onSourceTelemetry = { sourceId, telemetry ->
+                synchronized(this) {
+                    if (sourceId == selectedEquipment.selection.controlSourceId) {
+                        trainerConnection.observeTelemetry(telemetry)
+                    }
+                    refreshTelemetry()
+                }
+            },
         )
-        trainerConnection.observeTelemetry(trainingDevice.currentTelemetry())
+        trainerConnection.observeTelemetry(initialControlTelemetry)
+        refreshTelemetry(now)
         return state
     }
 
@@ -190,7 +235,7 @@ class TrainingSessionCoordinator(
         }
 
         trainerConnection.setTarget(
-            trainerConnection.activePowerControlOrThrow(),
+            trainerConnection.activeTrainerControlOrThrow(),
             nextTarget,
             "workout target adjustment",
         )
@@ -204,28 +249,6 @@ class TrainingSessionCoordinator(
                 workoutPowerTargetPercent = nextPercent,
             )
         recordWorkoutTargetAdjustment(changedAt, nextPercent, nextTarget)
-        return state
-    }
-
-    @Synchronized
-    fun selectHeartRateSource(
-        sessionId: UUID,
-        sourceId: String,
-    ): TrainingSessionState {
-        val activeState = requireActiveSession(sessionId)
-        heartRateSourceSelection.requireConnected(sourceId)
-        if (activitySession.selectedHeartRateSourceId() == sourceId) {
-            refreshHeartRate()
-            return state
-        }
-
-        val heartRate = activitySession.selectHeartRateSource(sessionId, sourceId)
-        state =
-            activeState.copy(
-                changedAt = clock.instant(),
-                heartRateSourceId = sourceId,
-                heartRate = heartRate,
-            )
         return state
     }
 
@@ -263,8 +286,8 @@ class TrainingSessionCoordinator(
             return state
         }
 
-        val powerControl = trainerConnection.activePowerControlOrThrow()
-        trainerConnection.setTarget(powerControl, powerWatts, "ERG target")
+        val trainerControl = trainerConnection.activeTrainerControlOrThrow()
+        trainerConnection.setTarget(trainerControl, powerWatts, "ERG target")
         ergProtection.reset(changedAt)
 
         state =
@@ -295,15 +318,22 @@ class TrainingSessionCoordinator(
                         ?: session.ergTargetPowerWatts
                 }
         val commandApplied =
-            if (trainerConnection.currentPowerControl() != null) {
+            if (trainerConnection.currentControl() != null) {
                 trainerConnection.trySetTargetForExecution(0, "0 W pause", pauseAt)
             } else {
                 trainerConnection.markConnectionInterrupted(pauseAt)
                 false
             }
-        workoutExecution.captureDistanceProgressAtPause(activeState.workout, trainingDevice.currentTelemetry())
+        workoutExecution.captureDistanceProgressAtPause(activeState.workout, currentControlTelemetry())
 
         activitySession.pauseRecording()
+        recordActivityEvent(
+            sessionId,
+            TrainingActivityEvent(
+                type = TrainingActivityEventType.TRAINING_PAUSED,
+                occurredAt = pauseAt,
+            ),
+        )
         ergProtection.reset(pauseAt)
         state =
             activeState.copy(
@@ -314,6 +344,7 @@ class TrainingSessionCoordinator(
                 ergRequestedTargetPowerWatts = targetPowerWatts,
                 ergTargetPowerWatts = if (commandApplied) 0 else null,
                 ergProtection = ErgProtectionState.inactive(),
+                telemetry = interruptTelemetry(activeState.telemetry),
             )
         return state
     }
@@ -321,7 +352,7 @@ class TrainingSessionCoordinator(
     @Synchronized
     fun resume(sessionId: UUID): TrainingSessionState {
         val pausedState = requirePausedSession(sessionId)
-        val powerControl = trainerConnection.activePowerControlOrThrow()
+        val trainerControl = trainerConnection.activeTrainerControlOrThrow()
         val resumedAt = clock.instant()
         val pauseStartedAt =
             pausedState.pauseStartedAt
@@ -363,16 +394,23 @@ class TrainingSessionCoordinator(
                     ?: 0
             }
 
-        trainerConnection.requestControl(powerControl, reason = " on resume")
+        trainerConnection.requestControl(trainerControl, reason = " on resume")
         if (freeRide) {
-            trainerConnection.setFreeRide(powerControl, "resume Free Ride")
+            trainerConnection.setFreeRide(trainerControl, "resume Free Ride")
         } else {
-            trainerConnection.setTarget(powerControl, requireNotNull(targetPowerWatts), "resume")
+            trainerConnection.setTarget(trainerControl, requireNotNull(targetPowerWatts), "resume")
         }
 
-        workoutExecution.resumeDistanceTracking(progress, trainingDevice.currentTelemetry())
+        workoutExecution.resumeDistanceTracking(progress, currentControlTelemetry())
         ergProtection.reset(resumedAt)
         activitySession.resumeRecording(sessionId)
+        recordActivityEvent(
+            sessionId,
+            TrainingActivityEvent(
+                type = TrainingActivityEventType.TRAINING_RESUMED,
+                occurredAt = resumedAt,
+            ),
+        )
         state =
             pausedState.copy(
                 phase = TrainingSessionPhase.ACTIVE,
@@ -382,9 +420,9 @@ class TrainingSessionCoordinator(
                 ergRequestedTargetPowerWatts = targetPowerWatts,
                 ergTargetPowerWatts = targetPowerWatts,
                 ergProtection = ErgProtectionState.inactive(),
-                heartRate = activitySession.currentHeartRate(),
                 workout = resumedWorkout ?: progress,
             )
+        refreshTelemetry(resumedAt)
         return state
     }
 
@@ -408,16 +446,26 @@ class TrainingSessionCoordinator(
         }
 
         val now = clock.instant()
-        trainerConnection.observeTelemetry(trainingDevice.currentTelemetry())
+        val controlTelemetry = currentControlTelemetry()
+        trainerConnection.observeTelemetry(controlTelemetry)
         val connection = ensureTrainerConnection(now)
-        val telemetry = if (connection.connected) trainingDevice.currentTelemetry() else null
+        val telemetry = if (connection.connected) currentExecutionTelemetry(controlTelemetry, now) else null
+        updateCyclingTelemetry(telemetry)
         return advanceFrom(progress, now, telemetry)
     }
 
     @Synchronized
+    fun tick(now: Instant = clock.instant()): TrainingSessionState = tickInternal(now, currentControlTelemetry())
+
+    @Synchronized
     fun tick(
-        now: Instant = clock.instant(),
-        telemetry: IndoorBikeTelemetry? = trainingDevice.currentTelemetry(),
+        now: Instant,
+        telemetry: CyclingTelemetry?,
+    ): TrainingSessionState = tickInternal(now, telemetry)
+
+    private fun tickInternal(
+        now: Instant,
+        telemetry: CyclingTelemetry?,
     ): TrainingSessionState {
         if (
             state.phase != TrainingSessionPhase.ACTIVE &&
@@ -426,17 +474,27 @@ class TrainingSessionCoordinator(
         ) {
             return state
         }
-        trainerConnection.observeTelemetry(telemetry)
+        refreshRideEquipment()
+        val suppliedTelemetry = telemetry
+        val controlTelemetry =
+            if (state.equipment?.selection?.controlSourceId != null) {
+                suppliedTelemetry?.let { currentControlTelemetry() }
+            } else {
+                suppliedTelemetry
+            }
+        trainerConnection.observeTelemetry(controlTelemetry)
         val connection = ensureTrainerConnection(now)
-        val effectiveTelemetry =
+        val effectiveControlTelemetry =
             if (!connection.connected) {
                 null
             } else if (connection.recovered) {
-                trainingDevice.currentTelemetry()
+                currentControlTelemetry()
             } else {
-                telemetry
+                controlTelemetry
             }
-        trainerConnection.observeTelemetry(effectiveTelemetry)
+        val effectiveTelemetry = currentExecutionTelemetry(effectiveControlTelemetry, now)
+        updateCyclingTelemetry(effectiveTelemetry)
+        trainerConnection.observeTelemetry(effectiveControlTelemetry)
         return try {
             if (state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE) {
                 if (connection.connected && trainerConnection.hasPendingTargetSynchronization()) {
@@ -486,8 +544,12 @@ class TrainingSessionCoordinator(
     fun stop(sessionId: UUID): TrainingSessionState {
         val activeState = requireSessionInProgress(sessionId)
         val stoppedAt = clock.instant()
+        if (activeState.phase == TrainingSessionPhase.ACTIVE) {
+            refreshTelemetry(stoppedAt)
+        }
+        val stateAtStop = state
         val commandApplied =
-            if (trainerConnection.currentPowerControl() != null) {
+            if (trainerConnection.currentControl() != null) {
                 trainerConnection.trySetTargetForExecution(0, "0 W stop", stoppedAt)
             } else {
                 trainerConnection.markConnectionInterrupted(stoppedAt)
@@ -498,7 +560,7 @@ class TrainingSessionCoordinator(
         val completedActivity = activitySession.finish(sessionId, stoppedAt)
 
         state =
-            activeState.copy(
+            stateAtStop.copy(
                 phase = TrainingSessionPhase.STOPPED,
                 changedAt = stoppedAt,
                 pauseStartedAt = null,
@@ -509,7 +571,7 @@ class TrainingSessionCoordinator(
                 ergProtection = ErgProtectionState.inactive(),
                 workout = null,
                 activityUpload =
-                    if (completedActivity.samples.isNotEmpty()) {
+                    if (completedActivity.exportSamples.isNotEmpty()) {
                         TrainingActivityUploadState.available()
                     } else {
                         TrainingActivityUploadState.unavailable()
@@ -523,29 +585,18 @@ class TrainingSessionCoordinator(
     @Synchronized
     fun discard(sessionId: UUID): TrainingSessionState {
         requireStoppedSession(sessionId)
-        if (trainerConnection.hasPendingZeroPowerCommand()) {
-            throw TrainingSessionUnavailableException(
-                "The stopped session cannot be discarded until the trainer confirms a 0 W command",
-            )
-        }
-
         return clearStoppedSession(sessionId, clock.instant())
     }
 
     @Synchronized
     fun upload(sessionId: UUID): TrainingSessionState {
         val stoppedState = requireStoppedSession(sessionId)
-        if (trainerConnection.hasPendingZeroPowerCommand()) {
-            throw TrainingSessionUnavailableException(
-                "The stopped session cannot be uploaded until the trainer confirms a 0 W command",
-            )
-        }
         val activity =
             activitySession.completedActivity()
                 ?: throw TrainingActivityUploadUnavailableException(
                     "The stopped session has no in-memory activity recording",
                 )
-        if (activity.samples.isEmpty()) {
+        if (activity.exportSamples.isEmpty()) {
             throw TrainingActivityUploadUnavailableException(
                 "The stopped session has no telemetry to upload",
             )
@@ -583,6 +634,8 @@ class TrainingSessionCoordinator(
         activitySession.discard(sessionId)
         workoutExecution.clear()
         trainerConnection.clear()
+        lastCyclingReceivedAt = null
+        lastHeartRateReceivedAt = null
         state = TrainingSessionState.notStarted(clearedAt)
         return state
     }
@@ -590,7 +643,7 @@ class TrainingSessionCoordinator(
     private fun advanceFrom(
         progress: TrainingWorkoutProgress,
         transitionAt: Instant,
-        telemetry: IndoorBikeTelemetry?,
+        telemetry: CyclingTelemetry?,
     ): TrainingSessionState {
         if (state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE) {
             throw TrainingSessionUnavailableException(
@@ -851,6 +904,139 @@ class TrainingSessionCoordinator(
             }
         }
 
+    private fun resolveRideEquipment(requested: RideEquipmentSelection?): RideEquipmentState {
+        val sources = rideSourceCatalog.sources()
+        requested?.let { rideEquipment.apply(it, sources) }
+        val resolved = rideEquipment.current(sources)
+        if (resolved.readiness != RideReadiness.READY) {
+            val ambiguousRole =
+                resolved.roles.values
+                    .firstOrNull { role -> role.status == RideRoleStatus.AMBIGUOUS }
+                    ?.role
+            if (ambiguousRole != null) {
+                throw RideEquipmentSelectionRequiredException(ambiguousRole)
+            }
+            throw RideEquipmentUnavailableException(resolved)
+        }
+        return resolved
+    }
+
+    private fun bindRideEquipment(equipment: RideEquipmentState): SelectedRideEquipment {
+        val selection = equipment.selection
+        val controlSource = connectedSource(selection.controlSourceId, RideRole.RESISTANCE_CONTROL)
+        val trainer =
+            controlSource.trainerControlConnection
+                ?: throw RideSourceIncompatibleException(controlSource.id, RideRole.RESISTANCE_CONTROL)
+        val powerTelemetry =
+            optionalRideSource(selection.powerSourceId, RideRole.POWER) { source ->
+                source.cyclingTelemetry
+            }
+        val cadenceTelemetry =
+            optionalRideSource(selection.cadenceSourceId, RideRole.CADENCE) { source ->
+                source.cyclingTelemetry
+            }
+        val heartRate =
+            optionalRideSource(selection.heartRateSourceId, RideRole.HEART_RATE) { source ->
+                source.heartRate
+            }
+        return SelectedRideEquipment(
+            selection = selection,
+            trainerControlConnection = trainer,
+            controlTelemetry = controlSource.cyclingTelemetry,
+            powerTelemetry = powerTelemetry,
+            cadenceTelemetry = cadenceTelemetry,
+            heartRate = heartRate,
+        )
+    }
+
+    private fun <T> optionalRideSource(
+        sourceId: String?,
+        role: RideRole,
+        project: (ConnectedRideSource) -> T?,
+    ): T? =
+        sourceId?.let { id ->
+            rideSourceCatalog
+                .source(id)
+                ?.takeIf { source ->
+                    source.descriptor.connected && source.descriptor.supports(role)
+                }?.let(project)
+        }
+
+    private fun connectedSource(
+        sourceId: String?,
+        role: RideRole,
+    ): paceline.training.ports.ConnectedRideSource {
+        val id = requireNotNull(sourceId) { "No source is selected for the $role ride role" }
+        val source = rideSourceCatalog.source(id) ?: throw RideSourceNotFoundException(id)
+        if (!source.descriptor.connected) {
+            throw RideSourceUnavailableException(id)
+        }
+        return source
+    }
+
+    private fun refreshRideEquipment() {
+        val sources = rideSourceCatalog.sources()
+        if (sources.isEmpty() && state.equipment == null) {
+            return
+        }
+        val equipment = rideEquipment.current(sources)
+        if (state.equipment != equipment) {
+            state = state.copy(equipment = equipment)
+        }
+    }
+
+    private fun currentControlTelemetry(): CyclingTelemetry? {
+        val controlSourceId = state.equipment?.selection?.controlSourceId
+        return controlSourceId
+            ?.let { sourceId -> rideSourceCatalog.source(sourceId)?.cyclingTelemetry?.current() }
+    }
+
+    private fun currentExecutionTelemetry(
+        controlTelemetry: CyclingTelemetry?,
+        at: Instant,
+    ): CyclingTelemetry? {
+        observeCyclingTelemetry(controlTelemetry)
+        val powerSourceId = state.equipment?.selection?.powerSourceId
+        val cadenceSourceId = state.equipment?.selection?.cadenceSourceId
+        val enforceSourceFreshness = state.equipment != null
+        val powerTelemetry =
+            powerSourceId
+                ?.let { sourceId -> rideSourceCatalog.source(sourceId)?.cyclingTelemetry?.current() }
+                ?.also(::observeCyclingTelemetry)
+                ?.takeIf { telemetry -> !enforceSourceFreshness || isFreshTelemetry(telemetry, at) }
+        val cadenceTelemetry =
+            cadenceSourceId
+                ?.let { sourceId -> rideSourceCatalog.source(sourceId)?.cyclingTelemetry?.current() }
+                ?.also(::observeCyclingTelemetry)
+                ?.takeIf { telemetry -> !enforceSourceFreshness || isFreshTelemetry(telemetry, at) }
+        val freshControlTelemetry =
+            controlTelemetry?.takeIf { telemetry -> !enforceSourceFreshness || isFreshTelemetry(telemetry, at) }
+        val receivedAt =
+            listOfNotNull(
+                freshControlTelemetry?.receivedAt,
+                powerTelemetry?.receivedAt,
+                cadenceTelemetry?.receivedAt,
+            ).maxOrNull()
+                ?: return null
+        return CyclingTelemetry(
+            powerWatts = powerTelemetry?.powerWatts,
+            cadenceRpm = cadenceTelemetry?.cadenceRpm,
+            speedKph = freshControlTelemetry?.speedKph,
+            distanceMeters = freshControlTelemetry?.distanceMeters,
+            receivedAt = receivedAt,
+        )
+    }
+
+    private fun isFreshTelemetry(
+        telemetry: CyclingTelemetry,
+        at: Instant,
+    ): Boolean =
+        isTelemetryFresh(
+            telemetry.receivedAt,
+            at,
+            telemetryProperties.freshness,
+        )
+
     private fun ensureTrainerConnection(now: Instant): TrainerConnectionAvailability {
         val availability =
             trainerConnection.ensure(
@@ -901,7 +1087,7 @@ class TrainingSessionCoordinator(
                 retryAttempt = null,
                 error = error,
             )
-            state = state.copy(heartRate = activitySession.currentHeartRate())
+            refreshTelemetry(at)
         } else if (error != null) {
             state = state.copy(changedAt = at, trainerConnectionError = error)
         }
@@ -921,8 +1107,8 @@ class TrainingSessionCoordinator(
                 trainerConnection = TrainerConnectionStatus.CONNECTED,
                 trainerConnectionRetryAttempt = null,
                 trainerConnectionError = null,
-                heartRate = activitySession.currentHeartRate(),
             )
+        refreshTelemetry(at)
     }
 
     private fun recordActivityEvent(
@@ -997,22 +1183,137 @@ class TrainingSessionCoordinator(
             if (!activitySession.recordHeartRate(sessionId, sourceId, telemetry)) {
                 return
             }
-            state = state.copy(changedAt = clock.instant(), heartRate = telemetry)
+            observeHeartRateTelemetry(telemetry)
+            val currentTelemetry = state.telemetry ?: TrainingSessionTelemetry()
+            state =
+                state.copy(
+                    changedAt = clock.instant(),
+                    telemetry = currentTelemetry.copy(heartRate = heartRateProjection(clock.instant())),
+                )
         }
     }
 
-    private fun refreshHeartRate() {
-        if (activitySession.selectedHeartRateSourceId() == null) {
-            return
-        }
-        if (state.phase != TrainingSessionPhase.ACTIVE) {
-            return
-        }
-        val latest = activitySession.currentHeartRate()
-        if (latest != state.heartRate) {
-            state = state.copy(heartRate = latest)
+    private fun refreshTelemetry(at: Instant = clock.instant()) {
+        val latest =
+            when (state.phase) {
+                TrainingSessionPhase.ACTIVE -> {
+                    TrainingSessionTelemetry(
+                        cycling = cyclingProjection(currentExecutionTelemetry(currentControlTelemetry(), at), at),
+                        heartRate = heartRateProjection(at),
+                    )
+                }
+
+                TrainingSessionPhase.STOPPED -> {
+                    state.telemetry?.let { telemetry ->
+                        TrainingSessionTelemetry(
+                            cycling = reprojectCyclingTelemetry(telemetry.cycling, at),
+                            heartRate = reprojectHeartRate(telemetry.heartRate, at),
+                        )
+                    } ?: return
+                }
+
+                else -> {
+                    return
+                }
+            }
+        if (latest != state.telemetry) {
+            state = state.copy(telemetry = latest)
         }
     }
+
+    private fun updateCyclingTelemetry(
+        telemetry: CyclingTelemetry?,
+        at: Instant = clock.instant(),
+    ) {
+        observeCyclingTelemetry(telemetry)
+        val current = state.telemetry ?: TrainingSessionTelemetry()
+        val projection = cyclingProjection(telemetry, at)
+        if (current.cycling != projection) {
+            state = state.copy(telemetry = current.copy(cycling = projection))
+        }
+    }
+
+    private fun observeCyclingTelemetry(telemetry: CyclingTelemetry?) {
+        val receivedAt = telemetry?.receivedAt ?: return
+        if (lastCyclingReceivedAt == null || receivedAt.isAfter(requireNotNull(lastCyclingReceivedAt))) {
+            lastCyclingReceivedAt = receivedAt
+        }
+    }
+
+    private fun observeHeartRateTelemetry(telemetry: HeartRateTelemetry?) {
+        val receivedAt = telemetry?.receivedAt ?: return
+        if (lastHeartRateReceivedAt == null || receivedAt.isAfter(requireNotNull(lastHeartRateReceivedAt))) {
+            lastHeartRateReceivedAt = receivedAt
+        }
+    }
+
+    private fun cyclingProjection(
+        telemetry: CyclingTelemetry?,
+        at: Instant,
+    ): TelemetryProjection<CyclingTelemetry> {
+        observeCyclingTelemetry(telemetry)
+        val lastReceivedAt = lastCyclingReceivedAt ?: state.telemetry?.cycling?.lastReceivedAt
+        return if (telemetry != null && isFreshTelemetry(telemetry, at)) {
+            TelemetryProjection.current(telemetry, telemetry.receivedAt)
+        } else if (lastReceivedAt != null) {
+            TelemetryProjection.interrupted(lastReceivedAt)
+        } else {
+            TelemetryProjection.unavailable()
+        }
+    }
+
+    private fun heartRateProjection(at: Instant): TelemetryProjection<HeartRateTelemetry> {
+        val telemetry = activitySession.currentHeartRate()
+        observeHeartRateTelemetry(telemetry)
+        val lastReceivedAt = lastHeartRateReceivedAt ?: state.telemetry?.heartRate?.lastReceivedAt
+        return if (telemetry != null && isTelemetryFresh(telemetry.receivedAt, at, telemetryProperties.freshness)) {
+            TelemetryProjection.current(telemetry, telemetry.receivedAt)
+        } else if (lastReceivedAt != null) {
+            TelemetryProjection.interrupted(lastReceivedAt)
+        } else {
+            TelemetryProjection.unavailable()
+        }
+    }
+
+    private fun reprojectCyclingTelemetry(
+        projection: TelemetryProjection<CyclingTelemetry>,
+        at: Instant,
+    ): TelemetryProjection<CyclingTelemetry> {
+        val sample = projection.sample
+        return if (sample != null && isFreshTelemetry(sample, at)) {
+            TelemetryProjection.current(sample, sample.receivedAt)
+        } else if (projection.lastReceivedAt != null) {
+            TelemetryProjection.interrupted(projection.lastReceivedAt)
+        } else {
+            TelemetryProjection.unavailable()
+        }
+    }
+
+    private fun reprojectHeartRate(
+        projection: TelemetryProjection<HeartRateTelemetry>,
+        at: Instant,
+    ): TelemetryProjection<HeartRateTelemetry> {
+        val sample = projection.sample
+        return if (sample != null && isTelemetryFresh(sample.receivedAt, at, telemetryProperties.freshness)) {
+            TelemetryProjection.current(sample, sample.receivedAt)
+        } else if (projection.lastReceivedAt != null) {
+            TelemetryProjection.interrupted(projection.lastReceivedAt)
+        } else {
+            TelemetryProjection.unavailable()
+        }
+    }
+
+    private fun interruptTelemetry(telemetry: TrainingSessionTelemetry?): TrainingSessionTelemetry? =
+        telemetry?.let {
+            TrainingSessionTelemetry(
+                cycling = interruptedOrUnavailable(it.cycling),
+                heartRate = interruptedOrUnavailable(it.heartRate),
+            )
+        }
+
+    private fun <T> interruptedOrUnavailable(projection: TelemetryProjection<T>): TelemetryProjection<T> =
+        projection.lastReceivedAt?.let(TelemetryProjection.Companion::interrupted)
+            ?: TelemetryProjection.unavailable()
 
     private companion object {
         const val DEFAULT_WORKOUT_POWER_TARGET_PERCENT = 100L

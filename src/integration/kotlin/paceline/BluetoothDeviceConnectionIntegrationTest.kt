@@ -19,10 +19,13 @@ import paceline.device.adapters.bluetooth.BluetoothDeviceCandidate
 import paceline.device.adapters.gatt.GattCharacteristic
 import paceline.device.adapters.gatt.GattCharacteristicProperty
 import paceline.device.adapters.gatt.GattService
+import paceline.device.adapters.gatt.cyclingpower.CyclingPowerUuid
+import paceline.device.adapters.gatt.cyclingspeedcadence.CyclingSpeedCadenceUuid
 import paceline.device.adapters.gatt.ftms.FtmsUuid
 import paceline.device.adapters.gatt.heartrate.HeartRateUuid
 import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionPhase
+import paceline.device.domain.DeviceCapabilityType
 import paceline.device.domain.DeviceEndpoint
 import paceline.testsupport.SyntheticBluetoothAccess
 import paceline.testsupport.SyntheticGattClient
@@ -80,7 +83,12 @@ class BluetoothDeviceConnectionIntegrationTest {
         assertTrue(response.contains("\"address\":\"AA:BB:CC:DD:EE:FF\""))
         assertTrue(response.contains("\"host\":null"))
         assertEquals(
-            setOf(FtmsUuid.FITNESS_MACHINE_SERVICE, HeartRateUuid.HEART_RATE_SERVICE),
+            setOf(
+                FtmsUuid.FITNESS_MACHINE_SERVICE,
+                CyclingPowerUuid.CYCLING_POWER_SERVICE,
+                CyclingSpeedCadenceUuid.CYCLING_SPEED_CADENCE_SERVICE,
+                HeartRateUuid.HEART_RATE_SERVICE,
+            ),
             bluetooth.requestedServiceUuids,
         )
         assertEquals(0, bluetooth.connectCalls)
@@ -110,10 +118,99 @@ class BluetoothDeviceConnectionIntegrationTest {
         bluetooth.gattClient.emit(FtmsUuid.INDOOR_BIKE_DATA, telemetryNotification())
         awaitConnectedAndTelemetry()
         val response = connectionResponse()
+        val connectionId = coordinator.connectionSnapshots().single().id
         assertTrue(response.contains("\"state\":\"CONNECTED\""))
         assertTrue(response.contains("\"powerWatts\":200"))
         assertTrue(response.contains("\"cadenceRpm\":90.0"))
         assertTrue(response.contains("\"speedKph\":25.0"))
+    }
+
+    @Test
+    fun `multiple Bluetooth sources stay independent and publish capabilities only after opening`() {
+        // given two synthetic Bluetooth advertisements with separate GATT sessions:
+        val secondGatt =
+            SyntheticGattClient(
+                listOf(
+                    GattService(
+                        FtmsUuid.FITNESS_MACHINE_SERVICE,
+                        listOf(
+                            GattCharacteristic(
+                                FtmsUuid.INDOOR_BIKE_DATA,
+                                setOf(GattCharacteristicProperty.NOTIFY),
+                            ),
+                            GattCharacteristic(
+                                FtmsUuid.FITNESS_MACHINE_CONTROL_POINT,
+                                setOf(
+                                    GattCharacteristicProperty.WRITE,
+                                    GattCharacteristicProperty.INDICATE,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        bluetooth.candidates =
+            listOf(
+                BluetoothDeviceCandidate(
+                    name = "KICKR CORE 2 Bluetooth Integration",
+                    address = "AA:BB:CC:DD:EE:FF",
+                    adapterAddress = "11:22:33:44:55:66",
+                    rssi = -42,
+                ),
+                BluetoothDeviceCandidate(
+                    name = "KICKR CORE 2 Bluetooth Second",
+                    address = "AA:BB:CC:DD:EE:01",
+                    adapterAddress = "11:22:33:44:55:66",
+                    rssi = -43,
+                ),
+            )
+        bluetooth.gattClientFactory = { endpoint ->
+            if (endpoint.address == "AA:BB:CC:DD:EE:01") secondGatt else bluetooth.gattClient
+        }
+
+        // when discovery is requested before either connection is opened:
+        val discovered = discoverResponse()
+        val deviceIds =
+            Regex("\"id\":\"([^\"]+)\"")
+                .findAll(discovered)
+                .map { it.groupValues[1] }
+                .toList()
+        val beforeConnection = connectionResponse()
+
+        // then discovery exposes no authoritative capabilities or open source records:
+        assertEquals(2, deviceIds.size)
+        assertTrue(beforeConnection.contains("\"connections\":[]"))
+        assertTrue(!beforeConnection.contains("CYCLING_TELEMETRY"))
+
+        // when both selected advertisements are opened:
+        val firstResponse = openConnectionResponse(deviceIds[0])
+        val secondResponse = openConnectionResponse(deviceIds[1])
+        val sources = coordinator.connectionSnapshots()
+
+        // then both independent connection IDs expose their post-connection capabilities:
+        assertTrue(firstResponse.contains("CYCLING_TELEMETRY"))
+        assertTrue(secondResponse.contains("ERG_POWER_CONTROL"))
+        assertEquals(2, sources.size)
+        assertTrue(sources.all { DeviceCapabilityType.CYCLING_TELEMETRY in it.capabilities })
+        assertTrue(sources.all { DeviceCapabilityType.ERG_POWER_CONTROL in it.capabilities })
+        val firstConnectionId = sources.first().id
+        val secondConnectionId = sources.last().id
+        assertTrue(firstConnectionId != secondConnectionId)
+
+        // when only the first connection is explicitly closed:
+        restClient
+            .delete()
+            .uri("/devices/connections/$firstConnectionId")
+            .exchange()
+            .expectStatus()
+            .isOk()
+
+        // then the other connection remains connected and its synthetic GATT transport remains open:
+        assertEquals(listOf(secondConnectionId), coordinator.connectionSnapshots().map { it.id })
+        val remaining = coordinator.connectionSnapshots().single()
+        assertEquals(ConnectionPhase.CONNECTED, remaining.phase)
+        assertTrue(secondGatt.isOpen())
+        coordinator.close()
     }
 
     @Test
@@ -209,7 +306,7 @@ class BluetoothDeviceConnectionIntegrationTest {
         // then profile initialization fails through the normal connection lifecycle and closes GATT:
         assertTrue(response.contains("\"state\":\"FAILED\""))
         assertTrue(response.contains("\"code\":\"CONNECTION_FAILED\""))
-        assertTrue(response.contains("notifiable FTMS Indoor Bike Data characteristic"))
+        assertTrue(response.contains("usable FTMS Indoor Bike Data or Control Point characteristic"))
         assertFalse(brokenGatt.isOpen())
     }
 
@@ -232,15 +329,19 @@ class BluetoothDeviceConnectionIntegrationTest {
             .await()
             .atMost(Duration.ofSeconds(2))
             .untilAsserted {
-                assertEquals(ConnectionPhase.CONNECTED, coordinator.current().phase)
-                assertTrue(coordinator.currentTelemetry() != null)
+                assertTrue(coordinator.connectionSnapshots().any { it.phase == ConnectionPhase.CONNECTED })
+                assertTrue(
+                    coordinator.connectionSnapshots().any { source ->
+                        coordinator.currentCyclingTelemetry(source.id) != null
+                    },
+                )
             }
     }
 
     private fun connectionResponse(): String =
         restClient
             .get()
-            .uri("/devices/connection")
+            .uri("/devices/connections")
             .exchange()
             .expectStatus()
             .isOk()

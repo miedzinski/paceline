@@ -17,12 +17,16 @@ export function MetricsPanel({
     currentPower,
     cadence,
     heartRate,
+    heartRateAvailability,
     speed,
+    heartRateSelected,
 }: {
     currentPower: number | null;
     cadence: number | null;
     heartRate: number | null;
+    heartRateAvailability: "CURRENT" | "UNAVAILABLE" | "INTERRUPTED";
     speed: number | null;
+    heartRateSelected: boolean;
 }) {
     return (
         <section className="rounded-[2rem] border border-white/[0.1] bg-[#141821] p-3 sm:p-4">
@@ -44,7 +48,15 @@ export function MetricsPanel({
                 <MetricTile
                     label="Heart rate"
                     value={formatMetric(heartRate)}
-                    unit="bpm"
+                    unit={
+                        !heartRateSelected
+                            ? "not selected"
+                            : heartRateAvailability === "CURRENT"
+                              ? "bpm"
+                              : heartRateAvailability === "INTERRUPTED"
+                                ? "interrupted"
+                                : "unavailable"
+                    }
                     accent="coral"
                 />
                 <MetricTile
@@ -174,6 +186,7 @@ export function ErrorNotice({ message }: { message: string }) {
 
 export function ConnectionBanner({
     hasTrainer,
+    trainerName,
     telemetryAvailable,
     status,
     retryAttempt,
@@ -181,6 +194,7 @@ export function ConnectionBanner({
     onOpenEquipment,
 }: {
     hasTrainer: boolean;
+    trainerName: string | null;
     telemetryAvailable: boolean;
     status: TrainingSessionResponse["trainerConnection"];
     retryAttempt: number | null;
@@ -217,6 +231,10 @@ export function ConnectionBanner({
                 )}
                 <span>
                     {message}
+                    <span className="mt-1 block text-xs text-[#f5d28c]/80">
+                        Control & recovery:{" "}
+                        {trainerName ?? "selected trainer unavailable"}
+                    </span>
                     {error ? (
                         <span className="mt-1 block text-xs text-[#f5d28c]/70">
                             {error}
