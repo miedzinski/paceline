@@ -18,39 +18,38 @@ class BluetoothDeviceDiscovery(
 ) : BluetoothDiscovery {
     private val logger = LoggerFactory.getLogger(javaClass)
 
-    override fun discover(): DeviceDiscoveryResult =
+    override fun discover(): DeviceDiscoveryResult = discover { }
+
+    override fun discover(onCandidate: (DeviceDiscoveryCandidate) -> Unit): DeviceDiscoveryResult =
         try {
-            val candidates =
-                bluetooth
-                    .discover(
-                        setOf(
-                            FtmsUuid.FITNESS_MACHINE_SERVICE,
-                            CyclingPowerUuid.CYCLING_POWER_SERVICE,
-                            CyclingSpeedCadenceUuid.CYCLING_SPEED_CADENCE_SERVICE,
-                            HeartRateUuid.HEART_RATE_SERVICE,
-                        ),
-                    ).map { candidate ->
-                        DeviceDiscoveryCandidate(
-                            name = candidate.name,
-                            endpoint =
-                                DeviceEndpoint.Bluetooth(
-                                    address = candidate.address,
-                                    adapterAddress = candidate.adapterAddress,
-                                ),
-                            metadata =
-                                buildMap {
-                                    put("transport", "bluetooth")
-                                    put("bluetooth-address", candidate.address)
-                                    put("bluetooth-adapter", candidate.adapterAddress)
-                                    candidate.rssi?.let { put("rssi", it.toString()) }
-                                },
-                        )
+            val candidates = linkedMapOf<String, DeviceDiscoveryCandidate>()
+            val serviceUuids =
+                setOf(
+                    FtmsUuid.FITNESS_MACHINE_SERVICE,
+                    CyclingPowerUuid.CYCLING_POWER_SERVICE,
+                    CyclingSpeedCadenceUuid.CYCLING_SPEED_CADENCE_SERVICE,
+                    HeartRateUuid.HEART_RATE_SERVICE,
+                )
+            bluetooth
+                .discover(serviceUuids) { candidate ->
+                    val mapped = toDeviceCandidate(candidate)
+                    val previous = candidates.put(mapped.endpoint.toString(), mapped)
+                    if (previous != mapped) {
+                        onCandidate(mapped)
                     }
-            if (candidates.isEmpty()) {
+                }.map(::toDeviceCandidate)
+                .forEach { candidate ->
+                    val previous = candidates.put(candidate.endpoint.toString(), candidate)
+                    if (previous != candidate) {
+                        onCandidate(candidate)
+                    }
+                }
+            val discovered = candidates.values.toList()
+            if (discovered.isEmpty()) {
                 DeviceDiscoveryResult.NotFound
             } else {
-                DeviceDiscoveryResult.Found(candidates).also {
-                    logger.info("Found {} device advertisement(s) via Bluetooth LE", candidates.size)
+                DeviceDiscoveryResult.Found(discovered).also {
+                    logger.info("Found {} device advertisement(s) via Bluetooth LE", discovered.size)
                 }
             }
         } catch (exception: Exception) {
@@ -59,4 +58,21 @@ class BluetoothDeviceDiscovery(
                 message = exception.message ?: "Bluetooth discovery failed",
             )
         }
+
+    private fun toDeviceCandidate(candidate: BluetoothDeviceCandidate): DeviceDiscoveryCandidate =
+        DeviceDiscoveryCandidate(
+            name = candidate.name,
+            endpoint =
+                DeviceEndpoint.Bluetooth(
+                    address = candidate.address,
+                    adapterAddress = candidate.adapterAddress,
+                ),
+            metadata =
+                buildMap {
+                    put("transport", "bluetooth")
+                    put("bluetooth-address", candidate.address)
+                    put("bluetooth-adapter", candidate.adapterAddress)
+                    candidate.rssi?.let { put("rssi", it.toString()) }
+                },
+        )
 }

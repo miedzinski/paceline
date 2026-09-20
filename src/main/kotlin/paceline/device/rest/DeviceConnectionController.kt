@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter
 import paceline.device.domain.AdvertisementOption
 import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionFailure
@@ -32,8 +33,50 @@ import java.time.Instant
 class DeviceConnectionController(
     private val coordinator: ConnectionCoordinator,
 ) {
-    @GetMapping(produces = [MediaType.APPLICATION_JSON_VALUE])
-    fun discoverDevices(): DeviceDiscoveryResponse = coordinator.discover().toResponse()
+    @GetMapping("/discovery", produces = [MediaType.APPLICATION_JSON_VALUE])
+    fun getDiscovery(): DeviceDiscoveryResponse = coordinator.discoverySnapshot().toResponse()
+
+    @PostMapping("/discovery", produces = [MediaType.APPLICATION_JSON_VALUE])
+    fun startDiscovery(): DeviceDiscoveryResponse = coordinator.startDiscovery().toResponse()
+
+    @GetMapping("/discovery/events", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
+    fun discoveryEvents(): SseEmitter {
+        val emitter = SseEmitter(Long.MAX_VALUE)
+        var registration: AutoCloseable? = null
+        var listenerFailed = false
+        val closeRegistration = {
+            registration?.let { registered ->
+                registration = null
+                runCatching { registered.close() }
+            }
+            Unit
+        }
+        val sendSnapshot: (DiscoverySnapshot) -> Unit = { snapshot ->
+            try {
+                emitter.send(
+                    SseEmitter
+                        .event()
+                        .name("discovery")
+                        .data(snapshot.toResponse(), MediaType.APPLICATION_JSON),
+                )
+            } catch (exception: Exception) {
+                listenerFailed = true
+                closeRegistration()
+                emitter.completeWithError(exception)
+            }
+        }
+        emitter.onCompletion(closeRegistration)
+        emitter.onTimeout {
+            closeRegistration()
+            emitter.complete()
+        }
+        emitter.onError { closeRegistration() }
+        registration = coordinator.addDiscoveryListener(sendSnapshot)
+        if (listenerFailed) {
+            closeRegistration()
+        }
+        return emitter
+    }
 
     @GetMapping("/connections", produces = [MediaType.APPLICATION_JSON_VALUE])
     fun getDeviceConnections(): DeviceConnectionsResponse = coordinator.toResponse()
@@ -64,6 +107,7 @@ class DeviceConnectionController(
 data class DeviceDiscoveryResponse(
     val state: DiscoveryPhase,
     val changedAt: Instant,
+    val lastScanAt: Instant?,
     val devices: List<DeviceResponse>,
     val failure: DeviceFailureResponse?,
 )
@@ -122,6 +166,7 @@ private fun DiscoverySnapshot.toResponse(): DeviceDiscoveryResponse =
     DeviceDiscoveryResponse(
         state = state.phase,
         changedAt = state.changedAt,
+        lastScanAt = lastScanAt,
         devices = devices.map(AdvertisementOption::toResponse),
         failure = (failure ?: state.failure)?.toResponse(),
     )

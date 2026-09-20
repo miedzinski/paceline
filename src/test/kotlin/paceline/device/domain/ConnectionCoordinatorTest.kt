@@ -7,6 +7,7 @@ import paceline.device.ports.DeviceCommunicationException
 import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
 import paceline.device.ports.TrainerControl
+import paceline.device.ports.WifiDiscovery
 import paceline.testsupport.FakeBluetoothDiscovery
 import paceline.testsupport.FakeCyclingTelemetrySource
 import paceline.testsupport.FakeDeviceCommunication
@@ -19,6 +20,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
@@ -81,6 +83,136 @@ class ConnectionCoordinatorTest {
         assertEquals(device, result.devices.single().device)
         assertEquals(emptyList(), communication.connectedDevices)
         assertEquals(DiscoveryPhase.DISCOVERED, coordinator.discoveryState().phase)
+    }
+
+    @Test
+    fun `asynchronous discovery exposes one shared in-progress snapshot before completing`() {
+        // given a discovery source that keeps the background scan in progress:
+        val scanStarted = CountDownLatch(1)
+        val releaseScan = CountDownLatch(1)
+        val wifiDiscovery =
+            WifiDiscovery {
+                scanStarted.countDown()
+                releaseScan.await(1, TimeUnit.SECONDS)
+                DeviceDiscoveryResult.Found(listOf(candidate))
+            }
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery = wifiDiscovery,
+                bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound),
+                communication = FakeDeviceCommunication(),
+            )
+
+        // when a client starts the shared scan:
+        val started = coordinator.startDiscovery()
+
+        // then every client-readable snapshot reports that the same scan is in progress:
+        assertEquals(DiscoveryPhase.DISCOVERING, started.state.phase)
+        assertTrue(scanStarted.await(1, TimeUnit.SECONDS))
+        assertEquals(DiscoveryPhase.DISCOVERING, coordinator.discoverySnapshot().state.phase)
+
+        // when the discovery source completes:
+        releaseScan.countDown()
+
+        // then the shared snapshot becomes the completed result:
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            val snapshot = coordinator.discoverySnapshot()
+            assertEquals(DiscoveryPhase.DISCOVERED, snapshot.state.phase)
+            assertEquals(device, snapshot.devices.single().device)
+            assertTrue(snapshot.lastScanAt != null)
+        }
+        coordinator.close()
+    }
+
+    @Test
+    fun `asynchronous discovery publishes candidates before the scan completes`() {
+        // given a discovery source that emits an advertisement and keeps its scan open:
+        val candidatePublished = CountDownLatch(1)
+        val releaseScan = CountDownLatch(1)
+        val wifiDiscovery =
+            object : WifiDiscovery {
+                override fun discover(): DeviceDiscoveryResult = DeviceDiscoveryResult.Found(listOf(candidate))
+
+                override fun discover(onCandidate: (DeviceDiscoveryCandidate) -> Unit): DeviceDiscoveryResult {
+                    onCandidate(candidate)
+                    candidatePublished.countDown()
+                    releaseScan.await(1, TimeUnit.SECONDS)
+                    return DeviceDiscoveryResult.Found(listOf(candidate))
+                }
+            }
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery = wifiDiscovery,
+                bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound),
+                communication = FakeDeviceCommunication(),
+            )
+        val snapshots = CopyOnWriteArrayList<DiscoverySnapshot>()
+        val registration = coordinator.addDiscoveryListener { snapshot -> snapshots += snapshot }
+
+        // when a client starts the shared scan:
+        coordinator.startDiscovery()
+
+        // then the candidate is visible on the shared stream while discovery is still active:
+        assertTrue(candidatePublished.await(1, TimeUnit.SECONDS))
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            assertTrue(
+                snapshots.any { snapshot ->
+                    snapshot.state.phase == DiscoveryPhase.DISCOVERING &&
+                        snapshot.devices.any { it.device == device }
+                },
+            )
+        }
+        val streamedId =
+            snapshots
+                .first { snapshot ->
+                    snapshot.state.phase == DiscoveryPhase.DISCOVERING &&
+                        snapshot.devices.any { it.device == device }
+                }.devices
+                .single { it.device == device }
+                .id
+
+        // when both source scan windows complete:
+        releaseScan.countDown()
+
+        // then the final snapshot closes the scan with the collected result:
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            val snapshot = coordinator.discoverySnapshot()
+            assertEquals(DiscoveryPhase.DISCOVERED, snapshot.state.phase)
+            assertEquals(streamedId, snapshot.devices.single().id)
+        }
+        registration.close()
+        coordinator.close()
+    }
+
+    @Test
+    fun `failed asynchronous discovery clears the previous result`() {
+        // given a completed discovery result that is followed by a failed refresh:
+        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val coordinator =
+            ConnectionCoordinator(
+                wifiDiscovery = wifiDiscovery,
+                bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound),
+                communication = FakeDeviceCommunication(),
+            )
+        coordinator.discover()
+        wifiDiscovery.result =
+            DeviceDiscoveryResult.Failed(
+                DiscoveryFailureCode.DISCOVERY_ERROR,
+                "The network scan failed",
+            )
+
+        // when the failed refresh completes:
+        coordinator.startDiscovery()
+
+        // then the shared result is empty and exposes the failure:
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
+            val snapshot = coordinator.discoverySnapshot()
+            assertEquals(DiscoveryPhase.FAILED, snapshot.state.phase)
+            assertEquals(emptyList(), snapshot.devices)
+            assertEquals("The network scan failed", snapshot.failure?.message)
+            assertNull(snapshot.lastScanAt)
+        }
+        coordinator.close()
     }
 
     @Test

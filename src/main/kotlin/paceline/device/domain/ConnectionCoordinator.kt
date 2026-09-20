@@ -14,9 +14,12 @@ import paceline.device.ports.HeartRateTelemetrySource
 import paceline.device.ports.TrainerControl
 import paceline.device.ports.WifiDiscovery
 import java.time.Clock
+import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -58,7 +61,20 @@ class ConnectionCoordinator(
     private val logger = LoggerFactory.getLogger(javaClass)
     private val discoveryStateMachine = DiscoveryStateMachine(clock)
     private val discoveredDevices = linkedMapOf<String, DeviceAdvertisement>()
+    private val currentDiscoveryDevices = linkedMapOf<String, DeviceAdvertisement>()
     private val connections = linkedMapOf<String, ManagedConnection>()
+    private val discoveryExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "paceline-device-discovery").apply {
+                isDaemon = true
+            }
+        }
+    private val discoverySourceExecutor: ExecutorService =
+        Executors.newFixedThreadPool(2) { runnable ->
+            Thread(runnable, "paceline-device-discovery-source").apply {
+                isDaemon = true
+            }
+        }
     private val recoveryExecutor: ExecutorService =
         Executors.newCachedThreadPool { runnable ->
             Thread(runnable, "paceline-trainer-recovery").apply {
@@ -67,9 +83,57 @@ class ConnectionCoordinator(
         }
     private var connectionRecoveryGeneration = 0L
     private val connectionRecoveries = linkedMapOf<String, ConnectionRecovery>()
+    private val discoveryListeners = CopyOnWriteArrayList<(DiscoverySnapshot) -> Unit>()
+    private var lastScanAt: Instant? = null
+    private var discoveryGeneration = 0L
+    private var closed = false
 
     @Synchronized
     fun discoveryState(): DiscoveryState = discoveryStateMachine.current()
+
+    @Synchronized
+    fun discoverySnapshot(): DiscoverySnapshot = discoverySnapshot(discoveryStateMachine.current())
+
+    @Synchronized
+    fun addDiscoveryListener(listener: (DiscoverySnapshot) -> Unit): AutoCloseable {
+        listener(discoverySnapshot(discoveryStateMachine.current()))
+        discoveryListeners += listener
+        return AutoCloseable { discoveryListeners -= listener }
+    }
+
+    @Synchronized
+    fun startDiscovery(): DiscoverySnapshot {
+        refreshConnectionStates()
+        val current = discoveryStateMachine.current()
+        if (current.phase == DiscoveryPhase.DISCOVERING) {
+            return discoverySnapshot(current)
+        }
+
+        val generation = beginDiscovery()
+        val started = discoverySnapshot(discoveryStateMachine.current())
+        publishDiscoverySnapshot(started)
+        return try {
+            discoveryExecutor.execute {
+                val result = discoverResult(generation)
+                synchronized(this) {
+                    if (!closed && discoveryGeneration == generation) {
+                        publishDiscoverySnapshot(completeDiscovery(result))
+                    }
+                }
+            }
+            started
+        } catch (exception: Exception) {
+            val completed =
+                completeDiscovery(
+                    DeviceDiscoveryResult.Failed(
+                        code = DiscoveryFailureCode.DISCOVERY_ERROR,
+                        message = exception.message ?: "Device discovery could not be started",
+                    ),
+                )
+            publishDiscoverySnapshot(completed)
+            completed
+        }
+    }
 
     @Synchronized
     fun connectionSnapshots(): List<ConnectionSnapshot> {
@@ -152,34 +216,49 @@ class ConnectionCoordinator(
         }
     }
 
-    @Synchronized
     fun discover(): DiscoverySnapshot {
-        refreshConnectionStates()
-        discoveryStateMachine.transition(DiscoveryEvent.Begin)
-
-        val result =
-            try {
-                discoverFromSources()
-            } catch (exception: Exception) {
-                DeviceDiscoveryResult.Failed(
-                    code = DiscoveryFailureCode.DISCOVERY_ERROR,
-                    message = exception.message ?: "Device discovery failed",
-                )
+        val scan =
+            synchronized(this) {
+                refreshConnectionStates()
+                val current = discoveryStateMachine.current()
+                if (current.phase == DiscoveryPhase.DISCOVERING) {
+                    return discoverySnapshot(current)
+                }
+                val generation = beginDiscovery()
+                generation to discoverySnapshot(discoveryStateMachine.current())
             }
+        publishDiscoverySnapshot(scan.second)
+        val generation = scan.first
+        val result = discoverResult(generation)
+        return synchronized(this) {
+            val completed = completeDiscovery(result)
+            publishDiscoverySnapshot(completed)
+            completed
+        }
+    }
 
-        return when (result) {
+    private fun beginDiscovery(): Long {
+        currentDiscoveryDevices.clear()
+        if (!hasFreshDiscovery()) {
+            discoveredDevices.clear()
+        }
+        val generation = ++discoveryGeneration
+        discoveryStateMachine.transition(DiscoveryEvent.Begin)
+        return generation
+    }
+
+    private fun completeDiscovery(result: DeviceDiscoveryResult): DiscoverySnapshot =
+        when (result) {
             is DeviceDiscoveryResult.Found -> {
-                discoveredDevices.clear()
-                result.candidates
-                    .map(DeviceDiscoveryCandidate::toDeviceAdvertisement)
-                    .forEach { device ->
-                        discoveredDevices[UUID.randomUUID().toString()] = device
-                    }
+                replaceDiscoveredDevices(result.candidates)
+                lastScanAt = clock.instant()
                 discoverySnapshot(discoveryStateMachine.transition(DiscoveryEvent.DevicesFound))
             }
 
             DeviceDiscoveryResult.NotFound -> {
                 discoveredDevices.clear()
+                currentDiscoveryDevices.clear()
+                lastScanAt = clock.instant()
                 discoverySnapshot(
                     discoveryStateMachine.transition(
                         DiscoveryEvent.Unavailable(
@@ -191,12 +270,38 @@ class ConnectionCoordinator(
 
             is DeviceDiscoveryResult.Failed -> {
                 discoveredDevices.clear()
+                currentDiscoveryDevices.clear()
+                lastScanAt = null
                 discoverySnapshot(
                     discoveryStateMachine.transition(DiscoveryEvent.Failed(result.code, result.message)),
                 )
             }
         }
+
+    private fun replaceDiscoveredDevices(candidates: List<DeviceDiscoveryCandidate>) {
+        val currentScanDevices = currentDiscoveryDevices.entries.toList()
+        discoveredDevices.clear()
+        candidates
+            .map(DeviceDiscoveryCandidate::toDeviceAdvertisement)
+            .forEach { device ->
+                val existingId =
+                    currentScanDevices
+                        .firstOrNull { (_, current) -> sameEndpoint(current, device) }
+                        ?.key
+                discoveredDevices[existingId ?: UUID.randomUUID().toString()] = device
+            }
+        currentDiscoveryDevices.clear()
     }
+
+    private fun discoverResult(generation: Long): DeviceDiscoveryResult =
+        try {
+            discoverFromSources(generation)
+        } catch (exception: Exception) {
+            DeviceDiscoveryResult.Failed(
+                code = DiscoveryFailureCode.DISCOVERY_ERROR,
+                message = exception.message ?: "Device discovery failed",
+            )
+        }
 
     @Synchronized
     fun connect(deviceId: String): ConnectionSnapshot {
@@ -368,13 +473,17 @@ class ConnectionCoordinator(
 
     @Synchronized
     override fun close() {
+        closed = true
         connectionRecoveries.values.forEach { recovery ->
             recovery.future.complete(null)
         }
         connectionRecoveries.clear()
         connections.values.forEach { managed -> closeConnection(managed.session) }
         connections.clear()
+        discoveryExecutor.shutdownNow()
+        discoverySourceExecutor.shutdownNow()
         recoveryExecutor.shutdownNow()
+        discoveryListeners.clear()
     }
 
     private fun snapshot(managed: ManagedConnection): ConnectionSnapshot {
@@ -422,8 +531,30 @@ class ConnectionCoordinator(
 
     private fun connectedConnection(connectionId: String): ManagedConnection? = connections[connectionId]?.takeIf(::isConnected)
 
-    private fun discoverFromSources(): DeviceDiscoveryResult {
-        val results = listOf(wifiDiscovery.discover(), bluetoothDiscovery.discover())
+    private fun discoverFromSources(generation: Long): DeviceDiscoveryResult {
+        val results =
+            listOf(
+                CompletableFuture.supplyAsync(
+                    {
+                        runDiscoverySource("Wi-Fi") { onCandidate ->
+                            wifiDiscovery.discover { candidate ->
+                                onCandidate(generation, candidate)
+                            }
+                        }
+                    },
+                    discoverySourceExecutor,
+                ),
+                CompletableFuture.supplyAsync(
+                    {
+                        runDiscoverySource("Bluetooth") { onCandidate ->
+                            bluetoothDiscovery.discover { candidate ->
+                                onCandidate(generation, candidate)
+                            }
+                        }
+                    },
+                    discoverySourceExecutor,
+                ),
+            ).map { future -> future.join() }
         val candidates =
             results
                 .filterIsInstance<DeviceDiscoveryResult.Found>()
@@ -439,12 +570,90 @@ class ConnectionCoordinator(
             ?: DeviceDiscoveryResult.NotFound
     }
 
+    private fun runDiscoverySource(
+        source: String,
+        operation: ((Long, DeviceDiscoveryCandidate) -> Unit) -> DeviceDiscoveryResult,
+    ): DeviceDiscoveryResult =
+        try {
+            operation { generation, candidate -> reportDiscoveryCandidate(generation, candidate) }
+        } catch (exception: Exception) {
+            logger.warn("{} discovery source failed", source, exception)
+            DeviceDiscoveryResult.Failed(
+                code = DiscoveryFailureCode.DISCOVERY_ERROR,
+                message = exception.message ?: "$source discovery failed",
+            )
+        }
+
+    private fun reportDiscoveryCandidate(
+        generation: Long,
+        candidate: DeviceDiscoveryCandidate,
+    ) {
+        val snapshot =
+            synchronized(this) {
+                if (closed || discoveryGeneration != generation ||
+                    discoveryStateMachine.current().phase != DiscoveryPhase.DISCOVERING
+                ) {
+                    null
+                } else {
+                    val device = candidate.toDeviceAdvertisement()
+                    val existingId =
+                        currentDiscoveryDevices.entries
+                            .firstOrNull { (_, existing) -> sameEndpoint(existing, device) }
+                            ?.key
+                    val id = existingId ?: UUID.randomUUID().toString()
+                    currentDiscoveryDevices[id] = device
+                    discoveredDevices.entries.removeIf { (existingId, existing) ->
+                        existingId != id && sameEndpoint(existing, device)
+                    }
+                    val previous = discoveredDevices.put(id, device)
+                    if (previous == device) null else discoverySnapshot(discoveryStateMachine.current())
+                }
+            }
+        snapshot?.let(::publishDiscoverySnapshot)
+    }
+
+    private fun publishDiscoverySnapshot(snapshot: DiscoverySnapshot) {
+        discoveryListeners.forEach { listener ->
+            runCatching { listener(snapshot) }
+                .onFailure { exception ->
+                    logger.debug("Discovery snapshot listener failed", exception)
+                }
+        }
+    }
+
     private fun discoverySnapshot(state: DiscoveryState): DiscoverySnapshot =
         DiscoverySnapshot(
             state = state,
             devices = discoveredDevices.toOptions(),
             failure = state.failure,
+            lastScanAt = lastScanAt,
         )
+
+    private fun hasFreshDiscovery(): Boolean {
+        val scanAt = lastScanAt ?: return false
+        val age = Duration.between(scanAt, clock.instant())
+        return !age.isNegative && age < DISCOVERY_FRESHNESS
+    }
+
+    private fun sameEndpoint(
+        first: DeviceAdvertisement,
+        second: DeviceAdvertisement,
+    ): Boolean =
+        when {
+            first.endpoint is DeviceEndpoint.Wifi && second.endpoint is DeviceEndpoint.Wifi -> {
+                first.endpoint.host.equals(second.endpoint.host, ignoreCase = true) &&
+                    first.endpoint.port == second.endpoint.port
+            }
+
+            first.endpoint is DeviceEndpoint.Bluetooth && second.endpoint is DeviceEndpoint.Bluetooth -> {
+                first.endpoint.address.equals(second.endpoint.address, ignoreCase = true) &&
+                    first.endpoint.adapterAddress.equals(second.endpoint.adapterAddress, ignoreCase = true)
+            }
+
+            else -> {
+                false
+            }
+        }
 
     private fun Map<String, DeviceAdvertisement>.toOptions(): List<AdvertisementOption> =
         entries.map { (id, device) ->
@@ -588,6 +797,7 @@ class ConnectionCoordinator(
     }
 
     private companion object {
+        val DISCOVERY_FRESHNESS: Duration = Duration.ofMinutes(2)
         val stableIdentityKeys =
             listOf(
                 "serial-number",

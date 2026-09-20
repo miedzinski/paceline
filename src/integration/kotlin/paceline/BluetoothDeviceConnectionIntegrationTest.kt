@@ -316,7 +316,7 @@ class BluetoothDeviceConnectionIntegrationTest {
         bluetooth.candidates = emptyList()
 
         // when the available-devices endpoint is requested:
-        val response = discoverResponse()
+        val response = discoverResponse(expectedState = "UNAVAILABLE")
 
         // then the application reports an unavailable device without attempting a connection:
         assertTrue(response.contains("\"state\":\"UNAVAILABLE\""))
@@ -349,16 +349,30 @@ class BluetoothDeviceConnectionIntegrationTest {
             .returnResult()
             .responseBody!!
 
-    private fun discoverResponse(): String =
+    private fun discoverResponse(expectedState: String = "DISCOVERED"): String {
         restClient
-            .get()
-            .uri("/devices")
+            .post()
+            .uri("/devices/discovery")
             .exchange()
             .expectStatus()
             .isOk()
-            .expectBody(String::class.java)
-            .returnResult()
-            .responseBody!!
+
+        var response = ""
+        Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted {
+            response =
+                restClient
+                    .get()
+                    .uri("/devices/discovery")
+                    .exchange()
+                    .expectStatus()
+                    .isOk()
+                    .expectBody(String::class.java)
+                    .returnResult()
+                    .responseBody!!
+            assertTrue(response.contains("\"state\":\"$expectedState\""))
+        }
+        return response
+    }
 
     private fun deviceId(response: String): String =
         Regex("\"id\":\"([^\"]+)\"")

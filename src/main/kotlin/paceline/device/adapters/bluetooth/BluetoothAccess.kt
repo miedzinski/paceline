@@ -14,6 +14,14 @@ data class BluetoothDeviceCandidate(
 interface BluetoothAccess : AutoCloseable {
     fun discover(serviceUuids: Set<UUID> = emptySet()): List<BluetoothDeviceCandidate>
 
+    fun discover(
+        serviceUuids: Set<UUID> = emptySet(),
+        onCandidate: (BluetoothDeviceCandidate) -> Unit,
+    ): List<BluetoothDeviceCandidate> =
+        discover(serviceUuids).also { candidates ->
+            candidates.forEach(onCandidate)
+        }
+
     fun connect(endpoint: DeviceEndpoint.Bluetooth): GattClient
 
     override fun close()

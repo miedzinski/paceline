@@ -27,7 +27,13 @@ import paceline.testsupport.TestWftnpServer
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.jmdns.JmDNS
 import javax.jmdns.ServiceInfo
 import kotlin.test.assertContentEquals
@@ -77,6 +83,83 @@ class DeviceConnectionIntegrationTest {
         // then no device protocol connection has been opened and the source list is empty:
         assertTrue(response.contains("\"connections\":[]"))
         assertEquals(0, deviceServer.acceptedConnections)
+    }
+
+    @Test
+    fun `shared discovery endpoint exposes progress and the completed result`() {
+        // given the application has not run discovery yet:
+        assertEquals(DiscoveryPhase.READY, coordinator.discoveryState().phase)
+
+        // when one browser starts the shared background scan:
+        val started =
+            restClient
+                .post()
+                .uri("/devices/discovery")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody(String::class.java)
+                .returnResult()
+                .responseBody!!
+
+        // then the other browser-readable status starts in the discovering phase:
+        assertTrue(started.contains("\"state\":\"DISCOVERING\""))
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted {
+            val completed =
+                restClient
+                    .get()
+                    .uri("/devices/discovery")
+                    .exchange()
+                    .expectStatus()
+                    .isOk()
+                    .expectBody(String::class.java)
+                    .returnResult()
+                    .responseBody!!
+            assertTrue(completed.contains("\"state\":\"DISCOVERED\""))
+            assertTrue(completed.contains("\"name\":\"KICKR CORE 2 Integration\""))
+            assertTrue(completed.contains("\"lastScanAt\":\""))
+        }
+    }
+
+    @Test
+    fun `discovery event stream exposes the current snapshot`() {
+        // given the application has not run discovery yet:
+        val request =
+            HttpRequest
+                .newBuilder(URI("http://127.0.0.1:$serverPort/devices/discovery/events"))
+                .header("Accept", MediaType.TEXT_EVENT_STREAM_VALUE)
+                .build()
+
+        // when a browser subscribes to the shared discovery stream:
+        val response =
+            HttpClient
+                .newHttpClient()
+                .sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
+                .get(5, TimeUnit.SECONDS)
+
+        // then the stream immediately sends the current snapshot:
+        assertEquals(200, response.statusCode())
+        assertTrue(
+            response
+                .headers()
+                .firstValue("Content-Type")
+                .orElse("")
+                .startsWith("text/event-stream"),
+        )
+        val readerExecutor = Executors.newSingleThreadExecutor()
+        try {
+            response.body().bufferedReader().use { reader ->
+                val dataLine =
+                    readerExecutor
+                        .submit<String> {
+                            generateSequence { reader.readLine() }
+                                .first { line -> line.startsWith("data:") }
+                        }.get(5, TimeUnit.SECONDS)
+                assertTrue(dataLine.contains("\"state\":\"READY\""))
+            }
+        } finally {
+            readerExecutor.shutdownNow()
+        }
     }
 
     @Test
@@ -241,16 +324,30 @@ class DeviceConnectionIntegrationTest {
             .returnResult()
             .responseBody!!
 
-    private fun discoverResponse(): String =
+    private fun discoverResponse(): String {
         restClient
-            .get()
-            .uri("/devices")
+            .post()
+            .uri("/devices/discovery")
             .exchange()
             .expectStatus()
             .isOk()
-            .expectBody(String::class.java)
-            .returnResult()
-            .responseBody!!
+
+        var response = ""
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted {
+            response =
+                restClient
+                    .get()
+                    .uri("/devices/discovery")
+                    .exchange()
+                    .expectStatus()
+                    .isOk()
+                    .expectBody(String::class.java)
+                    .returnResult()
+                    .responseBody!!
+            assertTrue(response.contains("\"state\":\"DISCOVERED\""))
+        }
+        return response
+    }
 
     private fun deviceId(response: String): String =
         Regex("\"id\":\"([^\"]+)\"")

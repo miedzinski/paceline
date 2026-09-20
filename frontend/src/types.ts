@@ -47,6 +47,7 @@ export interface DeviceFailure {
 export interface DeviceDiscoveryResponse {
     state: DiscoveryPhase;
     changedAt: string;
+    lastScanAt: string | null;
     devices: Device[];
     failure: DeviceFailure | null;
 }

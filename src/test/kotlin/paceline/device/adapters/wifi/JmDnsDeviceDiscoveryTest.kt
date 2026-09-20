@@ -3,6 +3,7 @@ package paceline.device.adapters.wifi
 import io.mockk.every
 import io.mockk.mockk
 import paceline.device.config.DeviceProperties
+import paceline.device.domain.DeviceDiscoveryCandidate
 import paceline.device.domain.DeviceEndpoint
 import paceline.device.domain.DiscoveryFailureCode
 import paceline.device.ports.DeviceDiscoveryResult
@@ -10,7 +11,9 @@ import java.io.IOException
 import java.time.Duration
 import java.util.Collections
 import javax.jmdns.JmDNS
+import javax.jmdns.ServiceEvent
 import javax.jmdns.ServiceInfo
+import javax.jmdns.ServiceListener
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -19,7 +22,7 @@ class JmDnsDeviceDiscoveryTest {
     @Test
     fun `maps returned Wahoo TNP advertisements to discovery candidates`() {
         // given mDNS service records returned by JmDNS:
-        val jmDns = mockk<JmDNS>()
+        val jmDns = mockk<JmDNS>(relaxed = true)
         val deviceService =
             serviceInfo(
                 qualifiedName = "KICKR CORE 77AB._wahoo-fitness-tnp._tcp.local.",
@@ -40,14 +43,20 @@ class JmDnsDeviceDiscoveryTest {
                 port = 12345,
                 addresses = emptyList(),
             )
-        every { jmDns.list(any<String>(), any<Long>()) } returns arrayOf(deviceService, unrelatedService)
-        val properties = DeviceProperties(discoveryTimeout = Duration.ofSeconds(1))
+        val properties = DeviceProperties(discoveryTimeout = Duration.ofMillis(1))
+        every { jmDns.addServiceListener(any(), any()) } answers {
+            val listener = secondArg<ServiceListener>()
+            listener.serviceResolved(serviceEvent(deviceService, "KICKR CORE 77AB"))
+            listener.serviceResolved(serviceEvent(unrelatedService, "Unrelated TNP service"))
+        }
 
         // when the discovery adapter browses for devices:
-        val result = JmDnsDeviceDiscovery(jmDns, properties).discover()
+        val streamed = mutableListOf<DeviceDiscoveryCandidate>()
+        val result = JmDnsDeviceDiscovery(jmDns, properties).discover { candidate -> streamed += candidate }
         val found = assertIs<DeviceDiscoveryResult.Found>(result)
 
         // then it translates every record without applying device-selection policy:
+        assertEquals(2, streamed.size)
         assertEquals(2, found.candidates.size)
         assertEquals("KICKR CORE 77AB", found.candidates[0].name)
         val endpoint = assertIs<DeviceEndpoint.Wifi>(found.candidates[0].endpoint)
@@ -60,11 +69,11 @@ class JmDnsDeviceDiscoveryTest {
     @Test
     fun `returns not found when JmDNS returns no services`() {
         // given JmDNS with no service records:
-        val jmDns = mockk<JmDNS>()
-        every { jmDns.list(any<String>(), any<Long>()) } returns emptyArray()
+        val jmDns = mockk<JmDNS>(relaxed = true)
+        val properties = DeviceProperties(discoveryTimeout = Duration.ofMillis(1))
 
         // when discovery is requested:
-        val result = JmDnsDeviceDiscovery(jmDns, DeviceProperties()).discover()
+        val result = JmDnsDeviceDiscovery(jmDns, properties).discover()
 
         // then discovery reports that no service was found:
         assertIs<DeviceDiscoveryResult.NotFound>(result)
@@ -74,7 +83,7 @@ class JmDnsDeviceDiscoveryTest {
     fun `converts JmDNS errors into a discovery failure`() {
         // given JmDNS that cannot browse the network:
         val jmDns = mockk<JmDNS>()
-        every { jmDns.list(any<String>(), any<Long>()) } throws IOException("multicast unavailable")
+        every { jmDns.addServiceListener(any(), any()) } throws IOException("multicast unavailable")
 
         // when discovery is requested:
         val result = JmDnsDeviceDiscovery(jmDns, DeviceProperties()).discover()
@@ -97,10 +106,20 @@ class JmDnsDeviceDiscoveryTest {
         every { service.server } returns server
         every { service.port } returns port
         every { service.hostAddresses } returns addresses.toTypedArray()
-        every { service.propertyNames } returns Collections.enumeration(txt.keys)
+        every { service.propertyNames } answers { Collections.enumeration(txt.keys) }
         txt.forEach { (key, value) ->
             every { service.getPropertyString(key) } returns value
         }
         return service
     }
+
+    private fun serviceEvent(
+        service: ServiceInfo,
+        name: String,
+    ): ServiceEvent =
+        mockk<ServiceEvent>().also { event ->
+            every { event.type } returns "_wahoo-fitness-tnp._tcp.local."
+            every { event.name } returns name
+            every { event.info } returns service
+        }
 }

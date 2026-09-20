@@ -21,6 +21,10 @@ import { useRef, useState } from "react";
 import { useAppShell } from "@/lib/app-shell";
 import { cn } from "@/lib/utils";
 import {
+    formatDiscoveryStatus,
+    isFreshDiscovery,
+} from "@/lib/device-discovery";
+import {
     deviceEndpointLabel,
     sameDevice,
     transportLabel,
@@ -595,19 +599,25 @@ export function EquipmentSheet() {
 
     const connections = connection.connections;
     const devices = discovery?.devices ?? [];
+    const hasFreshDiscovery = isFreshDiscovery(discovery);
+    const scanIsPending = isDiscovering || discovery?.state === "DISCOVERING";
+    const discoveryStatus = formatDiscoveryStatus(discovery, scanIsPending);
+    const discoveryStatusHasDots = discoveryStatus === "Scanning";
     const orderedConnections = [...connections].sort(
         (left, right) =>
             connectionStateOrder(left.state) -
             connectionStateOrder(right.state),
     );
-    const nearbyDevices = devices.filter((device) => {
-        const deviceConnection = connectionForDevice(device, connections);
-        return (
-            deviceConnection === null ||
-            (deviceConnection.state !== "CONNECTED" &&
-                deviceConnection.state !== "CONNECTING")
-        );
-    });
+    const nearbyDevices = (hasFreshDiscovery ? devices : []).filter(
+        (device) => {
+            const deviceConnection = connectionForDevice(device, connections);
+            return (
+                deviceConnection === null ||
+                (deviceConnection.state !== "CONNECTED" &&
+                    deviceConnection.state !== "CONNECTING")
+            );
+        },
+    );
     const isConnecting = connectingDeviceId !== null;
 
     return (
@@ -682,24 +692,40 @@ export function EquipmentSheet() {
                             >
                                 Devices
                             </h3>
+                            {discoveryStatus ? (
+                                <p className="text-[0.68rem] font-semibold text-white/35">
+                                    {discoveryStatusHasDots ? (
+                                        <>
+                                            {discoveryStatus}
+                                            <span
+                                                aria-hidden="true"
+                                                className="discovery-status-dots"
+                                            >
+                                                <span>.</span>
+                                                <span className="discovery-status-dot-second">
+                                                    .
+                                                </span>
+                                                <span className="discovery-status-dot-third">
+                                                    .
+                                                </span>
+                                            </span>
+                                        </>
+                                    ) : (
+                                        discoveryStatus
+                                    )}
+                                </p>
+                            ) : null}
                             <button
                                 type="button"
                                 onClick={() => void discoverDevices()}
-                                disabled={isDiscovering}
-                                className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border border-white/[0.12] bg-white/[0.05] px-3 text-xs font-bold text-white/65 transition hover:border-white/[0.22] hover:bg-white/[0.09] focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none disabled:opacity-60"
+                                disabled={scanIsPending}
+                                className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border border-white/[0.12] bg-white/[0.05] px-3 text-xs font-bold text-white/65 transition-colors hover:border-white/[0.22] hover:bg-white/[0.09] focus-visible:ring-2 focus-visible:ring-[#8b92ff] focus-visible:outline-none disabled:opacity-60"
                             >
-                                {isDiscovering ? (
-                                    <LoaderCircle
-                                        aria-hidden="true"
-                                        className="size-3.5 animate-spin"
-                                    />
-                                ) : (
-                                    <ScanLine
-                                        aria-hidden="true"
-                                        className="size-3.5"
-                                    />
-                                )}
-                                {isDiscovering ? "Scanning" : "Scan"}
+                                <ScanLine
+                                    aria-hidden="true"
+                                    className="size-3.5"
+                                />
+                                Scan
                             </button>
                         </div>
 
@@ -760,9 +786,13 @@ export function EquipmentSheet() {
                                     className="mx-auto size-7 text-white/25"
                                 />
                                 <p className="mt-3 text-sm font-bold text-white/65">
-                                    {discovery
-                                        ? "Nothing found nearby"
-                                        : "Scan when your trainer is awake"}
+                                    {scanIsPending
+                                        ? "Scanning nearby devices…"
+                                        : discovery?.state === "FAILED"
+                                          ? "Scan failed"
+                                          : discovery
+                                            ? "Nothing found nearby"
+                                            : "Scan when your trainer is awake"}
                                 </p>
                                 {discovery ? (
                                     <p className="mt-1 text-xs leading-5 text-white/35">

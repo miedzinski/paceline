@@ -86,7 +86,13 @@ function errorDetails(
 }
 
 export const deviceApi = {
-    discover: () => request<DeviceDiscoveryResponse>("/devices"),
+    getDiscovery: () => request<DeviceDiscoveryResponse>("/devices/discovery"),
+    openDiscoveryStream: () =>
+        new EventSource(`${apiBaseUrl}/devices/discovery/events`),
+    discover: () =>
+        request<DeviceDiscoveryResponse>("/devices/discovery", {
+            method: "POST",
+        }),
     getConnection: () =>
         request<DeviceConnectionsResponse>("/devices/connections"),
     connect: (deviceId: string) =>

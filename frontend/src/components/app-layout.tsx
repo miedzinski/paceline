@@ -1,5 +1,5 @@
 import { LoaderCircle, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router";
 import {
     ApiError,
@@ -12,6 +12,11 @@ import { EquipmentButton } from "@/components/equipment-button";
 import { EquipmentSheet } from "@/components/equipment-sheet";
 import { PacelineLogo } from "@/components/paceline-logo";
 import { AppShellContext, type AppShellContextValue } from "@/lib/app-shell";
+import {
+    deviceDiscoveryFreshnessMs,
+    shouldRefreshDiscovery,
+    shouldScanOnOpen,
+} from "@/lib/device-discovery";
 import { rolesAssignedToSource } from "@/lib/ride-equipment";
 import { cn } from "@/lib/utils";
 import type {
@@ -110,6 +115,8 @@ export function AppLayout() {
     const [equipmentError, setEquipmentError] = useState<string | null>(null);
     const [isEquipmentOpen, setIsEquipmentOpen] = useState(false);
     const [actionError, setActionError] = useState<string | null>(null);
+    const discoveryRequestInFlight = useRef(false);
+    const discoveryInitializationStarted = useRef(false);
 
     const refreshConnection = useCallback(async () => {
         try {
@@ -276,16 +283,128 @@ export function AppLayout() {
     }, []);
 
     const discoverDevices = useCallback(async () => {
+        if (discoveryRequestInFlight.current) {
+            return;
+        }
+
+        discoveryRequestInFlight.current = true;
         setIsDiscovering(true);
         setActionError(null);
         try {
             setDiscovery(await deviceApi.discover());
         } catch (error) {
             setActionError(displayError(error));
-        } finally {
             setIsDiscovering(false);
+        } finally {
+            discoveryRequestInFlight.current = false;
         }
     }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        const stream = deviceApi.openDiscoveryStream();
+
+        const initializeDiscovery = async () => {
+            if (cancelled || discoveryInitializationStarted.current) {
+                return;
+            }
+            discoveryInitializationStarted.current = true;
+            try {
+                const snapshot = await deviceApi.getDiscovery();
+                if (cancelled) {
+                    return;
+                }
+
+                setDiscovery(snapshot);
+                setIsDiscovering(snapshot.state === "DISCOVERING");
+                if (
+                    snapshot.state !== "DISCOVERING" &&
+                    shouldScanOnOpen(snapshot)
+                ) {
+                    await discoverDevices();
+                } else if (snapshot.state !== "DISCOVERING") {
+                    setIsDiscovering(false);
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    setActionError(displayError(error));
+                    setIsDiscovering(false);
+                }
+            }
+        };
+
+        const handleDiscovery = (event: Event) => {
+            try {
+                const snapshot = JSON.parse(
+                    (event as MessageEvent<string>).data,
+                ) as DeviceDiscoveryResponse;
+                setDiscovery(snapshot);
+                setIsDiscovering(
+                    snapshot.state === "DISCOVERING" ||
+                        discoveryRequestInFlight.current,
+                );
+            } catch {
+                setActionError(
+                    "The backend returned an invalid discovery update",
+                );
+            }
+        };
+
+        stream.addEventListener("discovery", handleDiscovery);
+        stream.onopen = () => void initializeDiscovery();
+        stream.onerror = () => {
+            if (!cancelled && stream.readyState === EventSource.CLOSED) {
+                setActionError("Live discovery updates are unavailable");
+                setIsDiscovering(false);
+            }
+        };
+        const initialRefresh = window.setTimeout(
+            () => void initializeDiscovery(),
+            0,
+        );
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(initialRefresh);
+            stream.close();
+        };
+    }, [discoverDevices]);
+
+    useEffect(() => {
+        if (isRide || discovery === null || discovery.state === "DISCOVERING") {
+            return;
+        }
+
+        if (shouldRefreshDiscovery(discovery)) {
+            const refreshTimer = window.setTimeout(() => {
+                if (!isRide) {
+                    void discoverDevices();
+                }
+            }, 0);
+            return () => window.clearTimeout(refreshTimer);
+        }
+
+        if (discovery.lastScanAt === null) {
+            return;
+        }
+
+        const scannedAt = Date.parse(discovery.lastScanAt);
+        if (!Number.isFinite(scannedAt)) {
+            return;
+        }
+
+        const delay = Math.max(
+            0,
+            scannedAt + deviceDiscoveryFreshnessMs - Date.now(),
+        );
+        const freshnessTimer = window.setTimeout(() => {
+            if (!isRide) {
+                void discoverDevices();
+            }
+        }, delay);
+
+        return () => window.clearTimeout(freshnessTimer);
+    }, [discoverDevices, discovery, isRide]);
 
     const connectDevice = useCallback(async (deviceId: string) => {
         setConnectingDeviceId(deviceId);

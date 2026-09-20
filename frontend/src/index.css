@@ -89,6 +89,67 @@ button:disabled {
     background-clip: padding-box;
 }
 
+@keyframes discovery-status-dot-second {
+    0%,
+    24.99% {
+        opacity: 0;
+    }
+
+    25%,
+    49.99% {
+        opacity: 1;
+    }
+
+    50%,
+    74.99% {
+        opacity: 1;
+    }
+
+    75%,
+    100% {
+        opacity: 0;
+    }
+}
+
+@keyframes discovery-status-dot-third {
+    0%,
+    49.99% {
+        opacity: 0;
+    }
+
+    50%,
+    74.99% {
+        opacity: 1;
+    }
+
+    75%,
+    100% {
+        opacity: 0;
+    }
+}
+
+.discovery-status-dots {
+    display: inline-block;
+    width: 3ch;
+    vertical-align: baseline;
+    white-space: nowrap;
+}
+
+.discovery-status-dot-second,
+.discovery-status-dot-third {
+    animation-duration: 1.2s;
+    animation-iteration-count: infinite;
+    animation-timing-function: steps(1, end);
+}
+
+.discovery-status-dot-second {
+    animation-name: discovery-status-dot-second;
+}
+
+.discovery-status-dot-third {
+    animation-name: discovery-status-dot-third;
+}
+
 @media (prefers-reduced-motion: reduce) {
     *,
     *::before,

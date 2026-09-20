@@ -22,8 +22,22 @@ sealed interface DeviceDiscoveryResult {
 
 fun interface WifiDiscovery {
     fun discover(): DeviceDiscoveryResult
+
+    fun discover(onCandidate: (DeviceDiscoveryCandidate) -> Unit): DeviceDiscoveryResult =
+        discover().also { result ->
+            if (result is DeviceDiscoveryResult.Found) {
+                result.candidates.forEach(onCandidate)
+            }
+        }
 }
 
 fun interface BluetoothDiscovery {
     fun discover(): DeviceDiscoveryResult
+
+    fun discover(onCandidate: (DeviceDiscoveryCandidate) -> Unit): DeviceDiscoveryResult =
+        discover().also { result ->
+            if (result is DeviceDiscoveryResult.Found) {
+                result.candidates.forEach(onCandidate)
+            }
+        }
 }
