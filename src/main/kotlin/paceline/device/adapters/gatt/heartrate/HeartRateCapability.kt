@@ -6,10 +6,10 @@ import paceline.device.adapters.gatt.GattCharacteristicProperty
 import paceline.device.adapters.gatt.GattClient
 import paceline.device.adapters.gatt.GattNotification
 import paceline.device.adapters.gatt.GattService
-import paceline.device.domain.HeartRateTelemetry
 import paceline.device.ports.DeviceCapability
 import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.HeartRateTelemetrySource
+import paceline.telemetry.domain.HeartRateTelemetry
 import java.time.Clock
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList

@@ -1,4 +1,4 @@
-package paceline.config
+package paceline.telemetry.config
 
 import org.springframework.boot.context.properties.ConfigurationProperties
 import java.time.Duration

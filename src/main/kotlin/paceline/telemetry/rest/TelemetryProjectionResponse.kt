@@ -1,7 +1,7 @@
-package paceline.rest
+package paceline.telemetry.rest
 
-import paceline.device.domain.TelemetryAvailability
-import paceline.device.domain.TelemetryProjection
+import paceline.telemetry.domain.TelemetryAvailability
+import paceline.telemetry.domain.TelemetryProjection
 import java.time.Instant
 
 data class TelemetryProjectionResponse<T>(

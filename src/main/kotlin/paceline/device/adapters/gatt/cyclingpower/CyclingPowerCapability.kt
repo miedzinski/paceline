@@ -7,10 +7,10 @@ import paceline.device.adapters.gatt.GattClient
 import paceline.device.adapters.gatt.GattNotification
 import paceline.device.adapters.gatt.GattService
 import paceline.device.domain.CyclingMeasurement
-import paceline.device.domain.CyclingTelemetry
 import paceline.device.ports.CyclingTelemetryListener
 import paceline.device.ports.CyclingTelemetrySource
 import paceline.device.ports.DeviceCapability
+import paceline.telemetry.domain.CyclingTelemetry
 import java.time.Clock
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList

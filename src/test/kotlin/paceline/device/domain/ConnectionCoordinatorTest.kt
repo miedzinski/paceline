@@ -1,13 +1,16 @@
 package paceline.device.domain
 
 import org.awaitility.Awaitility
-import paceline.config.TelemetryProperties
 import paceline.device.ports.DeviceCapability
 import paceline.device.ports.DeviceCommunicationException
 import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
 import paceline.device.ports.TrainerControl
 import paceline.device.ports.WifiDiscovery
+import paceline.telemetry.config.TelemetryProperties
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
+import paceline.telemetry.domain.TelemetryAvailability
 import paceline.testsupport.FakeBluetoothDiscovery
 import paceline.testsupport.FakeCyclingTelemetrySource
 import paceline.testsupport.FakeDeviceCommunication

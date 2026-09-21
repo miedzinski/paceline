@@ -13,7 +13,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
-import paceline.device.domain.CyclingTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
 import paceline.testsupport.FakeActivityUploader
 import paceline.testsupport.FakePlannedWorkoutCalendar
 import paceline.testsupport.FakeRideSourceCatalog

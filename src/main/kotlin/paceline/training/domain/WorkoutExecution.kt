@@ -1,6 +1,6 @@
 package paceline.training.domain
 
-import paceline.device.domain.CyclingTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.WorkoutStepCompletion
 import paceline.workout.domain.WorkoutStepTarget

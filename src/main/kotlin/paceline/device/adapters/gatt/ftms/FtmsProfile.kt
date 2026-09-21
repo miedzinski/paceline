@@ -1,6 +1,6 @@
 package paceline.device.adapters.gatt.ftms
 
-import paceline.device.domain.CyclingTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
 import java.time.Instant
 import java.util.UUID
 

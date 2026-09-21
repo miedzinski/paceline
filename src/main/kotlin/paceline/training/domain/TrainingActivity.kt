@@ -1,7 +1,7 @@
 package paceline.training.domain
 
-import paceline.device.domain.CyclingTelemetry
-import paceline.device.domain.HeartRateTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutSourceType

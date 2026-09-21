@@ -11,6 +11,8 @@ import paceline.device.adapters.gatt.heartrate.HeartRateUuid
 import paceline.device.ports.CyclingTelemetrySource
 import paceline.device.ports.HeartRateTelemetrySource
 import paceline.device.ports.TrainerControl
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 import paceline.testsupport.FakeGattClient
 import paceline.testsupport.kickrCore2Device
 import java.time.Clock
@@ -40,7 +42,7 @@ class GattDeviceConnectionTest {
                 clock = clock,
             )
         val bikeTelemetry = assertNotNull(connection.capabilities().filterIsInstance<CyclingTelemetrySource>().single())
-        val telemetry = mutableListOf<paceline.device.domain.CyclingTelemetry>()
+        val telemetry = mutableListOf<CyclingTelemetry>()
         bikeTelemetry.addTelemetryListener { telemetry += it }
 
         // when an Indoor Bike Data notification arrives:
@@ -83,7 +85,7 @@ class GattDeviceConnectionTest {
                 clock = clock,
             )
         val heartRateSource = assertNotNull(connection.capabilities().filterIsInstance<HeartRateTelemetrySource>().single())
-        val heartRates = mutableListOf<paceline.device.domain.HeartRateTelemetry>()
+        val heartRates = mutableListOf<HeartRateTelemetry>()
         heartRateSource.addHeartRateListener { heartRates += it }
 
         // when a Heart Rate Measurement notification arrives:
@@ -157,7 +159,7 @@ class GattDeviceConnectionTest {
 
         // when all profile notifications arrive through the shared client:
         val cyclingSources = connection.capabilities().filterIsInstance<CyclingTelemetrySource>()
-        val received = mutableListOf<paceline.device.domain.CyclingTelemetry>()
+        val received = mutableListOf<CyclingTelemetry>()
         cyclingSources.forEach { source -> source.addTelemetryListener { received += it } }
         gattClient.emit(CyclingPowerUuid.CYCLING_POWER_MEASUREMENT, byteArrayOf(0x00, 0x00, 0x2C, 0x01))
         gattClient.emit(

@@ -1,8 +1,8 @@
 package paceline.testsupport
 
 import paceline.device.domain.ConnectionPhase
-import paceline.device.domain.CyclingTelemetry
-import paceline.device.domain.HeartRateTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 import paceline.training.domain.RideEquipmentSelection
 import paceline.training.domain.RideRole
 import paceline.training.domain.RideSourceCapability

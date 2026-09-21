@@ -1,6 +1,6 @@
 package paceline.training.domain
 
-import paceline.device.domain.CyclingTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
 import paceline.training.config.ErgProtectionProperties
 import java.time.Duration
 import java.time.Instant

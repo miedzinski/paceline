@@ -1,8 +1,8 @@
 package paceline.testsupport
 
-import paceline.device.domain.HeartRateTelemetry
 import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.HeartRateTelemetrySource
+import paceline.telemetry.domain.HeartRateTelemetry
 import java.util.concurrent.CopyOnWriteArrayList
 
 class FakeHeartRateTelemetrySource : HeartRateTelemetrySource {

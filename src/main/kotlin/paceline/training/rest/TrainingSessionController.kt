@@ -11,10 +11,10 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
-import paceline.device.domain.CyclingTelemetry
-import paceline.device.domain.HeartRateTelemetry
-import paceline.rest.TelemetryProjectionResponse
-import paceline.rest.toResponse
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
+import paceline.telemetry.rest.TelemetryProjectionResponse
+import paceline.telemetry.rest.toResponse
 import paceline.training.domain.ErgProtectionState
 import paceline.training.domain.RideEquipmentSelection
 import paceline.training.domain.RideEquipmentSelectionRequiredException

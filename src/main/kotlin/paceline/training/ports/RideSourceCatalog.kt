@@ -1,7 +1,7 @@
 package paceline.training.ports
 
-import paceline.device.domain.CyclingTelemetry
-import paceline.device.domain.HeartRateTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 import paceline.training.domain.RideEquipmentSelection
 import paceline.training.domain.RideSourceDescriptor
 import java.util.concurrent.CompletionStage

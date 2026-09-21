@@ -1,6 +1,6 @@
 package paceline.device.adapters.gatt.heartrate
 
-import paceline.device.domain.HeartRateTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 import java.time.Instant
 import java.util.UUID
 

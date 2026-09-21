@@ -1,4 +1,4 @@
-package paceline.device.domain
+package paceline.telemetry.domain
 
 import java.time.Duration
 import java.time.Instant

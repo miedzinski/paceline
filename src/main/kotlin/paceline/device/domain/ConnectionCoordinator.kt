@@ -2,7 +2,6 @@ package paceline.device.domain
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import paceline.config.TelemetryProperties
 import paceline.device.ports.BluetoothDiscovery
 import paceline.device.ports.CyclingTelemetryListener
 import paceline.device.ports.CyclingTelemetrySource
@@ -13,6 +12,10 @@ import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.HeartRateTelemetrySource
 import paceline.device.ports.TrainerControl
 import paceline.device.ports.WifiDiscovery
+import paceline.telemetry.config.TelemetryProperties
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
+import paceline.telemetry.domain.projectTelemetry
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant

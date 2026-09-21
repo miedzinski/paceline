@@ -1,6 +1,6 @@
 package paceline.training.domain
 
-import paceline.device.domain.CyclingTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
 import paceline.training.ports.CyclingTelemetrySource
 import paceline.training.ports.TrainerControl
 import paceline.training.ports.TrainerControlConnection

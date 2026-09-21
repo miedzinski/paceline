@@ -1,8 +1,8 @@
 package paceline.device.ports
 
 import paceline.device.domain.CyclingMeasurement
-import paceline.device.domain.CyclingTelemetry
-import paceline.device.domain.HeartRateTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 
 interface DeviceCapability
 

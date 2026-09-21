@@ -1,9 +1,9 @@
 package paceline.testsupport
 
 import paceline.device.domain.CyclingMeasurement
-import paceline.device.domain.CyclingTelemetry
 import paceline.device.ports.CyclingTelemetryListener
 import paceline.device.ports.CyclingTelemetrySource
+import paceline.telemetry.domain.CyclingTelemetry
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicReference
 

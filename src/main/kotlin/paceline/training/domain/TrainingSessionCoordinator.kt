@@ -2,11 +2,11 @@ package paceline.training.domain
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
-import paceline.config.TelemetryProperties
-import paceline.device.domain.CyclingTelemetry
-import paceline.device.domain.HeartRateTelemetry
-import paceline.device.domain.TelemetryProjection
-import paceline.device.domain.isTelemetryFresh
+import paceline.telemetry.config.TelemetryProperties
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
+import paceline.telemetry.domain.TelemetryProjection
+import paceline.telemetry.domain.isTelemetryFresh
 import paceline.training.config.ErgProtectionProperties
 import paceline.training.ports.ActivityUploadException
 import paceline.training.ports.ActivityUploader

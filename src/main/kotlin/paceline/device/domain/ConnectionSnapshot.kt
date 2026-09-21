@@ -1,5 +1,8 @@
 package paceline.device.domain
 
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
+import paceline.telemetry.domain.TelemetryProjection
 import java.time.Instant
 
 data class ConnectionSnapshot(

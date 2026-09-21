@@ -15,17 +15,17 @@ import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionFailure
 import paceline.device.domain.ConnectionPhase
 import paceline.device.domain.ConnectionSnapshot
-import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.DeviceCapabilityType
 import paceline.device.domain.DeviceEndpoint
 import paceline.device.domain.DeviceTransport
 import paceline.device.domain.DiscoveryFailure
 import paceline.device.domain.DiscoveryPhase
 import paceline.device.domain.DiscoverySnapshot
-import paceline.device.domain.HeartRateTelemetry
 import paceline.device.domain.NotDiscoveredException
-import paceline.rest.TelemetryProjectionResponse
-import paceline.rest.toResponse
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
+import paceline.telemetry.rest.TelemetryProjectionResponse
+import paceline.telemetry.rest.toResponse
 import java.time.Instant
 
 @RestController

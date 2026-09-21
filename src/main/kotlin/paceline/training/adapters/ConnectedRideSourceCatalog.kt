@@ -3,11 +3,11 @@ package paceline.training.adapters
 import org.springframework.stereotype.Component
 import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionSnapshot
-import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.DeviceCapabilityType
-import paceline.device.domain.HeartRateTelemetry
 import paceline.device.ports.CyclingTelemetryListener
 import paceline.device.ports.HeartRateTelemetryListener
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 import paceline.training.domain.RideSourceDescriptor
 import paceline.training.domain.toRideSourceDescriptor
 import paceline.training.ports.ConnectedRideSource

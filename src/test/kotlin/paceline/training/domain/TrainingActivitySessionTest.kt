@@ -1,10 +1,10 @@
 package paceline.training.domain
 
 import paceline.device.domain.ConnectionPhase
-import paceline.device.domain.CyclingTelemetry
 import paceline.device.domain.DeviceAdvertisement
 import paceline.device.domain.DeviceEndpoint
-import paceline.device.domain.HeartRateTelemetry
+import paceline.telemetry.domain.CyclingTelemetry
+import paceline.telemetry.domain.HeartRateTelemetry
 import paceline.testsupport.FakeRideSourceCatalog
 import paceline.testsupport.FakeTrainerControl
 import paceline.testsupport.rideSource
