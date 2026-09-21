@@ -1,3 +1,5 @@
+import org.gradle.language.jvm.tasks.ProcessResources
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.spring)
@@ -9,6 +11,43 @@ plugins {
 
 group = "paceline"
 version = "0.0.1-SNAPSHOT"
+
+val frontendDirectory = layout.projectDirectory.dir("frontend")
+val frontendNodeModulesDirectory = frontendDirectory.dir("node_modules")
+val frontendDistDirectory = frontendDirectory.dir("dist")
+
+val frontendInstall by tasks.registering(Exec::class) {
+    workingDir(frontendDirectory)
+    commandLine("npm", "ci")
+    inputs.files(
+        frontendDirectory.file("package.json"),
+        frontendDirectory.file("package-lock.json"),
+    )
+    outputs.dir(frontendNodeModulesDirectory)
+}
+
+val frontendBuild by tasks.registering(Exec::class) {
+    dependsOn(frontendInstall)
+    workingDir(frontendDirectory)
+    commandLine("npm", "run", "build")
+    inputs.dir(frontendDirectory.dir("src"))
+    inputs.dir(frontendDirectory.dir("public"))
+    inputs.files(
+        frontendDirectory.file("index.html"),
+        frontendDirectory.file("vite.config.ts"),
+        frontendDirectory.file("tsconfig.json"),
+        frontendDirectory.file("package.json"),
+        frontendDirectory.file("package-lock.json"),
+    )
+    outputs.dir(frontendDistDirectory)
+}
+
+tasks.named<ProcessResources>("processResources") {
+    dependsOn(frontendBuild)
+    from(frontendDistDirectory) {
+        into("static")
+    }
+}
 
 java {
     toolchain {

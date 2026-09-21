@@ -1,0 +1,3 @@
+# All available configuration options are in src/main/resources/application.yml.
+server:
+  port: 8601

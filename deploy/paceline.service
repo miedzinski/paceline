@@ -1,0 +1,28 @@
+[Unit]
+Description=Paceline indoor training controller
+Wants=network-online.target bluetooth.service
+After=network-online.target dbus.service bluetooth.service
+
+[Service]
+Type=simple
+User=paceline
+Group=paceline
+SupplementaryGroups=bluetooth
+ExecStart=/usr/bin/java -jar /opt/paceline/paceline.jar
+Environment="SPRING_CONFIG_ADDITIONAL_LOCATION=optional:file:/etc/paceline/"
+EnvironmentFile=-/etc/paceline/paceline.env
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
+UMask=0027
+
+# The system D-Bus socket remains available, and AF_INET/AF_INET6 permit mDNS
+# and device connections without giving the service raw network capabilities.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

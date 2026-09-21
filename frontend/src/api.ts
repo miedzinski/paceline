@@ -10,10 +10,12 @@ import type {
     WorkoutSelection,
     WorkoutLibraryResponse,
 } from "./types";
+import { resolveApiBaseUrl } from "./lib/api-base";
 
-const apiBaseUrl = (
-    import.meta.env.VITE_API_BASE_URL?.trim() || "/api"
-).replace(/\/$/, "");
+const apiBaseUrl = resolveApiBaseUrl(
+    import.meta.env.PROD,
+    import.meta.env.VITE_API_BASE_URL,
+);
 
 export class ApiError extends Error {
     constructor(

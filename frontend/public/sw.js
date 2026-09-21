@@ -1,6 +1,32 @@
 /* global caches, fetch, self, URL */
 
-const cacheName = "paceline-shell-v1";
+const cacheName = "paceline-shell-v2";
+const nonCacheablePathPrefixes = [
+    "/api",
+    "/devices",
+    "/workouts",
+    "/profile",
+    "/training-sessions",
+];
+
+function hasPathPrefix(pathname, prefix) {
+    return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+function isApiRequest(requestUrl) {
+    return nonCacheablePathPrefixes.some((prefix) =>
+        hasPathPrefix(requestUrl.pathname, prefix),
+    );
+}
+
+function isEventStreamRequest(request, requestUrl) {
+    return (
+        requestUrl.pathname.endsWith("/events") ||
+        (request.headers.get("accept") || "")
+            .toLowerCase()
+            .includes("text/event-stream")
+    );
+}
 
 self.addEventListener("install", (event) => {
     event.waitUntil(
@@ -40,7 +66,8 @@ self.addEventListener("fetch", (event) => {
     if (
         event.request.method !== "GET" ||
         requestUrl.origin !== self.location.origin ||
-        requestUrl.pathname.startsWith("/api")
+        isApiRequest(requestUrl) ||
+        isEventStreamRequest(event.request, requestUrl)
     ) {
         return;
     }
