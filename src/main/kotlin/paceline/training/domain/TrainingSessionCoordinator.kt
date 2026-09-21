@@ -576,6 +576,7 @@ class TrainingSessionCoordinator(
                     } else {
                         TrainingActivityUploadState.unavailable()
                     },
+                activitySummary = completedActivity.summary(),
             )
         workoutExecution.clear()
         trainerConnection.clear(preserveRecovery = trainerConnection.hasPendingZeroPowerCommand())

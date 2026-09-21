@@ -106,6 +106,7 @@ data class TrainingSessionState(
     val equipment: RideEquipmentState? = null,
     val workout: TrainingWorkoutProgress? = null,
     val activityUpload: TrainingActivityUploadState = TrainingActivityUploadState.unavailable(),
+    val activitySummary: TrainingActivitySummary? = null,
     val pauseStartedAt: Instant? = null,
 ) {
     companion object {

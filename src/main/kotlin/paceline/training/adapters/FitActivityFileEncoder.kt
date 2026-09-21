@@ -71,7 +71,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             }
 
             fileEncoder.write(activity.timerEvent(EventType.START, activity.startedAt))
-            val firstDistance = activity.exportSamples.firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
+            val firstDistance = activity.boundedExportSamples().firstNotNullOfOrNull { it.distanceMeters?.takeIf(Double::isFinite) }
             activity.writeTimeline(fileEncoder, firstDistance)
             fileEncoder.write(activity.timerEvent(EventType.STOP_ALL, activity.stoppedAt))
             segments.forEachIndexed { index, segment ->
@@ -142,7 +142,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
     ) {
         val events = events.sortedBy { it.occurredAt }
         var eventIndex = 0
-        exportSamples.forEach { sample ->
+        boundedExportSamples().forEach { sample ->
             while (eventIndex < events.size && !events[eventIndex].occurredAt.isAfter(sample.receivedAt)) {
                 fileEncoder.write(events[eventIndex].eventMessage())
                 eventIndex += 1
@@ -221,14 +221,14 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             startTime = startedAt.toFitDateTime()
             totalElapsedTime = durationSeconds().toFloat()
             totalTimerTime = durationSeconds().toFloat()
-            exportSamples.relativeDistance(firstDistance)?.toFloat()?.let { totalDistance = it }
+            boundedExportSamples().relativeDistance(firstDistance)?.toFloat()?.let { totalDistance = it }
             sport = Sport.CYCLING
             subSport = SubSport.INDOOR_CYCLING
             firstLapIndex = 0
             numLaps = lapCount
             trigger = SessionTrigger.ACTIVITY_END
-            exportSamples.averagePower()?.let { avgPower = it }
-            exportSamples.maximumPower()?.let { maxPower = it }
+            boundedExportSamples().averagePower()?.let { avgPower = it }
+            boundedExportSamples().maximumPower()?.let { maxPower = it }
         }
 
     private fun RecordedTrainingActivity.activityMessage(): ActivityMesg {
@@ -426,20 +426,41 @@ class FitActivityFileEncoder : ActivityFileEncoder {
         return if (value == 0L) 1L else value
     }
 
-    private fun RecordedTrainingActivity.exportSegments(): List<RecordedTrainingActivitySegment> =
-        segments.ifEmpty {
-            listOf(
-                RecordedTrainingActivitySegment(
-                    name = name,
-                    targetPowerWatts = null,
-                    startedAt = startedAt,
-                    stoppedAt = stoppedAt,
-                    samples = exportSamples,
-                    cyclingObservations = cyclingObservations,
-                    heartRateObservations = heartRateObservations,
-                ),
+    private fun RecordedTrainingActivity.exportSegments(): List<RecordedTrainingActivitySegment> {
+        val rawSegments =
+            segments.ifEmpty {
+                listOf(
+                    RecordedTrainingActivitySegment(
+                        name = name,
+                        targetPowerWatts = null,
+                        startedAt = startedAt,
+                        stoppedAt = stoppedAt,
+                        samples = boundedExportSamples(),
+                        cyclingObservations = cyclingObservations,
+                        heartRateObservations = heartRateObservations,
+                    ),
+                )
+            }
+        return rawSegments.map { segment ->
+            segment.copy(
+                samples =
+                    segment.exportSamples.filter { sample ->
+                        sample.receivedAt.isWithinInclusive(startedAt, stoppedAt) &&
+                            sample.receivedAt.isWithinInclusive(segment.startedAt, segment.stoppedAt)
+                    },
+                cyclingObservations = emptyList(),
+                heartRateObservations = emptyList(),
             )
         }
+    }
+
+    private fun RecordedTrainingActivity.boundedExportSamples(): List<TrainingTelemetrySample> =
+        exportSamples.filter { sample -> sample.receivedAt.isWithinInclusive(startedAt, stoppedAt) }
+
+    private fun Instant.isWithinInclusive(
+        startedAt: Instant,
+        stoppedAt: Instant,
+    ): Boolean = !isBefore(startedAt) && !isAfter(stoppedAt)
 
     private fun List<RecordedTrainingActivitySegment>.workoutStepIndices(): List<Int?> {
         var nextIndex = 0

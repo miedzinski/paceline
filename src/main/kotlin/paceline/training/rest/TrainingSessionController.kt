@@ -27,6 +27,7 @@ import paceline.training.domain.RideSourceDescriptor
 import paceline.training.domain.RideSourceIncompatibleException
 import paceline.training.domain.RideSourceNotFoundException
 import paceline.training.domain.RideSourceUnavailableException
+import paceline.training.domain.TrainingActivitySummary
 import paceline.training.domain.TrainingActivityUploadUnavailableException
 import paceline.training.domain.TrainingSessionAlreadyActiveException
 import paceline.training.domain.TrainingSessionCoordinator
@@ -366,6 +367,7 @@ data class TrainingSessionResponse(
     val telemetry: TrainingSessionTelemetryResponse?,
     val workout: TrainingWorkoutResponse?,
     val activityUpload: TrainingActivityUploadResponse,
+    val activitySummary: TrainingActivitySummaryResponse?,
     val equipment: RideEquipmentResponse? = null,
 )
 
@@ -438,6 +440,11 @@ data class TrainingActivityUploadResponse(
     val state: String,
     val remoteActivityId: String?,
     val error: String?,
+)
+
+data class TrainingActivitySummaryResponse(
+    val durationSeconds: Long,
+    val averagePowerWatts: Int?,
 )
 
 data class TrainingWorkoutResponse(
@@ -525,7 +532,14 @@ private fun TrainingSessionState.toResponse(): TrainingSessionResponse =
                 remoteActivityId = activityUpload.remoteActivityId,
                 error = activityUpload.error,
             ),
+        activitySummary = activitySummary?.toResponse(),
         equipment = equipment?.toResponse(),
+    )
+
+private fun TrainingActivitySummary.toResponse(): TrainingActivitySummaryResponse =
+    TrainingActivitySummaryResponse(
+        durationSeconds = durationSeconds,
+        averagePowerWatts = averagePowerWatts,
     )
 
 private fun CyclingTelemetry.toResponse(): SessionCyclingTelemetryResponse =

@@ -5,8 +5,10 @@ import paceline.device.domain.HeartRateTelemetry
 import paceline.workout.domain.ExecutableWorkoutStep
 import paceline.workout.domain.WorkoutSourceReference
 import paceline.workout.domain.WorkoutSourceType
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+import kotlin.math.roundToInt
 
 data class RecordedCyclingObservation(
     val receivedAt: Instant,
@@ -272,6 +274,25 @@ data class RecordedTrainingActivity(
             } else {
                 combineForExport(cyclingObservations, heartRateObservations)
             }
+}
+
+data class TrainingActivitySummary(
+    val durationSeconds: Long,
+    val averagePowerWatts: Int?,
+)
+
+fun RecordedTrainingActivity.summary(): TrainingActivitySummary {
+    val powerValues =
+        exportSamples
+            .asSequence()
+            .filter { sample ->
+                !sample.receivedAt.isBefore(startedAt) && !sample.receivedAt.isAfter(stoppedAt)
+            }.mapNotNull { sample -> sample.powerWatts?.takeIf { power -> power in 0..65_535 } }
+            .toList()
+    return TrainingActivitySummary(
+        durationSeconds = Duration.between(startedAt, stoppedAt).seconds.coerceAtLeast(0),
+        averagePowerWatts = powerValues.takeIf { it.isNotEmpty() }?.average()?.roundToInt(),
+    )
 }
 
 class InMemoryTrainingActivityRecorder {

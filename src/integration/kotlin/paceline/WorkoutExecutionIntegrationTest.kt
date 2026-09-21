@@ -220,7 +220,7 @@ class WorkoutExecutionIntegrationTest {
                 cadenceRpm = 90.0,
                 speedKph = 25.0,
                 distanceMeters = 1_000.0,
-                receivedAt = Instant.parse("2026-09-14T12:00:00Z"),
+                receivedAt = Instant.now(),
             ),
         )
 
@@ -249,8 +249,11 @@ class WorkoutExecutionIntegrationTest {
         // then stop makes the upload available and a successful upload clears the session:
         assertTrue(stopped.contains("\"state\":\"STOPPED\""))
         assertTrue(stopped.contains("\"activityUpload\":{\"state\":\"AVAILABLE\""))
+        assertTrue(stopped.contains("\"activitySummary\":{\"durationSeconds\":"))
+        assertTrue(stopped.contains("\"averagePowerWatts\":200"))
         assertTrue(uploaded.contains("\"state\":\"NOT_STARTED\""))
         assertTrue(uploaded.contains("\"sessionId\":null"))
+        assertTrue(uploaded.contains("\"activitySummary\":null"))
         assertEquals(1, activityUploader.uploads.size)
     }
 

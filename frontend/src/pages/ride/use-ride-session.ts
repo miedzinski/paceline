@@ -15,7 +15,6 @@ import { workoutEntryMode, type WorkoutEntryMode } from "@/lib/ride-entry";
 import { workoutDefinitionFromSession } from "@/lib/training-workout";
 import type { WorkoutItem } from "@/lib/workouts";
 import type {
-    RidePoint,
     TrainingSessionResponse,
     WorkoutDefinition,
     WorkoutSelection,
@@ -57,6 +56,7 @@ function createNotStartedSession(): TrainingSessionResponse {
             remoteActivityId: null,
             error: null,
         },
+        activitySummary: null,
         equipment: null,
     };
 }
@@ -108,7 +108,6 @@ export function useRideSession() {
     const [session, setSession] = useState<TrainingSessionResponse>(
         createNotStartedSession,
     );
-    const [trace, setTrace] = useState<RidePoint[]>([]);
     const [now, setNow] = useState(0);
     const [sessionLoaded, setSessionLoaded] = useState(false);
     const [isStarting, setIsStarting] = useState(false);
@@ -130,10 +129,10 @@ export function useRideSession() {
     >(null);
     const sessionRefreshGeneration = useRef(0);
     const automaticStartKey = useRef<string | null>(null);
-    const liveTelemetry = liveSessionTelemetry(
-        session.trainerConnection,
-        session.telemetry,
-    );
+    const liveTelemetry =
+        session.state === "ACTIVE"
+            ? liveSessionTelemetry(session.trainerConnection, session.telemetry)
+            : null;
     const cyclingProjection =
         liveTelemetry ??
         (session.state === "STOPPED"
@@ -204,45 +203,6 @@ export function useRideSession() {
             }
         };
     }, [session.state]);
-
-    useEffect(() => {
-        if (session.state !== "ACTIVE" && session.state !== "STOPPED") {
-            return;
-        }
-
-        const cycling = telemetry.cycling;
-        const heartRate = telemetry.heartRate;
-        if (cycling === null && heartRate === null) {
-            return;
-        }
-
-        const telemetryTime =
-            cycling === null ? 0 : Date.parse(cycling.receivedAt);
-        const heartRateTime =
-            heartRate === null ? 0 : Date.parse(heartRate.receivedAt);
-        const sampleTimes = [telemetryTime, heartRateTime].filter(
-            (timestamp) => Number.isFinite(timestamp) && timestamp > 0,
-        );
-        const timestamp =
-            sampleTimes.length > 0 ? Math.max(...sampleTimes) : Date.now();
-        const updateHandle = window.setTimeout(() => {
-            setTrace((current) => {
-                const point: RidePoint = {
-                    timestamp,
-                    powerWatts: cycling?.powerWatts ?? null,
-                    cadenceRpm: cycling?.cadenceRpm ?? null,
-                    speedKph: cycling?.speedKph ?? null,
-                    heartRateBpm: heartRate?.heartRateBpm ?? null,
-                };
-                const lastPoint = current.at(-1);
-                if (lastPoint?.timestamp === timestamp) {
-                    return [...current.slice(0, -1), point];
-                }
-                return [...current, point].slice(-600);
-            });
-        }, 0);
-        return () => window.clearTimeout(updateHandle);
-    }, [session.state, telemetry.cycling, telemetry.heartRate]);
 
     const controlRole =
         equipment === null ? null : roleState(equipment, "RESISTANCE_CONTROL");
@@ -317,7 +277,6 @@ export function useRideSession() {
             setIsStarting(true);
             setError(null);
             sessionRefreshGeneration.current += 1;
-            setTrace([]);
             setNow(0);
             try {
                 const result = await trainingApi.start(
@@ -419,8 +378,10 @@ export function useRideSession() {
 
         setIsStopping(true);
         setError(null);
+        sessionRefreshGeneration.current += 1;
         try {
             const result = await trainingApi.stop(session.sessionId);
+            sessionRefreshGeneration.current += 1;
             setSession(result);
             setStopPromptOpen(false);
             setPostRideOpen(true);
@@ -570,7 +531,6 @@ export function useRideSession() {
         selectedWorkout,
         workoutSelection,
         session,
-        trace,
         now,
         isStarting,
         isPausing,

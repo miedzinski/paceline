@@ -13,6 +13,7 @@ import paceline.testsupport.FakeRideSourceCatalog
 import paceline.testsupport.FakeTrainerControl
 import paceline.testsupport.rideSource
 import paceline.training.config.ErgProtectionProperties
+import paceline.training.ports.ActivityUploadException
 import paceline.workout.domain.ExecutableSport
 import paceline.workout.domain.ExecutableWorkout
 import paceline.workout.domain.ExecutableWorkoutStep
@@ -1336,9 +1337,12 @@ class TrainingSessionCoordinatorTest {
 
         // then the upload contains each notification timestamp once and clears the stopped session:
         assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
+        assertEquals(0, stopped.activitySummary?.durationSeconds)
+        assertEquals(200, stopped.activitySummary?.averagePowerWatts)
         assertEquals(TrainingSessionPhase.NOT_STARTED, uploaded.phase)
         assertEquals(null, uploaded.sessionId)
         assertEquals(null, uploaded.workout)
+        assertNull(uploaded.activitySummary)
         assertEquals(TrainingActivityUploadPhase.UNAVAILABLE, uploaded.activityUpload.phase)
         assertEquals(
             listOf(firstSample.receivedAt, secondSample.receivedAt),
@@ -1348,6 +1352,28 @@ class TrainingSessionCoordinatorTest {
                 .map { it.receivedAt },
         )
         assertFailsWith<TrainingSessionMismatchException> { session.upload(requireNotNull(started.sessionId)) }
+    }
+
+    @Test
+    fun `failed upload preserves the stopped activity summary`() {
+        // given a stopped recording and an uploader that rejects the upload:
+        val powerControl = FakeTrainerControl()
+        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
+        val uploader = FakeActivityUploader(ActivityUploadException("upload failed"))
+        val session = coordinator(rideSourceCatalog, clock, uploader)
+        val sessionId = requireNotNull(session.start().sessionId)
+        rideSourceCatalog.emitTelemetry(telemetry(distanceMeters = 1_000.0))
+        session.stop(sessionId)
+
+        // when the upload is attempted:
+        assertFailsWith<ActivityUploadException> { session.upload(sessionId) }
+
+        // then the stopped activity summary remains available for a retry:
+        val current = session.current()
+        assertEquals(TrainingSessionPhase.STOPPED, current.phase)
+        assertEquals(TrainingActivityUploadPhase.FAILED, current.activityUpload.phase)
+        assertEquals(0, current.activitySummary?.durationSeconds)
+        assertEquals(200, current.activitySummary?.averagePowerWatts)
     }
 
     @Test

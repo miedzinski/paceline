@@ -108,7 +108,15 @@ export function formatElapsed(
         return "00:00";
     }
 
-    const elapsedSeconds = Math.max(0, Math.floor((now - start) / 1000));
+    return formatDurationSeconds((now - start) / 1000);
+}
+
+export function formatDurationSeconds(durationSeconds: number | null): string {
+    if (durationSeconds === null || !Number.isFinite(durationSeconds)) {
+        return "00:00";
+    }
+
+    const elapsedSeconds = Math.max(0, Math.floor(durationSeconds));
     const hours = Math.floor(elapsedSeconds / 3600);
     const minutes = Math.floor((elapsedSeconds % 3600) / 60);
     const seconds = elapsedSeconds % 60;

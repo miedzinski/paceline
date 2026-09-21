@@ -49,6 +49,101 @@ class TrainingActivitySessionTest {
     }
 
     @Test
+    fun `finalized activity excludes telemetry outside the session stop boundary`() {
+        // given an active recording with cycling and heart-rate sources:
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                powerControl = FakeTrainerControl(),
+                availableHeartRateSources = listOf(heartRateSource("strap")),
+            )
+        val activitySession = TrainingActivitySession()
+        val sessionId = UUID.randomUUID()
+        activitySession.start(
+            sessionId = sessionId,
+            startedAt = start,
+            workout = null,
+            initialTargetPowerWatts = null,
+            onTelemetry = {},
+            onHeartRate = { id, sourceId, telemetry ->
+                activitySession.recordHeartRate(id, sourceId, telemetry)
+            },
+            equipment = rideSourceCatalog.selectedRideEquipment(defaultSelection("strap")),
+        )
+        val stoppedAt = start.plusSeconds(2)
+
+        // when notifications are delivered before stop and after finalization:
+        rideSourceCatalog.emitTelemetry(telemetry(start.plusSeconds(1)))
+        rideSourceCatalog.emitHeartRate(
+            "strap",
+            HeartRateTelemetry(heartRateBpm = 140, receivedAt = start.plusSeconds(1)),
+        )
+        val activity = activitySession.finish(sessionId, stoppedAt)
+        rideSourceCatalog.emitTelemetry(telemetry(stoppedAt.plusSeconds(2)))
+        rideSourceCatalog.emitHeartRate(
+            "strap",
+            HeartRateTelemetry(heartRateBpm = 160, receivedAt = stoppedAt.plusSeconds(2)),
+        )
+
+        // then the finalized activity contains only observations from session start through stop:
+        assertEquals(listOf(start.plusSeconds(1)), activity.cyclingObservations.map { it.receivedAt })
+        assertEquals(listOf(140), activity.heartRateObservations.map { it.heartRateBpm })
+        assertEquals(listOf(start.plusSeconds(1)), activity.exportSamples.map { it.receivedAt })
+    }
+
+    @Test
+    fun `activity summary uses all power samples between session start and stop`() {
+        // given a finalized activity with samples before, during, and after the session:
+        val stoppedAt = start.plusSeconds(3)
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.randomUUID(),
+                startedAt = start,
+                stoppedAt = stoppedAt,
+                name = "Manual ride",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples =
+                    listOf(
+                        TrainingTelemetrySample(
+                            receivedAt = start.minusSeconds(1),
+                            powerWatts = 900,
+                            cadenceRpm = null,
+                            speedKph = null,
+                            distanceMeters = null,
+                        ),
+                        TrainingTelemetrySample(
+                            receivedAt = start.plusSeconds(1),
+                            powerWatts = 200,
+                            cadenceRpm = null,
+                            speedKph = null,
+                            distanceMeters = null,
+                        ),
+                        TrainingTelemetrySample(
+                            receivedAt = start.plusSeconds(2),
+                            powerWatts = 220,
+                            cadenceRpm = null,
+                            speedKph = null,
+                            distanceMeters = null,
+                        ),
+                        TrainingTelemetrySample(
+                            receivedAt = stoppedAt.plusSeconds(1),
+                            powerWatts = 1_000,
+                            cadenceRpm = null,
+                            speedKph = null,
+                            distanceMeters = null,
+                        ),
+                    ),
+            )
+
+        // when the summary is calculated from the finalized activity:
+        val summary = activity.summary()
+
+        // then it covers the full session and excludes samples outside its boundary:
+        assertEquals(3, summary.durationSeconds)
+        assertEquals(210, summary.averagePowerWatts)
+    }
+
+    @Test
     fun `does not accept heart-rate notifications while paused`() {
         // given an activity session whose selected heart-rate callback records accepted samples:
         val rideSourceCatalog =
@@ -78,7 +173,7 @@ class TrainingActivitySessionTest {
         rideSourceCatalog.emitHeartRate("strap", heartRate(150))
 
         // then only notifications received while recording is active belong to the activity:
-        val activity = activitySession.finish(sessionId, start.plusSeconds(1))
+        val activity = activitySession.finish(sessionId, start.plusSeconds(151))
         assertEquals(listOf(140, 150), activity.samples.mapNotNull { it.heartRateBpm })
     }
 

@@ -91,6 +91,35 @@ class FitActivityFileEncoderTest {
     }
 
     @Test
+    fun `activity file excludes telemetry outside the session start and stop`() {
+        // given an activity containing samples before start, during the ride, and after stop:
+        val startedAt = Instant.parse("2026-09-14T12:00:00Z")
+        val stoppedAt = startedAt.plusSeconds(1)
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+                startedAt = startedAt,
+                stoppedAt = stoppedAt,
+                name = "Bounded ride",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples =
+                    listOf(
+                        sample(startedAt.minusMillis(1).toString(), 999.0, 190),
+                        sample(startedAt.plusMillis(500).toString(), 1_000.0, 210),
+                        sample(stoppedAt.plusMillis(1).toString(), 1_001.0, 230),
+                    ),
+            )
+
+        // when the activity is encoded as FIT:
+        val records = decode(encoder.encode(activity)).filter { it.name == "record" }
+
+        // then only the sample inside the inclusive session boundary is exported:
+        assertEquals(1, records.size)
+        assertEquals(210, records.single().getFieldIntegerValue(RecordMesg.PowerFieldNum))
+    }
+
+    @Test
     fun `activity export combines exact timestamps without filling sparse raw fields`() {
         // given separate sparse cycling and heart-rate raw streams with a gap between cycling observations:
         val firstAt = Instant.parse("2026-09-14T12:00:00Z")

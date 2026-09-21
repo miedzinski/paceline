@@ -77,14 +77,6 @@ export interface TelemetryProjection<T> {
     lastReceivedAt: string | null;
 }
 
-export interface RidePoint {
-    timestamp: number;
-    powerWatts: number | null;
-    cadenceRpm: number | null;
-    speedKph: number | null;
-    heartRateBpm: number | null;
-}
-
 export interface DeviceConnection {
     id: string;
     state: ConnectionPhase;
@@ -151,6 +143,11 @@ export interface TrainingSessionTelemetry {
     heartRate: TelemetryProjection<DeviceHeartRate>;
 }
 
+export interface TrainingActivitySummary {
+    durationSeconds: number;
+    averagePowerWatts: number | null;
+}
+
 export interface TrainingSessionResponse {
     state: TrainingSessionState;
     sessionId: string | null;
@@ -167,6 +164,7 @@ export interface TrainingSessionResponse {
     telemetry: TrainingSessionTelemetry | null;
     workout: TrainingWorkoutResponse | null;
     activityUpload: TrainingActivityUploadResponse;
+    activitySummary: TrainingActivitySummary | null;
     equipment: RideEquipmentResponse | null;
 }
 

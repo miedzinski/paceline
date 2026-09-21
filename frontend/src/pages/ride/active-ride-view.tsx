@@ -18,7 +18,6 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
         openEquipment,
         profile,
         session,
-        trace,
         now,
         isPausing,
         isResuming,
@@ -180,12 +179,11 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                 ) : null}
                 {postRideOpen ? (
                     <PostRideSheet
-                        trace={trace}
+                        summary={session.activitySummary}
                         upload={session.activityUpload}
                         isUploading={isUploading}
                         isDiscarding={isDiscarding}
                         error={error}
-                        duration={formatElapsed(session.startedAt, now)}
                         onDiscard={() => void discardActivity()}
                         onUpload={() => void uploadActivity()}
                     />

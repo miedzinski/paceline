@@ -9,8 +9,12 @@ import {
     X,
     Zap,
 } from "lucide-react";
-import { useEffect, useMemo, type ReactNode } from "react";
-import type { RidePoint, TrainingActivityUploadResponse } from "@/types";
+import { useEffect, type ReactNode } from "react";
+import { formatDurationSeconds } from "@/lib/connection";
+import type {
+    TrainingActivitySummary,
+    TrainingActivityUploadResponse,
+} from "@/types";
 
 export function StopPrompt({
     isStopping,
@@ -80,35 +84,22 @@ export function StopPrompt({
 }
 
 export function PostRideSheet({
-    trace,
+    summary,
     upload,
     isUploading,
     isDiscarding,
     error,
-    duration,
     onDiscard,
     onUpload,
 }: {
-    trace: RidePoint[];
+    summary: TrainingActivitySummary | null;
     upload: TrainingActivityUploadResponse;
     isUploading: boolean;
     isDiscarding: boolean;
     error: string | null;
-    duration: string;
     onDiscard: () => void;
     onUpload: () => void;
 }) {
-    const averagePower = useMemo(() => {
-        const values = trace
-            .map((point) => point.powerWatts)
-            .filter((value): value is number => value !== null);
-        if (values.length === 0) {
-            return null;
-        }
-        return Math.round(
-            values.reduce((sum, value) => sum + value, 0) / values.length,
-        );
-    }, [trace]);
     const canUpload = upload.state === "AVAILABLE" || upload.state === "FAILED";
 
     return (
@@ -131,13 +122,18 @@ export function PostRideSheet({
                 <div className="mt-6 grid grid-cols-2 gap-2.5">
                     <SummaryStat
                         label="Duration"
-                        value={duration}
+                        value={formatDurationSeconds(
+                            summary?.durationSeconds ?? null,
+                        )}
                         icon={Clock3}
                     />
                     <SummaryStat
                         label="Average power"
                         value={
-                            averagePower === null ? "—" : `${averagePower} W`
+                            summary?.averagePowerWatts === null ||
+                            summary === null
+                                ? "—"
+                                : `${summary.averagePowerWatts} W`
                         }
                         icon={Zap}
                     />
