@@ -11,36 +11,62 @@ build_completed="${PACELINE_INSTALL_BUILD_COMPLETED:-0}"
 
 usage() {
     echo "Usage: $0 [--uninstall]"
-    echo "Without options, builds bootJar before installing Paceline."
+    echo "Without options, builds and installs the GraalVM native executable."
     echo "--uninstall stops Paceline and removes its service, files, account, and group."
 }
 
-build_application() {
-    if [[ ! -x "$project_directory/gradlew" ]]; then
-        echo "Gradle wrapper is not executable: $project_directory/gradlew" >&2
+build_application() (
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "Docker is required to build Paceline's native executable." >&2
         exit 1
     fi
 
-    "$project_directory/gradlew" bootJar
-}
+    if ! docker info >/dev/null 2>&1; then
+        echo "Docker is installed but its daemon is unavailable to this user." >&2
+        exit 1
+    fi
 
-select_boot_jar() {
-    local -a jar_candidates
-    mapfile -t jar_candidates < <(
-        find "$project_directory/build/libs" \
-            -maxdepth 1 \
-            -type f \
-            -name '*.jar' \
-            ! -name '*-plain.jar' \
-            -print |
-            sort
-    )
-    if (( ${#jar_candidates[@]} != 1 )); then
-        echo "Expected exactly one bootJar in $project_directory/build/libs." >&2
+    local output_directory="$project_directory/build/native/nativeCompile"
+    local image_tag="paceline-native-build:installer-$$"
+    local container_id=""
+    local staging_directory=""
+
+    cleanup_docker_build() {
+        if [[ -n "$container_id" ]]; then
+            docker rm "$container_id" >/dev/null 2>&1 || true
+        fi
+        docker image rm "$image_tag" >/dev/null 2>&1 || true
+        if [[ -n "$staging_directory" ]]; then
+            rm -rf -- "$staging_directory"
+        fi
+    }
+    trap cleanup_docker_build EXIT
+
+    mkdir -p -- "$output_directory"
+    echo "Building the native executable in Docker..."
+    docker build \
+        --file "$script_directory/Dockerfile" \
+        --target artifact \
+        --tag "$image_tag" \
+        "$project_directory"
+
+    container_id="$(docker create "$image_tag" /paceline)"
+    staging_directory="$(mktemp -d "$output_directory/.paceline-docker.XXXXXX")"
+    docker cp "$container_id:/paceline" "$staging_directory/paceline"
+    chmod 0755 "$staging_directory/paceline"
+    mv -f -- "$staging_directory/paceline" "$output_directory/paceline"
+    echo "Native executable written to $output_directory/paceline."
+)
+
+select_native_executable() {
+    local executable_path="$project_directory/build/native/nativeCompile/paceline"
+    if [[ ! -x "$executable_path" ]]; then
+        echo "Expected native executable at $executable_path." >&2
+        echo "Build the artifact with: docker build --file deploy/Dockerfile --target artifact --tag paceline-native-build ." >&2
         usage >&2
         exit 1
     fi
-    printf '%s\n' "${jar_candidates[0]}"
+    printf '%s\n' "$executable_path"
 }
 
 uninstall_application() {
@@ -73,6 +99,7 @@ uninstall_application() {
 
     echo "The following Paceline resources will be deleted:"
     echo "  /etc/systemd/system/paceline.service (if present)"
+    echo "  /etc/systemd/system/paceline.socket (if present)"
     echo "  /opt/paceline (installation directory, if present)"
     if [[ "$delete_configuration" == "yes" ]]; then
         echo "  /etc/paceline (configuration and external secrets, if present)"
@@ -99,14 +126,18 @@ uninstall_application() {
             ;;
     esac
 
+    if systemctl is-active --quiet paceline.socket; then
+        systemctl stop paceline.socket
+    fi
     if systemctl is-active --quiet paceline.service; then
         systemctl stop paceline.service
     fi
-    if systemctl is-enabled --quiet paceline.service; then
-        systemctl disable paceline.service
+    if systemctl is-enabled --quiet paceline.socket; then
+        systemctl disable paceline.socket
     fi
 
     rm -f -- /etc/systemd/system/paceline.service
+    rm -f -- /etc/systemd/system/paceline.socket
     systemctl daemon-reload
     rm -rf -- "$install_directory"
     if [[ "$delete_configuration" == "yes" ]]; then
@@ -157,7 +188,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
         exec sudo "$0" --uninstall
     fi
     build_application
-    exec sudo env PACELINE_INSTALL_BUILD_COMPLETED=1 "$0"
+    exec sudo env PACELINE_INSTALL_BUILD_COMPLETED=1 "$0" "$@"
 fi
 
 if [[ "$action" == "uninstall" ]]; then
@@ -171,13 +202,13 @@ if [[ "$build_completed" != "1" ]]; then
             echo "sudo is required to build as $SUDO_USER." >&2
             exit 1
         fi
-        sudo -u "$SUDO_USER" -- "$project_directory/gradlew" bootJar
+        exec sudo -u "$SUDO_USER" -- "$0" "$@"
     else
         build_application
     fi
 fi
 
-jar_path="$(select_boot_jar)"
+native_path="$(select_native_executable)"
 
 for command_name in getent groupadd id install mktemp systemctl useradd usermod; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -186,18 +217,13 @@ for command_name in getent groupadd id install mktemp systemctl useradd usermod;
     fi
 done
 
-if [[ ! -x /usr/bin/java ]]; then
-    echo "Java is required at /usr/bin/java (the project targets Java 25)." >&2
-    exit 1
-fi
-
 if ! getent group bluetooth >/dev/null; then
     echo "The bluetooth group is missing; install BlueZ before installing Paceline." >&2
     exit 1
 fi
 
-if [[ ! -r "$jar_path" ]]; then
-    echo "Boot jar is not readable: $jar_path" >&2
+if [[ ! -x "$native_path" ]]; then
+    echo "Native executable is not executable: $native_path" >&2
     exit 1
 fi
 
@@ -257,22 +283,30 @@ else
     chmod 0644 "$configuration_directory/application.yml"
 fi
 
-temporary_jar="$(mktemp "$install_directory/paceline.jar.XXXXXX")"
-trap 'rm -f -- "$temporary_jar"' EXIT
-install -o root -g root -m 0644 "$jar_path" "$temporary_jar"
-mv -f -- "$temporary_jar" "$install_directory/paceline.jar"
+temporary_native="$(mktemp "$install_directory/paceline.XXXXXX")"
+trap 'rm -f -- "$temporary_native"' EXIT
+install -o root -g root -m 0755 "$native_path" "$temporary_native"
+mv -f -- "$temporary_native" "$install_directory/paceline"
 trap - EXIT
 
 install -o root -g root -m 0644 \
     "$script_directory/paceline.service" \
     /etc/systemd/system/paceline.service
+install -o root -g root -m 0644 \
+    "$script_directory/paceline.socket" \
+    /etc/systemd/system/paceline.socket
 
 systemctl daemon-reload
-systemctl enable --now paceline.service
+if systemctl is-active --quiet paceline.service; then
+    systemctl stop paceline.service
+fi
+systemctl enable --now paceline.socket
 
-echo "Paceline is installed and enabled."
+echo "Paceline is installed."
 echo "Application configuration: $configuration_directory/application.yml"
 echo "External secrets: $configuration_directory/paceline.env"
 echo "Replace the placeholder secrets with: sudoedit $configuration_directory/paceline.env"
-echo "After changing secrets or application overrides, restart: sudo systemctl restart paceline.service"
+echo "After changing secrets or application settings, restart: sudo systemctl restart paceline.socket"
+echo "To change the HTTP port, edit /etc/systemd/system/paceline.socket (ListenStream), then run:"
+echo "  sudo systemctl daemon-reload && sudo systemctl restart paceline.socket"
 echo "Logs: journalctl -u paceline.service"

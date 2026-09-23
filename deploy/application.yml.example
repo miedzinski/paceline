@@ -1,3 +1,11 @@
 # All available configuration options are in src/main/resources/application.yml.
 server:
-  port: 8601
+  shutdown: graceful
+
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 15s
+
+paceline:
+  lifecycle:
+    idle-timeout: 10m

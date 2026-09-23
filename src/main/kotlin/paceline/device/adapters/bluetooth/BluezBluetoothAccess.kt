@@ -46,7 +46,15 @@ class BluezBluetoothAccess(
         val manager = deviceManager.value
         val adapter =
             selectAdapter(manager)
-                ?: return emptyList()
+                ?: return emptyList<BluetoothDeviceCandidate>().also {
+                    logger.warn("No Bluetooth adapter found; Bluetooth LE discovery is unavailable")
+                }
+
+        logger.info(
+            "Starting Bluetooth LE discovery on adapter {} for service UUIDs {}",
+            adapter.address,
+            serviceUuids,
+        )
 
         manager.setDefaultAdapter(adapter)
         manager.setScanFilter(
@@ -102,7 +110,13 @@ class BluezBluetoothAccess(
                     .submit {
                         Unit
                     }.get(EVENT_FLUSH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                emitted.values.toList()
+                emitted.values.toList().also { candidates ->
+                    logger.info(
+                        "Bluetooth LE discovery completed on adapter {} with {} matching candidate(s)",
+                        adapter.address,
+                        candidates.size,
+                    )
+                }
             }
         } finally {
             runCatching { manager.unRegisterSignalHandler(interfacesAddedHandler) }
@@ -158,7 +172,7 @@ class BluezBluetoothAccess(
                 refreshCandidate(manager, adapter, serviceUuids, devicePath, emitted, onCandidate)
             }
         }.onFailure { exception ->
-            logger.debug("Could not queue Bluetooth discovery update", exception)
+            logger.warn("Could not queue Bluetooth discovery update for device path {}", devicePath, exception)
         }
     }
 
@@ -184,7 +198,11 @@ class BluezBluetoothAccess(
                 }
             }
         }.onFailure { exception ->
-            logger.debug("Could not refresh Bluetooth discovery candidates", exception)
+            logger.warn(
+                "Could not refresh Bluetooth discovery candidates for device path {}",
+                devicePath,
+                exception,
+            )
         }
     }
 

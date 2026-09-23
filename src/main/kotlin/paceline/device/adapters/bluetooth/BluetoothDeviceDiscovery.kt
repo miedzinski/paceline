@@ -46,6 +46,7 @@ class BluetoothDeviceDiscovery(
                 }
             val discovered = candidates.values.toList()
             if (discovered.isEmpty()) {
+                logger.info("Bluetooth LE discovery found no matching device advertisements")
                 DeviceDiscoveryResult.NotFound
             } else {
                 DeviceDiscoveryResult.Found(discovered).also {
@@ -53,6 +54,7 @@ class BluetoothDeviceDiscovery(
                 }
             }
         } catch (exception: Exception) {
+            logger.warn("Bluetooth LE discovery failed", exception)
             DeviceDiscoveryResult.Failed(
                 code = DiscoveryFailureCode.DISCOVERY_ERROR,
                 message = exception.message ?: "Bluetooth discovery failed",

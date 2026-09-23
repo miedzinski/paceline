@@ -61,6 +61,15 @@ class TrainingSessionCoordinator(
     }
 
     @Synchronized
+    fun preventsIdleShutdown(): Boolean =
+        state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED) ||
+            trainerConnection.hasPendingZeroPowerCommand() ||
+            (
+                state.phase == TrainingSessionPhase.STOPPED &&
+                    state.activityUpload.phase != TrainingActivityUploadPhase.UNAVAILABLE
+            )
+
+    @Synchronized
     fun equipment(): RideEquipmentState = rideEquipment.current(rideSourceCatalog.sources())
 
     @Synchronized

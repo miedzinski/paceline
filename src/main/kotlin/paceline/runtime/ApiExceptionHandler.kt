@@ -1,4 +1,4 @@
-package paceline.rest
+package paceline.runtime
 
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.ExceptionHandler

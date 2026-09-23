@@ -300,6 +300,7 @@ class ConnectionCoordinator(
         try {
             discoverFromSources(generation)
         } catch (exception: Exception) {
+            logger.warn("Device discovery failed", exception)
             DeviceDiscoveryResult.Failed(
                 code = DiscoveryFailureCode.DISCOVERY_ERROR,
                 message = exception.message ?: "Device discovery failed",
@@ -578,7 +579,11 @@ class ConnectionCoordinator(
         operation: ((Long, DeviceDiscoveryCandidate) -> Unit) -> DeviceDiscoveryResult,
     ): DeviceDiscoveryResult =
         try {
-            operation { generation, candidate -> reportDiscoveryCandidate(generation, candidate) }
+            operation { generation, candidate -> reportDiscoveryCandidate(generation, candidate) }.also { result ->
+                if (result is DeviceDiscoveryResult.Failed) {
+                    logger.warn("{} discovery source returned failure: {}", source, result.message)
+                }
+            }
         } catch (exception: Exception) {
             logger.warn("{} discovery source failed", source, exception)
             DeviceDiscoveryResult.Failed(

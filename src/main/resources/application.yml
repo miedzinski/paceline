@@ -1,8 +1,18 @@
 spring:
   application:
     name: paceline
+  lifecycle:
+    timeout-per-shutdown-phase: 15s
+
+server:
+  shutdown: graceful
 
 paceline:
+  lifecycle:
+    idle-timeout: 0s
+  server:
+    socket-activation:
+      enabled: false
   device:
     mdns-service-type: _wahoo-fitness-tnp._tcp.local.
     discovery-timeout: 5s

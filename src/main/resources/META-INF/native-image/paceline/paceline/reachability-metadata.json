@@ -1,0 +1,77 @@
+{
+  "reflection": [
+    {
+      "type": "org.freedesktop.dbus.interfaces.DBus$NameAcquired",
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "org.freedesktop.dbus.interfaces.Properties$PropertiesChanged",
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "org.freedesktop.dbus.interfaces.ObjectManager$InterfacesRemoved",
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "org.freedesktop.dbus.interfaces.ObjectManager$InterfacesAdded",
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "org.freedesktop.dbus.interfaces.Introspectable",
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "org.freedesktop.dbus.interfaces.Peer",
+      "allDeclaredMethods": true
+    },
+    {
+      "type": {
+        "proxy": [
+          "org.freedesktop.dbus.interfaces.DBus"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "org.freedesktop.dbus.interfaces.Introspectable"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "org.freedesktop.dbus.interfaces.Properties"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "org.bluez.Adapter1"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "org.bluez.Device1"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "org.bluez.GattService1"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "org.bluez.GattCharacteristic1"
+        ]
+      }
+    }
+  ]
+}

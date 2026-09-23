@@ -1,0 +1,11 @@
+[Unit]
+Description=Paceline HTTP socket
+
+[Socket]
+# Paceline inherits this listener; configure the HTTP port here.
+ListenStream=8601
+Accept=no
+Service=paceline.service
+
+[Install]
+WantedBy=sockets.target
