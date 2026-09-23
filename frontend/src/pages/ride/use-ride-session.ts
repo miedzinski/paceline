@@ -225,7 +225,8 @@ export function useRideSession() {
     const isActive = session.state === "ACTIVE";
     const isPaused = session.state === "PAUSED";
     const isStopped = session.state === "STOPPED";
-    const equipmentLoaded = equipment !== null || equipmentError !== null;
+    const equipmentLoaded =
+        !equipmentLoading && (equipment !== null || equipmentError !== null);
     const currentWorkoutEntryMode: WorkoutEntryMode = workoutEntryMode({
         sessionLoaded,
         equipmentLoaded,
@@ -258,6 +259,10 @@ export function useRideSession() {
     const startSession = useCallback(
         async ({ automatic = false }: { automatic?: boolean } = {}) => {
             if (equipment === null || equipmentLoading) {
+                if (automatic && equipmentLoading) {
+                    automaticStartKey.current = null;
+                    return;
+                }
                 setError(equipmentError ?? "Checking connected equipment…");
                 if (automatic) {
                     setAutomaticStartFailedKey(selectedWorkoutKey);
@@ -323,6 +328,7 @@ export function useRideSession() {
     useEffect(() => {
         if (
             currentWorkoutEntryMode !== "AUTO_STARTING" ||
+            equipmentLoading ||
             session.state !== "NOT_STARTED" ||
             selectedWorkoutKey === null ||
             automaticStartKey.current === selectedWorkoutKey
@@ -334,6 +340,7 @@ export function useRideSession() {
         void startSession({ automatic: true });
     }, [
         currentWorkoutEntryMode,
+        equipmentLoading,
         selectedWorkoutKey,
         session.state,
         startSession,
