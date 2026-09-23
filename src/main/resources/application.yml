@@ -19,7 +19,7 @@ paceline:
     connect-timeout: 3s
     bluetooth:
       gatt-service-discovery-timeout: 10s
-    wifi:
+    local-network:
       protocol-timeout: 3s
   telemetry:
     freshness: 2s

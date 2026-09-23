@@ -1,4 +1,4 @@
-package paceline.device.adapters.wifi
+package paceline.device.adapters.lan
 
 import io.mockk.every
 import io.mockk.mockk
@@ -59,7 +59,7 @@ class JmDnsDeviceDiscoveryTest {
         assertEquals(2, streamed.size)
         assertEquals(2, found.candidates.size)
         assertEquals("KICKR CORE 77AB", found.candidates[0].name)
-        val endpoint = assertIs<DeviceEndpoint.Wifi>(found.candidates[0].endpoint)
+        val endpoint = assertIs<DeviceEndpoint.LocalNetwork>(found.candidates[0].endpoint)
         assertEquals("192.168.1.45", endpoint.host)
         assertEquals(36866, endpoint.port)
         assertEquals("253045635", found.candidates[0].metadata["serial-number"])

@@ -15,10 +15,10 @@ import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.web.servlet.client.RestTestClient
 import paceline.device.adapters.bluetooth.BluetoothAccess
 import paceline.device.adapters.gatt.ftms.FtmsUuid
-import paceline.device.adapters.wifi.WftnpFrame
-import paceline.device.adapters.wifi.WftnpFrameCodec
-import paceline.device.adapters.wifi.WftnpMessageType
-import paceline.device.adapters.wifi.toWftnpBytes
+import paceline.device.adapters.lan.WftnpFrame
+import paceline.device.adapters.lan.WftnpFrameCodec
+import paceline.device.adapters.lan.WftnpMessageType
+import paceline.device.adapters.lan.toWftnpBytes
 import paceline.device.domain.ConnectionCoordinator
 import paceline.device.domain.ConnectionPhase
 import paceline.device.domain.DiscoveryPhase
@@ -46,7 +46,7 @@ import kotlin.test.assertTrue
         "paceline.device.mdns-service-type=_paceline-integration._tcp.local.",
         "paceline.device.discovery-timeout=5s",
         "paceline.device.connect-timeout=1s",
-        "paceline.device.wifi.protocol-timeout=1s",
+        "paceline.device.local-network.protocol-timeout=1s",
     ],
 )
 @Import(DeviceConnectionIntegrationTestConfiguration::class)
@@ -173,7 +173,7 @@ class DeviceConnectionIntegrationTest {
         // then the real mDNS adapter reports the device and no TCP session is opened:
         assertTrue(response.contains("\"state\":\"DISCOVERED\""))
         assertTrue(response.contains("\"name\":\"KICKR CORE 2 Integration\""))
-        assertTrue(response.contains("\"transport\":\"WIFI\""))
+        assertTrue(response.contains("\"transport\":\"LOCAL_NETWORK\""))
         assertTrue(response.contains("\"host\":\"${deviceServer.address.hostAddress}\""))
         assertEquals(0, deviceServer.acceptedConnections)
     }

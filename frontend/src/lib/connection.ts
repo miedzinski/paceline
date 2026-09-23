@@ -78,7 +78,7 @@ export function formatTimeOfDay(timestamp: string | null): string | null {
 }
 
 export function transportLabel(transport: DeviceEndpoint["transport"]): string {
-    return transport === "BLUETOOTH" ? "Bluetooth LE" : "Wi-Fi";
+    return transport === "BLUETOOTH" ? "Bluetooth LE" : "LAN";
 }
 
 export function deviceEndpointLabel(endpoint: DeviceEndpoint): string {
@@ -90,7 +90,7 @@ export function deviceEndpointLabel(endpoint: DeviceEndpoint): string {
         return `${endpoint.host}:${endpoint.port}`;
     }
 
-    return "Wi-Fi endpoint unavailable";
+    return "Local network endpoint unavailable";
 }
 
 export function sameDevice(

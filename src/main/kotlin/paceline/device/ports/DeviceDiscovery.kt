@@ -20,7 +20,7 @@ sealed interface DeviceDiscoveryResult {
     ) : DeviceDiscoveryResult
 }
 
-fun interface WifiDiscovery {
+fun interface LocalNetworkDiscovery {
     fun discover(): DeviceDiscoveryResult
 
     fun discover(onCandidate: (DeviceDiscoveryCandidate) -> Unit): DeviceDiscoveryResult =

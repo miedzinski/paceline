@@ -1,11 +1,11 @@
 package paceline.testsupport
 
 import paceline.device.ports.DeviceDiscoveryResult
-import paceline.device.ports.WifiDiscovery
+import paceline.device.ports.LocalNetworkDiscovery
 
-class FakeWifiDiscovery(
+class FakeLocalNetworkDiscovery(
     var result: DeviceDiscoveryResult,
-) : WifiDiscovery {
+) : LocalNetworkDiscovery {
     var calls: Int = 0
         private set
 

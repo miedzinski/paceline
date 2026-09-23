@@ -14,7 +14,7 @@ class NoopBluetoothAccess : BluetoothAccess {
     override fun discover(serviceUuids: Set<UUID>): List<BluetoothDeviceCandidate> = emptyList()
 
     override fun connect(endpoint: DeviceEndpoint.Bluetooth): GattClient =
-        error("Bluetooth connection should not be attempted in the Wi-Fi integration suite")
+        error("Bluetooth connection should not be attempted in the local-network integration suite")
 
     override fun close() = Unit
 }

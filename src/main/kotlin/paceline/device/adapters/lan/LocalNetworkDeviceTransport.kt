@@ -1,4 +1,4 @@
-package paceline.device.adapters.wifi
+package paceline.device.adapters.lan
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
@@ -13,16 +13,16 @@ import java.net.InetSocketAddress
 import java.net.Socket
 
 @Component
-class WifiDeviceTransport(
+class LocalNetworkDeviceTransport(
     private val properties: DeviceProperties,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
 
     fun connect(device: DeviceAdvertisement): DeviceConnectionSession {
         val endpoint =
-            device.endpoint as? DeviceEndpoint.Wifi
+            device.endpoint as? DeviceEndpoint.LocalNetwork
                 ?: throw DeviceCommunicationException(
-                    "Device ${device.name} does not have a Wi-Fi endpoint",
+                    "Device ${device.name} does not have a local network endpoint",
                 )
         val socket = Socket()
         var protocolClient: WftnpClient? = null
@@ -41,7 +41,7 @@ class WifiDeviceTransport(
                 WftnpClient(
                     input = socket.getInputStream(),
                     output = socket.getOutputStream(),
-                    requestTimeout = properties.wifi.protocolTimeout,
+                    requestTimeout = properties.localNetwork.protocolTimeout,
                 ).also(WftnpClient::start)
 
             val connection =
@@ -55,7 +55,7 @@ class WifiDeviceTransport(
                 capabilities = connection.capabilities(),
             ).also {
                 logger.info(
-                    "Opened device protocol session to {} at {}:{} via Wi-Fi",
+                    "Opened device protocol session to {} at {}:{} over the local network",
                     device.name,
                     endpoint.host,
                     endpoint.port,
@@ -69,7 +69,7 @@ class WifiDeviceTransport(
                 // Preserve the protocol failure as the useful diagnostic.
             }
             logger.warn(
-                "Unable to open device protocol session to {} at {}:{} via Wi-Fi",
+                "Unable to open device protocol session to {} at {}:{} over the local network",
                 device.name,
                 endpoint.host,
                 endpoint.port,

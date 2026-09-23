@@ -1,4 +1,4 @@
-export type DeviceTransport = "WIFI" | "BLUETOOTH";
+export type DeviceTransport = "LOCAL_NETWORK" | "BLUETOOTH";
 
 export type DiscoveryPhase =
     "READY" | "DISCOVERING" | "DISCOVERED" | "UNAVAILABLE" | "FAILED";

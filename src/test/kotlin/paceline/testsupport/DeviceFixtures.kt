@@ -12,7 +12,7 @@ fun kickrCore2Candidate(
 ): DeviceDiscoveryCandidate =
     DeviceDiscoveryCandidate(
         name = name,
-        endpoint = DeviceEndpoint.Wifi(host, port),
+        endpoint = DeviceEndpoint.LocalNetwork(host, port),
         metadata = metadata,
     )
 

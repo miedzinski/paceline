@@ -2,11 +2,11 @@ package paceline.testsupport
 
 import paceline.device.adapters.gatt.ftms.FtmsUuid
 import paceline.device.adapters.gatt.heartrate.HeartRateUuid
-import paceline.device.adapters.wifi.WftnpFrame
-import paceline.device.adapters.wifi.WftnpFrameCodec
-import paceline.device.adapters.wifi.WftnpMessageType
-import paceline.device.adapters.wifi.toWftnpBytes
-import paceline.device.adapters.wifi.uuidFromWftnpBytes
+import paceline.device.adapters.lan.WftnpFrame
+import paceline.device.adapters.lan.WftnpFrameCodec
+import paceline.device.adapters.lan.WftnpMessageType
+import paceline.device.adapters.lan.toWftnpBytes
+import paceline.device.adapters.lan.uuidFromWftnpBytes
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket

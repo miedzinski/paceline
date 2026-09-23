@@ -5,8 +5,8 @@ import paceline.device.ports.DeviceCapability
 import paceline.device.ports.DeviceCommunicationException
 import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
+import paceline.device.ports.LocalNetworkDiscovery
 import paceline.device.ports.TrainerControl
-import paceline.device.ports.WifiDiscovery
 import paceline.telemetry.config.TelemetryProperties
 import paceline.telemetry.domain.CyclingTelemetry
 import paceline.telemetry.domain.HeartRateTelemetry
@@ -16,8 +16,8 @@ import paceline.testsupport.FakeCyclingTelemetrySource
 import paceline.testsupport.FakeDeviceCommunication
 import paceline.testsupport.FakeDeviceConnection
 import paceline.testsupport.FakeHeartRateTelemetrySource
+import paceline.testsupport.FakeLocalNetworkDiscovery
 import paceline.testsupport.FakeTrainerControl
-import paceline.testsupport.FakeWifiDiscovery
 import paceline.testsupport.kickrCore2Candidate
 import java.time.Clock
 import java.time.Duration
@@ -38,13 +38,13 @@ class ConnectionCoordinatorTest {
 
     private fun coordinator(
         communication: FakeDeviceCommunication = FakeDeviceCommunication(),
-        wifiResult: DeviceDiscoveryResult = DeviceDiscoveryResult.Found(listOf(candidate)),
+        localNetworkResult: DeviceDiscoveryResult = DeviceDiscoveryResult.Found(listOf(candidate)),
         bluetoothResult: DeviceDiscoveryResult = DeviceDiscoveryResult.NotFound,
         clock: Clock = Clock.systemUTC(),
         telemetryProperties: TelemetryProperties = TelemetryProperties(),
     ): ConnectionCoordinator =
         ConnectionCoordinator(
-            wifiDiscovery = FakeWifiDiscovery(wifiResult),
+            localNetworkDiscovery = FakeLocalNetworkDiscovery(localNetworkResult),
             bluetoothDiscovery = FakeBluetoothDiscovery(bluetoothResult),
             communication = communication,
             clock = clock,
@@ -54,19 +54,19 @@ class ConnectionCoordinatorTest {
     @Test
     fun `does not discover or connect until requested`() {
         // given a coordinator with a discoverable device advertisement:
-        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val localNetworkDiscovery = FakeLocalNetworkDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
         val bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound)
         val communication = FakeDeviceCommunication()
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery = wifiDiscovery,
+                localNetworkDiscovery = localNetworkDiscovery,
                 bluetoothDiscovery = bluetoothDiscovery,
                 communication = communication,
             )
 
         // when the application has started but no user action has happened:
         // then discovery and communication remain untouched:
-        assertEquals(0, wifiDiscovery.calls)
+        assertEquals(0, localNetworkDiscovery.calls)
         assertEquals(0, bluetoothDiscovery.calls)
         assertEquals(emptyList(), communication.connectedDevices)
         assertEquals(DiscoveryPhase.READY, coordinator.discoveryState().phase)
@@ -93,15 +93,15 @@ class ConnectionCoordinatorTest {
         // given a discovery source that keeps the background scan in progress:
         val scanStarted = CountDownLatch(1)
         val releaseScan = CountDownLatch(1)
-        val wifiDiscovery =
-            WifiDiscovery {
+        val localNetworkDiscovery =
+            LocalNetworkDiscovery {
                 scanStarted.countDown()
                 releaseScan.await(1, TimeUnit.SECONDS)
                 DeviceDiscoveryResult.Found(listOf(candidate))
             }
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery = wifiDiscovery,
+                localNetworkDiscovery = localNetworkDiscovery,
                 bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound),
                 communication = FakeDeviceCommunication(),
             )
@@ -132,8 +132,8 @@ class ConnectionCoordinatorTest {
         // given a discovery source that emits an advertisement and keeps its scan open:
         val candidatePublished = CountDownLatch(1)
         val releaseScan = CountDownLatch(1)
-        val wifiDiscovery =
-            object : WifiDiscovery {
+        val localNetworkDiscovery =
+            object : LocalNetworkDiscovery {
                 override fun discover(): DeviceDiscoveryResult = DeviceDiscoveryResult.Found(listOf(candidate))
 
                 override fun discover(onCandidate: (DeviceDiscoveryCandidate) -> Unit): DeviceDiscoveryResult {
@@ -145,7 +145,7 @@ class ConnectionCoordinatorTest {
             }
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery = wifiDiscovery,
+                localNetworkDiscovery = localNetworkDiscovery,
                 bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound),
                 communication = FakeDeviceCommunication(),
             )
@@ -190,15 +190,15 @@ class ConnectionCoordinatorTest {
     @Test
     fun `failed asynchronous discovery clears the previous result`() {
         // given a completed discovery result that is followed by a failed refresh:
-        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val localNetworkDiscovery = FakeLocalNetworkDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery = wifiDiscovery,
+                localNetworkDiscovery = localNetworkDiscovery,
                 bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound),
                 communication = FakeDeviceCommunication(),
             )
         coordinator.discover()
-        wifiDiscovery.result =
+        localNetworkDiscovery.result =
             DeviceDiscoveryResult.Failed(
                 DiscoveryFailureCode.DISCOVERY_ERROR,
                 "The network scan failed",
@@ -219,7 +219,7 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun `discovery combines wifi and Bluetooth source candidates`() {
+    fun `discovery combines local-network and Bluetooth source candidates`() {
         // given both discovery sources have candidates:
         val bluetoothCandidate =
             kickrCore2Candidate(name = "KICKR CORE BLE").copy(
@@ -232,7 +232,7 @@ class ConnectionCoordinatorTest {
         val communication = FakeDeviceCommunication()
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate))),
+                localNetworkDiscovery = FakeLocalNetworkDiscovery(DeviceDiscoveryResult.Found(listOf(candidate))),
                 bluetoothDiscovery =
                     FakeBluetoothDiscovery(DeviceDiscoveryResult.Found(listOf(bluetoothCandidate))),
                 communication = communication,
@@ -250,8 +250,8 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun `discovery keeps Bluetooth candidates when wifi discovery fails`() {
-        // given a Wi-Fi discovery failure and a successful Bluetooth discovery:
+    fun `discovery keeps Bluetooth candidates when local-network discovery fails`() {
+        // given a local-network discovery failure and a successful Bluetooth discovery:
         val bluetoothCandidate =
             kickrCore2Candidate(name = "KICKR CORE BLE").copy(
                 endpoint =
@@ -263,8 +263,8 @@ class ConnectionCoordinatorTest {
         val communication = FakeDeviceCommunication()
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery =
-                    FakeWifiDiscovery(
+                localNetworkDiscovery =
+                    FakeLocalNetworkDiscovery(
                         DeviceDiscoveryResult.Failed(
                             DiscoveryFailureCode.DISCOVERY_ERROR,
                             "multicast unavailable",
@@ -443,12 +443,12 @@ class ConnectionCoordinatorTest {
     @Test
     fun `refreshes discovery while preserving an active connection`() {
         // given a device with an active connection and discovery sources that can be queried again:
-        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val localNetworkDiscovery = FakeLocalNetworkDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
         val bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound)
         val communication = FakeDeviceCommunication()
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery = wifiDiscovery,
+                localNetworkDiscovery = localNetworkDiscovery,
                 bluetoothDiscovery = bluetoothDiscovery,
                 communication = communication,
             )
@@ -464,7 +464,7 @@ class ConnectionCoordinatorTest {
         val refreshed = coordinator.discover()
 
         // then discovery runs again without replacing the active connection:
-        assertEquals(2, wifiDiscovery.calls)
+        assertEquals(2, localNetworkDiscovery.calls)
         assertEquals(DiscoveryPhase.DISCOVERED, refreshed.state.phase)
         assertEquals(device, refreshed.devices.single().device)
         assertEquals(ConnectionPhase.CONNECTED, coordinator.connectionSnapshots().single().phase)
@@ -474,12 +474,12 @@ class ConnectionCoordinatorTest {
     @Test
     fun `reports a failed refresh without losing the active connection state`() {
         // given a device with an active connection and a failed next discovery:
-        val wifiDiscovery = FakeWifiDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
+        val localNetworkDiscovery = FakeLocalNetworkDiscovery(DeviceDiscoveryResult.Found(listOf(candidate)))
         val bluetoothDiscovery = FakeBluetoothDiscovery(DeviceDiscoveryResult.NotFound)
         val communication = FakeDeviceCommunication()
         val coordinator =
             ConnectionCoordinator(
-                wifiDiscovery = wifiDiscovery,
+                localNetworkDiscovery = localNetworkDiscovery,
                 bluetoothDiscovery = bluetoothDiscovery,
                 communication = communication,
             )
@@ -490,7 +490,7 @@ class ConnectionCoordinatorTest {
                 .single()
                 .id
         coordinator.connect(deviceId)
-        wifiDiscovery.result = DeviceDiscoveryResult.NotFound
+        localNetworkDiscovery.result = DeviceDiscoveryResult.NotFound
 
         // when discovery is refreshed:
         val refreshed = coordinator.discover()
@@ -513,7 +513,7 @@ class ConnectionCoordinatorTest {
         val communication = FakeDeviceCommunication()
         val coordinator =
             coordinator(
-                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
+                localNetworkResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
                 communication = communication,
             )
         val devices = coordinator.discover().devices
@@ -557,7 +557,7 @@ class ConnectionCoordinatorTest {
             }
         val coordinator =
             coordinator(
-                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
+                localNetworkResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
                 communication = communication,
             )
         val devices = coordinator.discover().devices
@@ -715,7 +715,7 @@ class ConnectionCoordinatorTest {
             }
         val coordinator =
             coordinator(
-                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
+                localNetworkResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
                 communication = communication,
             )
         val devices = coordinator.discover().devices
@@ -818,7 +818,7 @@ class ConnectionCoordinatorTest {
             }
         val coordinator =
             coordinator(
-                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
+                localNetworkResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
                 communication = communication,
             )
         val devices = coordinator.discover().devices
@@ -866,7 +866,7 @@ class ConnectionCoordinatorTest {
             }
         val coordinator =
             coordinator(
-                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
+                localNetworkResult = DeviceDiscoveryResult.Found(listOf(candidate, secondCandidate)),
                 communication = communication,
             )
         val deviceOptions = coordinator.discover().devices
@@ -910,12 +910,12 @@ class ConnectionCoordinatorTest {
             }
         val coordinator =
             coordinator(
-                wifiResult =
+                localNetworkResult =
                     DeviceDiscoveryResult.Found(
                         listOf(
                             DeviceDiscoveryCandidate(
                                 name = "Kitchen speaker",
-                                endpoint = DeviceEndpoint.Wifi("192.168.1.20", 80),
+                                endpoint = DeviceEndpoint.LocalNetwork("192.168.1.20", 80),
                             ),
                         ),
                     ),
@@ -942,12 +942,12 @@ class ConnectionCoordinatorTest {
         val candidate =
             DeviceDiscoveryCandidate(
                 name = "Unknown device",
-                endpoint = DeviceEndpoint.Wifi("192.168.1.20", 80),
+                endpoint = DeviceEndpoint.LocalNetwork("192.168.1.20", 80),
             )
         val communication = FakeDeviceCommunication()
         val coordinator =
             coordinator(
-                wifiResult = DeviceDiscoveryResult.Found(listOf(candidate)),
+                localNetworkResult = DeviceDiscoveryResult.Found(listOf(candidate)),
                 communication = communication,
             )
         val deviceId =
@@ -973,7 +973,7 @@ class ConnectionCoordinatorTest {
             FakeDeviceCommunication {
                 error("connection should not be attempted")
             }
-        val coordinator = coordinator(wifiResult = DeviceDiscoveryResult.NotFound, communication = communication)
+        val coordinator = coordinator(localNetworkResult = DeviceDiscoveryResult.NotFound, communication = communication)
 
         // when available devices are requested:
         val result = coordinator.discover()

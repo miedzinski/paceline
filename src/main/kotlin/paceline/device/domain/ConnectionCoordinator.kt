@@ -10,8 +10,8 @@ import paceline.device.ports.DeviceConnectionSession
 import paceline.device.ports.DeviceDiscoveryResult
 import paceline.device.ports.HeartRateTelemetryListener
 import paceline.device.ports.HeartRateTelemetrySource
+import paceline.device.ports.LocalNetworkDiscovery
 import paceline.device.ports.TrainerControl
-import paceline.device.ports.WifiDiscovery
 import paceline.telemetry.config.TelemetryProperties
 import paceline.telemetry.domain.CyclingTelemetry
 import paceline.telemetry.domain.HeartRateTelemetry
@@ -36,7 +36,7 @@ class ConnectionNotFoundException(
 
 @Component
 class ConnectionCoordinator(
-    private val wifiDiscovery: WifiDiscovery,
+    private val localNetworkDiscovery: LocalNetworkDiscovery,
     private val bluetoothDiscovery: BluetoothDiscovery,
     private val communication: DeviceCommunication,
     private val clock: Clock = Clock.systemUTC(),
@@ -540,8 +540,8 @@ class ConnectionCoordinator(
             listOf(
                 CompletableFuture.supplyAsync(
                     {
-                        runDiscoverySource("Wi-Fi") { onCandidate ->
-                            wifiDiscovery.discover { candidate ->
+                        runDiscoverySource("Local network") { onCandidate ->
+                            localNetworkDiscovery.discover { candidate ->
                                 onCandidate(generation, candidate)
                             }
                         }
@@ -648,7 +648,7 @@ class ConnectionCoordinator(
         second: DeviceAdvertisement,
     ): Boolean =
         when {
-            first.endpoint is DeviceEndpoint.Wifi && second.endpoint is DeviceEndpoint.Wifi -> {
+            first.endpoint is DeviceEndpoint.LocalNetwork && second.endpoint is DeviceEndpoint.LocalNetwork -> {
                 first.endpoint.host.equals(second.endpoint.host, ignoreCase = true) &&
                     first.endpoint.port == second.endpoint.port
             }
@@ -788,7 +788,7 @@ class ConnectionCoordinator(
         }
 
         return when {
-            first.endpoint is DeviceEndpoint.Wifi && second.endpoint is DeviceEndpoint.Wifi -> {
+            first.endpoint is DeviceEndpoint.LocalNetwork && second.endpoint is DeviceEndpoint.LocalNetwork -> {
                 first.endpoint.host.equals(second.endpoint.host, ignoreCase = true) &&
                     first.endpoint.port == second.endpoint.port
             }

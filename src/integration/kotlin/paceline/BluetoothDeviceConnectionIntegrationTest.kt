@@ -42,7 +42,7 @@ import kotlin.test.assertTrue
         "paceline.device.mdns-service-type=_paceline-integration._tcp.local.",
         "paceline.device.discovery-timeout=1s",
         "paceline.device.connect-timeout=1s",
-        "paceline.device.wifi.protocol-timeout=1s",
+        "paceline.device.local-network.protocol-timeout=1s",
     ],
 )
 @Import(BluetoothDeviceConnectionIntegrationTestConfiguration::class)

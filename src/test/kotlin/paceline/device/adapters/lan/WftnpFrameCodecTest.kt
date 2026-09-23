@@ -1,4 +1,4 @@
-package paceline.device.adapters.wifi
+package paceline.device.adapters.lan
 
 import java.io.ByteArrayInputStream
 import java.io.InputStream

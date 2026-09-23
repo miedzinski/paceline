@@ -1,4 +1,4 @@
-package paceline.device.adapters.wifi
+package paceline.device.adapters.lan
 
 import java.io.PipedInputStream
 import java.io.PipedOutputStream

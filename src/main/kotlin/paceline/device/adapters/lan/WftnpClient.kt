@@ -1,4 +1,4 @@
-package paceline.device.adapters.wifi
+package paceline.device.adapters.lan
 
 import paceline.device.adapters.gatt.GattCharacteristic
 import paceline.device.adapters.gatt.GattCharacteristicProperty

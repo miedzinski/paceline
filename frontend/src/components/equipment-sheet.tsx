@@ -12,7 +12,7 @@ import {
     ScanLine,
     Settings2,
     Unplug,
-    Wifi,
+    Network,
     X,
     Zap,
 } from "lucide-react";
@@ -66,7 +66,7 @@ function capabilityLabel(capability: string): string {
 }
 
 function DeviceIcon({ transport }: { transport: Device["transport"] }) {
-    const Icon = transport === "BLUETOOTH" ? Bluetooth : Wifi;
+    const Icon = transport === "BLUETOOTH" ? Bluetooth : Network;
     return <Icon aria-hidden="true" className="size-5" />;
 }
 

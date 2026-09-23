@@ -18,22 +18,22 @@ data class DeviceDiscoveryCandidate(
 }
 
 enum class DeviceTransport {
-    WIFI,
+    LOCAL_NETWORK,
     BLUETOOTH,
 }
 
 sealed interface DeviceEndpoint {
     val transport: DeviceTransport
 
-    data class Wifi(
+    data class LocalNetwork(
         val host: String,
         val port: Int,
     ) : DeviceEndpoint {
-        override val transport: DeviceTransport = DeviceTransport.WIFI
+        override val transport: DeviceTransport = DeviceTransport.LOCAL_NETWORK
 
         init {
-            require(host.isNotBlank()) { "Wi-Fi device endpoint host must not be blank" }
-            require(port in 1..65_535) { "Wi-Fi device endpoint port must be between 1 and 65535" }
+            require(host.isNotBlank()) { "Local network device endpoint host must not be blank" }
+            require(port in 1..65_535) { "Local network device endpoint port must be between 1 and 65535" }
         }
     }
 

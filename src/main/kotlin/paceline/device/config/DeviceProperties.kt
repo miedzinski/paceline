@@ -10,7 +10,7 @@ data class DeviceProperties(
     val discoveryTimeout: Duration = Duration.ofSeconds(5),
     val connectTimeout: Duration = Duration.ofSeconds(3),
     @NestedConfigurationProperty val bluetooth: BluetoothProperties = BluetoothProperties(),
-    @NestedConfigurationProperty val wifi: WifiProperties = WifiProperties(),
+    @NestedConfigurationProperty val localNetwork: LocalNetworkProperties = LocalNetworkProperties(),
     val bluetoothAdapter: String? = null,
 )
 
@@ -18,6 +18,6 @@ data class BluetoothProperties(
     val gattServiceDiscoveryTimeout: Duration = Duration.ofSeconds(10),
 )
 
-data class WifiProperties(
+data class LocalNetworkProperties(
     val protocolTimeout: Duration = Duration.ofSeconds(3),
 )

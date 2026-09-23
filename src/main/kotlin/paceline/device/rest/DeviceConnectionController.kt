@@ -236,18 +236,18 @@ private fun paceline.device.domain.DeviceAdvertisement.toResponse(): DeviceIdent
 
 private fun DeviceEndpoint.hostOrNull(): String? =
     when (this) {
-        is DeviceEndpoint.Wifi -> host
+        is DeviceEndpoint.LocalNetwork -> host
         is DeviceEndpoint.Bluetooth -> null
     }
 
 private fun DeviceEndpoint.portOrNull(): Int? =
     when (this) {
-        is DeviceEndpoint.Wifi -> port
+        is DeviceEndpoint.LocalNetwork -> port
         is DeviceEndpoint.Bluetooth -> null
     }
 
 private fun DeviceEndpoint.addressOrNull(): String? =
     when (this) {
-        is DeviceEndpoint.Wifi -> null
+        is DeviceEndpoint.LocalNetwork -> null
         is DeviceEndpoint.Bluetooth -> address
     }

@@ -1,4 +1,4 @@
-package paceline.device.adapters.wifi
+package paceline.device.adapters.lan
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
@@ -7,7 +7,7 @@ import paceline.device.domain.DeviceDiscoveryCandidate
 import paceline.device.domain.DeviceEndpoint
 import paceline.device.domain.DiscoveryFailureCode
 import paceline.device.ports.DeviceDiscoveryResult
-import paceline.device.ports.WifiDiscovery
+import paceline.device.ports.LocalNetworkDiscovery
 import java.util.concurrent.ConcurrentHashMap
 import javax.jmdns.JmDNS
 import javax.jmdns.ServiceEvent
@@ -18,7 +18,7 @@ import javax.jmdns.ServiceListener
 class JmDnsDeviceDiscovery(
     private val jmDns: JmDNS,
     private val properties: DeviceProperties,
-) : WifiDiscovery {
+) : LocalNetworkDiscovery {
     private val logger = LoggerFactory.getLogger(javaClass)
 
     override fun discover(): DeviceDiscoveryResult = discover { }
@@ -93,7 +93,7 @@ class JmDnsDeviceDiscovery(
         return DeviceDiscoveryCandidate(
             name = name.ifBlank { hostName.trimEnd('.') },
             endpoint =
-                DeviceEndpoint.Wifi(
+                DeviceEndpoint.LocalNetwork(
                     host = addresses.firstOrNull() ?: hostName.trimEnd('.'),
                     port = service.port,
                 ),

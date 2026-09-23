@@ -1,5 +1,5 @@
 import { shouldShowConnectionBanner } from "@/lib/connection";
-import { ChevronRight, CircleAlert, WifiOff } from "lucide-react";
+import { ChevronRight, CircleAlert, Unplug } from "lucide-react";
 import type { TrainingSessionResponse } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -227,7 +227,7 @@ export function ConnectionBanner({
         <div className="mt-5 flex flex-col items-start justify-between gap-3 rounded-2xl border border-[#806335] bg-[#2b2418] p-4 text-sm text-[#f5d28c] sm:flex-row sm:items-center">
             <div className="flex items-start gap-3">
                 {hasTrainer ? (
-                    <WifiOff
+                    <Unplug
                         aria-hidden="true"
                         className="mt-0.5 size-4 shrink-0"
                     />
