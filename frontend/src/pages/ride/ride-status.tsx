@@ -82,7 +82,6 @@ export function ErgProtectionBanner({
     }
 
     const isUnavailable = protection.state === "UNAVAILABLE";
-    const isRecoveryRetrying = protection.state === "RECOVERY_RETRYING";
     const isRecoveryFailed = protection.state === "RECOVERY_FAILED";
     const isFailure = isUnavailable || isRecoveryFailed;
     return (
@@ -105,22 +104,18 @@ export function ErgProtectionBanner({
                 <p className="font-bold">
                     {isUnavailable
                         ? "ERG protection is unavailable"
-                        : isRecoveryRetrying
-                          ? "ERG recovery retrying"
-                          : isRecoveryFailed
-                            ? "ERG recovery failed"
-                            : "ERG protection active"}
+                        : isRecoveryFailed
+                          ? "ERG recovery failed"
+                          : "ERG protection active"}
                 </p>
                 <p className="mt-1 text-xs opacity-75">
                     {isUnavailable
                         ? (protection.error ??
-                          "The trainer did not accept the protective zero-watt target.")
-                        : isRecoveryRetrying
-                          ? `The trainer rejected the recovery target. Retry ${protection.retryAttempt ?? "—"} is scheduled while resistance remains at 0 W.`
-                          : isRecoveryFailed
-                            ? (protection.error ??
-                              "The trainer did not accept the recovery target after the configured retries. The workout continues recording at 0 W.")
-                            : `Resistance was released at ${formatMetric(protection.cadenceRpm)} rpm. ERG will resume automatically when cadence recovers.`}
+                          "The trainer did not accept the resistance-release command.")
+                        : isRecoveryFailed
+                          ? (protection.error ??
+                            "The trainer did not accept the recovery target. The workout continues recording while resistance remains released.")
+                          : `Resistance was released at ${formatMetric(protection.cadenceRpm)} rpm. ERG will resume automatically when cadence recovers.`}
                 </p>
             </div>
         </div>

@@ -97,4 +97,12 @@ private class ConnectedTrainerControl(
     override fun setTargetPower(powerWatts: Int) = delegate.setTargetPower(powerWatts)
 
     override fun setFreeRide() = delegate.setFreeRide()
+
+    override fun releaseResistance() = delegate.releaseResistance()
+
+    override fun stop() = delegate.stop()
+
+    override fun pause() = delegate.pause()
+
+    override fun startOrResume() = delegate.startOrResume()
 }

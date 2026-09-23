@@ -14,7 +14,8 @@ class ErgProtectionCoordinatorTest {
     @Test
     fun `coordinates bailout and recovery commands as session state transitions`() {
         // given an ERG session and a protection policy with one-second dwell periods:
-        val commands = mutableListOf<Int>()
+        val targetCommands = mutableListOf<Int>()
+        var resistanceReleaseCalls = 0
         val events = mutableListOf<TrainingActivityEvent>()
         val coordinator =
             ErgProtectionCoordinator(
@@ -26,10 +27,14 @@ class ErgProtectionCoordinatorTest {
                     ),
                 telemetryFreshness = Duration.ofSeconds(5),
                 setTarget = { target, _, _ ->
-                    commands += target
+                    targetCommands += target
                     true
                 },
                 recordActivityEvent = { _, event -> events += event },
+                releaseResistance = { _, _ ->
+                    resistanceReleaseCalls += 1
+                    true
+                },
             )
         var state =
             TrainingSessionState
@@ -43,12 +48,32 @@ class ErgProtectionCoordinatorTest {
 
         // when cadence remains low and then remains high for the recovery dwell:
         state = coordinator.evaluate(state, start, telemetry(start, 40.0), workoutActive = true)
-        state = coordinator.evaluate(state, start.plusSeconds(1), telemetry(start.plusSeconds(1), 40.0), workoutActive = true)
-        state = coordinator.evaluate(state, start.plusSeconds(2), telemetry(start.plusSeconds(2), 70.0), workoutActive = true)
-        state = coordinator.evaluate(state, start.plusSeconds(3), telemetry(start.plusSeconds(3), 70.0), workoutActive = true)
+        val bailedOut =
+            coordinator.evaluate(
+                state,
+                start.plusSeconds(1),
+                telemetry(start.plusSeconds(1), 40.0),
+                workoutActive = true,
+            )
+        state =
+            coordinator.evaluate(
+                bailedOut,
+                start.plusSeconds(2),
+                telemetry(start.plusSeconds(2), 70.0),
+                workoutActive = true,
+            )
+        state =
+            coordinator.evaluate(
+                state,
+                start.plusSeconds(3),
+                telemetry(start.plusSeconds(3), 70.0),
+                workoutActive = true,
+            )
 
-        // then protection owns the command sequence while the session remains in ERG mode:
-        assertEquals(listOf(0, 300), commands)
+        // then protection releases resistance without sending a zero-watt target:
+        assertEquals(listOf(300), targetCommands)
+        assertEquals(1, resistanceReleaseCalls)
+        assertEquals(null, bailedOut.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.INACTIVE, state.ergProtection.status)
         assertEquals(TrainingControlMode.ERG, state.controlMode)
         assertEquals(

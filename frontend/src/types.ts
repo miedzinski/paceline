@@ -174,19 +174,13 @@ export type TrainerConnectionStatus =
     "NOT_ACTIVE" | "CONNECTED" | "INTERRUPTED" | "RECONNECTING";
 
 export type ErgProtectionState =
-    | "INACTIVE"
-    | "BAILED_OUT"
-    | "RECOVERY_RETRYING"
-    | "RECOVERY_FAILED"
-    | "UNAVAILABLE";
+    "INACTIVE" | "BAILED_OUT" | "RECOVERY_FAILED" | "UNAVAILABLE";
 
 export interface ErgProtectionResponse {
     state: ErgProtectionState;
     changedAt: string | null;
     cadenceRpm: number | null;
     error: string | null;
-    retryAttempt: number | null;
-    nextRetryAt: string | null;
 }
 
 export type TrainingSessionState =

@@ -31,8 +31,5 @@ paceline:
       recovery-cadence-rpm: 60
       recovery-duration: 2s
       target-change-grace-period: 2s
-      recovery-retry-initial-delay: 1s
-      recovery-retry-max-delay: 8s
-      recovery-retry-max-attempts: 5
   intervals:
     base-url: https://intervals.icu

@@ -414,8 +414,6 @@ data class ErgProtectionResponse(
     val changedAt: Instant?,
     val cadenceRpm: Double?,
     val error: String?,
-    val retryAttempt: Int?,
-    val nextRetryAt: Instant?,
 )
 
 data class HeartRateResponse(
@@ -607,8 +605,6 @@ private fun ErgProtectionState.toResponse(): ErgProtectionResponse =
         changedAt = changedAt,
         cadenceRpm = cadenceRpm,
         error = error,
-        retryAttempt = retryAttempt,
-        nextRetryAt = nextRetryAt,
     )
 
 private fun TrainingWorkoutProgress.toResponse(): TrainingWorkoutResponse =

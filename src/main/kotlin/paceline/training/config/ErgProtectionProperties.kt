@@ -11,9 +11,6 @@ data class ErgProtectionProperties(
     val recoveryCadenceRpm: Double = 60.0,
     val recoveryDuration: Duration = Duration.ofSeconds(2),
     val targetChangeGracePeriod: Duration = Duration.ofSeconds(2),
-    val recoveryRetryInitialDelay: Duration = Duration.ofSeconds(1),
-    val recoveryRetryMaxDelay: Duration = Duration.ofSeconds(8),
-    val recoveryRetryMaxAttempts: Int = 5,
 ) {
     init {
         require(lowCadenceRpm.isFinite() && lowCadenceRpm >= 0.0) {
@@ -30,18 +27,6 @@ data class ErgProtectionProperties(
         }
         require(!targetChangeGracePeriod.isNegative) {
             "ERG protection target-change grace period must not be negative"
-        }
-        require(!recoveryRetryInitialDelay.isNegative && !recoveryRetryInitialDelay.isZero) {
-            "ERG protection recovery retry initial delay must be positive"
-        }
-        require(!recoveryRetryMaxDelay.isNegative && !recoveryRetryMaxDelay.isZero) {
-            "ERG protection recovery retry maximum delay must be positive"
-        }
-        require(recoveryRetryMaxDelay.compareTo(recoveryRetryInitialDelay) >= 0) {
-            "ERG protection recovery retry maximum delay must not be shorter than its initial delay"
-        }
-        require(recoveryRetryMaxAttempts > 0) {
-            "ERG protection recovery retry maximum attempts must be positive"
         }
     }
 }

@@ -37,5 +37,13 @@ interface TrainerControl :
 
     fun setFreeRide()
 
+    fun releaseResistance()
+
+    fun stop()
+
+    fun pause()
+
+    fun startOrResume()
+
     override fun close() = Unit
 }

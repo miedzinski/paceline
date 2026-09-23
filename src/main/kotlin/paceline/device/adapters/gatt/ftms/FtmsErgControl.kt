@@ -67,15 +67,32 @@ class FtmsErgControl(
         execute(opcode = OPCODE_SET_TARGET_POWER, parameter = parameter)
     }
 
-    override fun setFreeRide() {
+    override fun setFreeRide() = releaseResistance()
+
+    override fun releaseResistance() {
         check(controlGranted.get()) { "FTMS control has not been acquired" }
 
-        // FTMS resistance level uses a 0.1-unit SINT16 field. Zero selects the
-        // trainer's neutral manual-resistance mode without creating an ERG target.
+        // FTMS resistance level uses a 0.1-unit SINT16 field. Zero releases resistance
+        // without creating an ERG power target or changing the session control mode.
         execute(
             opcode = OPCODE_SET_TARGET_RESISTANCE_LEVEL,
             parameter = littleEndianShort(0),
         )
+    }
+
+    override fun stop() {
+        check(controlGranted.get()) { "FTMS control has not been acquired" }
+        execute(opcode = OPCODE_STOP_OR_PAUSE, parameter = byteArrayOf(STOP_PARAMETER))
+    }
+
+    override fun pause() {
+        check(controlGranted.get()) { "FTMS control has not been acquired" }
+        execute(opcode = OPCODE_STOP_OR_PAUSE, parameter = byteArrayOf(PAUSE_PARAMETER))
+    }
+
+    override fun startOrResume() {
+        check(controlGranted.get()) { "FTMS control has not been acquired" }
+        execute(opcode = OPCODE_START_OR_RESUME)
     }
 
     override fun close() {
@@ -103,15 +120,15 @@ class FtmsErgControl(
                         "Another FTMS control-point procedure is already in progress"
                     }
                 }
+            val payload = byteArrayOf(opcode.toByte()) + parameter
+            val payloadHex = payload.joinToString("") { byte -> "%02X".format(byte.toInt() and 0xff) }
             try {
                 logger.debug(
-                    "Sending FTMS control-point command: opcode=0x{}",
+                    "Sending FTMS control-point command: opcode=0x{} payloadHex={}",
                     opcode.toString(16),
+                    payloadHex,
                 )
-                gattClient.writeCharacteristic(
-                    controlPointCharacteristic,
-                    byteArrayOf(opcode.toByte()) + parameter,
-                )
+                gattClient.writeCharacteristic(controlPointCharacteristic, payload)
                 val response =
                     try {
                         command.response.get(responseTimeout.toMillis(), TimeUnit.MILLISECONDS)
@@ -127,34 +144,40 @@ class FtmsErgControl(
                             exception,
                         )
                     } catch (exception: ExecutionException) {
-                        throw (exception.cause as? FtmsControlException)
-                            ?: FtmsControlException(
-                                "FTMS control-point response failed",
-                                exception.cause ?: exception,
-                            )
+                        val cause = exception.cause ?: exception
+                        if (cause is FtmsControlException) {
+                            throw cause
+                        }
+                        throw FtmsControlException(
+                            "Unable to receive FTMS control-point response to opcode 0x${opcode.toString(16)}",
+                            cause,
+                        )
                     }
 
                 if (response.requestedOpcode != opcode) {
                     throw FtmsControlException(
                         "FTMS control-point response opcode 0x${response.requestedOpcode.toString(16)} " +
-                            "did not match request opcode 0x${opcode.toString(16)}",
+                            "does not match request opcode 0x${opcode.toString(16)}",
                     )
                 }
                 if (response.resultCode != RESULT_SUCCESS) {
                     throw FtmsControlException(
-                        "FTMS control-point opcode 0x${opcode.toString(16)} was rejected with result " +
-                            "0x${response.resultCode.toString(16)}",
+                        "Trainer rejected FTMS control-point opcode 0x${opcode.toString(16)} " +
+                            "with result 0x${response.resultCode.toString(16)}",
                     )
                 }
                 logger.debug(
-                    "FTMS control-point command accepted: opcode=0x{} resultCode=0x{}",
+                    "FTMS control-point command accepted: opcode=0x{} payloadHex={} resultCode=0x{}",
                     opcode.toString(16),
+                    payloadHex,
                     response.resultCode.toString(16),
                 )
             } catch (exception: FtmsControlException) {
                 logger.warn(
-                    "FTMS control-point command failed: opcode=0x{} error={}",
+                    "FTMS control-point procedure failed: opcode=0x{} payloadHex={} errorType={} error={}",
                     opcode.toString(16),
+                    payloadHex,
+                    exception.javaClass.simpleName,
                     exception.message,
                     exception,
                 )
@@ -164,15 +187,18 @@ class FtmsErgControl(
                 throw exception
             } catch (exception: Exception) {
                 logger.warn(
-                    "FTMS control-point command failed before a protocol response: opcode=0x{}",
+                    "FTMS control-point write failed: opcode=0x{} payloadHex={} errorType={} error={}",
                     opcode.toString(16),
+                    payloadHex,
+                    exception.javaClass.simpleName,
+                    exception.message,
                     exception,
                 )
                 if (opcode == OPCODE_REQUEST_CONTROL) {
                     controlGranted.set(false)
                 }
                 throw FtmsControlException(
-                    "Unable to send FTMS control-point opcode 0x${opcode.toString(16)}",
+                    "Unable to send FTMS control-point opcode 0x${opcode.toString(16)} with payload $payloadHex",
                     exception,
                 )
             } finally {
@@ -223,9 +249,13 @@ class FtmsErgControl(
         const val OPCODE_REQUEST_CONTROL = 0x00
         const val OPCODE_SET_TARGET_RESISTANCE_LEVEL = 0x04
         const val OPCODE_SET_TARGET_POWER = 0x05
+        const val OPCODE_START_OR_RESUME = 0x07
+        const val OPCODE_STOP_OR_PAUSE = 0x08
         const val OPCODE_RESPONSE_CODE = 0x80
         const val RESULT_SUCCESS = 0x01
 
+        private const val STOP_PARAMETER: Byte = 0x01
+        private const val PAUSE_PARAMETER: Byte = 0x02
         private const val RESULT_MALFORMED = 0xff
     }
 }

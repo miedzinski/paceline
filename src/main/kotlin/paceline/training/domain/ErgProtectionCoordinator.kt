@@ -12,6 +12,9 @@ class ErgProtectionCoordinator(
     private val telemetryFreshness: Duration,
     private val setTarget: (Int, String, Instant) -> Boolean,
     private val recordActivityEvent: (UUID, TrainingActivityEvent) -> Unit,
+    private val releaseResistance: (String, Instant) -> Boolean = { description, at ->
+        setTarget(0, description, at)
+    },
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     private val detector = ErgSpiralDetector(properties, telemetryFreshness)
@@ -24,7 +27,6 @@ class ErgProtectionCoordinator(
         state.ergProtection.status in
             setOf(
                 ErgProtectionStatus.BAILED_OUT,
-                ErgProtectionStatus.RECOVERY_RETRYING,
                 ErgProtectionStatus.RECOVERY_FAILED,
             )
 
@@ -39,10 +41,6 @@ class ErgProtectionCoordinator(
             ErgProtectionStatus.RECOVERY_FAILED,
             -> {
                 return state
-            }
-
-            ErgProtectionStatus.RECOVERY_RETRYING -> {
-                return retryRecovery(state, now, telemetry, workoutActive)
             }
 
             ErgProtectionStatus.INACTIVE,
@@ -77,10 +75,10 @@ class ErgProtectionCoordinator(
                     properties.lowCadenceDuration,
                 )
                 try {
-                    setTargetOrThrow(0, "ERG protection", now)
+                    releaseResistanceOrThrow("ERG protection resistance release", now)
                 } catch (exception: TrainingSessionUnavailableException) {
                     logger.warn(
-                        "ERG protection bailout failed: sessionId={} cadenceRpm={} " +
+                        "ERG protection resistance release failed: sessionId={} cadenceRpm={} " +
                             "requestedTargetPowerWatts={} error={}",
                         state.sessionId,
                         decision.cadenceRpm,
@@ -108,8 +106,8 @@ class ErgProtectionCoordinator(
                 }
 
                 logger.info(
-                    "ERG protection bailout applied: sessionId={} cadenceRpm={} " +
-                        "requestedTargetPowerWatts={} appliedTargetPowerWatts=0",
+                    "ERG protection resistance released: sessionId={} cadenceRpm={} " +
+                        "requestedTargetPowerWatts={}",
                     state.sessionId,
                     decision.cadenceRpm,
                     requestedTarget,
@@ -123,7 +121,7 @@ class ErgProtectionCoordinator(
                 state.copy(
                     changedAt = now,
                     controlMode = TrainingControlMode.ERG,
-                    ergTargetPowerWatts = 0,
+                    ergTargetPowerWatts = null,
                     ergProtection = ErgProtectionState.bailedOut(now, decision.cadenceRpm),
                 )
             }
@@ -132,7 +130,7 @@ class ErgProtectionCoordinator(
                 val target = requestedTarget ?: return state
                 logger.info(
                     "ERG spiral recovery detected; requesting target restore: sessionId={} cadenceRpm={} " +
-                        "targetPowerWatts={} recoveryCadenceThresholdRpm={} recoveryDuration={} attempt=1",
+                        "targetPowerWatts={} recoveryCadenceThresholdRpm={} recoveryDuration={}",
                     state.sessionId,
                     decision.cadenceRpm,
                     target,
@@ -144,7 +142,6 @@ class ErgProtectionCoordinator(
                     now = now,
                     cadenceRpm = decision.cadenceRpm,
                     targetPowerWatts = target,
-                    attempt = 1,
                     workoutActive = workoutActive,
                 )
             }
@@ -155,98 +152,22 @@ class ErgProtectionCoordinator(
         }
     }
 
-    private fun retryRecovery(
-        state: TrainingSessionState,
-        now: Instant,
-        telemetry: CyclingTelemetry?,
-        workoutActive: Boolean,
-    ): TrainingSessionState {
-        val protection = state.ergProtection
-        val cadence = detector.freshRecoveryCadence(now, telemetry)
-        if (cadence == null) {
-            logger.info(
-                "ERG recovery retry cancelled; cadence is no longer fresh and high enough: " +
-                    "sessionId={} retryAttempt={} observedCadenceRpm={} recoveryCadenceThresholdRpm={} " +
-                    "telemetryReceivedAt={}",
-                state.sessionId,
-                protection.retryAttempt,
-                telemetry?.cadenceRpm,
-                properties.recoveryCadenceRpm,
-                telemetry?.receivedAt,
-            )
-            return state.copy(
-                changedAt = now,
-                ergProtection =
-                    ErgProtectionState.bailedOut(
-                        changedAt = now,
-                        cadenceRpm = protection.cadenceRpm,
-                    ),
-            )
-        }
-
-        val nextRetryAt = protection.nextRetryAt ?: return state
-        if (now.isBefore(nextRetryAt)) {
-            return state
-        }
-
-        val target = state.ergRequestedTargetPowerWatts
-        if (target == null || target <= 0) {
-            logger.info(
-                "ERG recovery retry cleared because no positive workout target remains: sessionId={} " +
-                    "retryAttempt={} targetPowerWatts={}",
-                state.sessionId,
-                protection.retryAttempt,
-                target,
-            )
-            detector.reset(now)
-            return state.copy(
-                changedAt = now,
-                controlMode = TrainingControlMode.ERG,
-                ergTargetPowerWatts = 0,
-                ergProtection = ErgProtectionState.inactive(),
-            )
-        }
-
-        return attemptRecovery(
-            state = state,
-            now = now,
-            cadenceRpm = cadence,
-            targetPowerWatts = target,
-            attempt = (protection.retryAttempt ?: 0) + 1,
-            workoutActive = workoutActive,
-        )
-    }
-
     private fun attemptRecovery(
         state: TrainingSessionState,
         now: Instant,
         cadenceRpm: Double,
         targetPowerWatts: Int,
-        attempt: Int,
         workoutActive: Boolean,
     ): TrainingSessionState {
         logger.info(
-            "ERG recovery command attempt: sessionId={} attempt={} targetPowerWatts={} cadenceRpm={} " +
-                "maxAttempts={}",
+            "ERG recovery command started: sessionId={} targetPowerWatts={} cadenceRpm={}",
             state.sessionId,
-            attempt,
             targetPowerWatts,
             cadenceRpm,
-            properties.recoveryRetryMaxAttempts,
         )
         try {
             setTargetOrThrow(targetPowerWatts, "ERG recovery", now)
         } catch (exception: TrainingSessionUnavailableException) {
-            logger.warn(
-                "ERG recovery command rejected: sessionId={} attempt={} targetPowerWatts={} cadenceRpm={} " +
-                    "error={}",
-                state.sessionId,
-                attempt,
-                targetPowerWatts,
-                cadenceRpm,
-                exception.message,
-                exception,
-            )
             recordErgProtectionEvent(
                 state = state,
                 type = TrainingActivityEventType.ERG_PROTECTION_FAILED,
@@ -254,19 +175,10 @@ class ErgProtectionCoordinator(
                 cadenceRpm = cadenceRpm,
             )
             val nextProtection =
-                if (workoutActive && attempt < properties.recoveryRetryMaxAttempts) {
-                    ErgProtectionState.recoveryRetrying(
-                        changedAt = now,
-                        cadenceRpm = cadenceRpm,
-                        retryAttempt = attempt,
-                        nextRetryAt = now.plus(recoveryRetryDelay(attempt)),
-                        error = exception.message,
-                    )
-                } else if (workoutActive) {
+                if (workoutActive) {
                     ErgProtectionState.recoveryFailed(
                         changedAt = now,
                         cadenceRpm = cadenceRpm,
-                        retryAttempt = attempt,
                         error = exception.message,
                     )
                 } else {
@@ -276,40 +188,27 @@ class ErgProtectionCoordinator(
                         error = exception.message,
                     )
                 }
-            if (nextProtection.status == ErgProtectionStatus.RECOVERY_RETRYING) {
-                logger.info(
-                    "ERG recovery retry scheduled: sessionId={} failedAttempt={} nextAttempt={} " +
-                        "nextRetryAt={} targetPowerWatts={} cadenceRpm={}",
-                    state.sessionId,
-                    attempt,
-                    attempt + 1,
-                    nextProtection.nextRetryAt,
-                    targetPowerWatts,
-                    cadenceRpm,
-                )
-            } else {
-                logger.warn(
-                    "ERG recovery retries exhausted; workout remains at bailout power: sessionId={} " +
-                        "attempt={} targetPowerWatts={} cadenceRpm={} status={}",
-                    state.sessionId,
-                    attempt,
-                    targetPowerWatts,
-                    cadenceRpm,
-                    nextProtection.status,
-                )
-            }
+            logger.warn(
+                "ERG recovery command rejected; resistance remains released: sessionId={} " +
+                    "targetPowerWatts={} cadenceRpm={} status={} error={}",
+                state.sessionId,
+                targetPowerWatts,
+                cadenceRpm,
+                nextProtection.status,
+                exception.message,
+                exception,
+            )
             return state.copy(
                 changedAt = now,
                 controlMode = TrainingControlMode.ERG,
-                ergTargetPowerWatts = if (workoutActive) 0 else null,
+                ergTargetPowerWatts = null,
                 ergProtection = nextProtection,
             )
         }
 
         logger.info(
-            "ERG protection recovered: sessionId={} attempt={} targetPowerWatts={} cadenceRpm={}",
+            "ERG protection recovered: sessionId={} targetPowerWatts={} cadenceRpm={}",
             state.sessionId,
-            attempt,
             targetPowerWatts,
             cadenceRpm,
         )
@@ -339,18 +238,15 @@ class ErgProtectionCoordinator(
         }
     }
 
-    private fun recoveryRetryDelay(attempt: Int): Duration {
-        var delay = properties.recoveryRetryInitialDelay
-        repeat((attempt - 1).coerceAtLeast(0)) {
-            val doubled = delay.multipliedBy(2)
-            delay =
-                if (doubled.compareTo(properties.recoveryRetryMaxDelay) > 0) {
-                    properties.recoveryRetryMaxDelay
-                } else {
-                    doubled
-                }
+    private fun releaseResistanceOrThrow(
+        description: String,
+        at: Instant,
+    ) {
+        if (!releaseResistance(description, at)) {
+            throw TrainingSessionUnavailableException(
+                "The active training session has no connected resistance-control device",
+            )
         }
-        return delay
     }
 
     private fun recordErgProtectionEvent(

@@ -50,6 +50,9 @@ class TrainingSessionCoordinator(
             setTarget = { powerWatts, description, at ->
                 trainerConnection.trySetTargetForExecution(powerWatts, description, at)
             },
+            releaseResistance = { description, at ->
+                trainerConnection.tryReleaseResistanceForExecution(description, at)
+            },
             recordActivityEvent = ::recordActivityEvent,
         )
 
@@ -63,7 +66,7 @@ class TrainingSessionCoordinator(
     @Synchronized
     fun preventsIdleShutdown(): Boolean =
         state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED) ||
-            trainerConnection.hasPendingZeroPowerCommand() ||
+            trainerConnection.hasPendingStopCommand() ||
             (
                 state.phase == TrainingSessionPhase.STOPPED &&
                     state.activityUpload.phase != TrainingActivityUploadPhase.UNAVAILABLE
@@ -96,9 +99,9 @@ class TrainingSessionCoordinator(
         if (state.phase in setOf(TrainingSessionPhase.ACTIVE, TrainingSessionPhase.PAUSED)) {
             throw TrainingSessionAlreadyActiveException()
         }
-        if (trainerConnection.hasPendingZeroPowerCommand()) {
+        if (trainerConnection.hasPendingStopCommand()) {
             throw TrainingSessionUnavailableException(
-                "The previous session is still waiting to confirm a 0 W trainer command",
+                "The previous session is still waiting to confirm a trainer Stop command",
             )
         }
 
@@ -112,6 +115,7 @@ class TrainingSessionCoordinator(
                 )
         val initialControlTelemetry = selectedEquipment.controlTelemetry?.current()
         trainerConnection.requestControl(trainerControl, reason = "")
+        trainerConnection.startOrResume(trainerControl, "session start")
 
         val now = clock.instant()
         lastCyclingReceivedAt = null
@@ -150,7 +154,7 @@ class TrainingSessionCoordinator(
                 ).copy(
                     controlMode = if (initialFreeRide) TrainingControlMode.FREE_RIDE else TrainingControlMode.ERG,
                     ergRequestedTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
-                    ergTargetPowerWatts = initialTarget.takeUnless { initialFreeRide },
+                    ergTargetPowerWatts = initialTarget.takeUnless { initialFreeRide }?.takeIf { it > 0 },
                     workoutPowerTargetPercent = workout?.let { DEFAULT_WORKOUT_POWER_TARGET_PERCENT },
                     equipment = resolvedEquipment,
                 )
@@ -230,7 +234,7 @@ class TrainingSessionCoordinator(
                     changedAt = changedAt,
                     ergRequestedTargetPowerWatts = nextTarget,
                     ergTargetPowerWatts =
-                        if (nextTarget <= 0) 0 else activeState.ergTargetPowerWatts,
+                        if (nextTarget <= 0) null else activeState.ergTargetPowerWatts,
                     workoutPowerTargetPercent = nextPercent,
                     ergProtection =
                         if (ergProtection.isActive(activeState) && nextTarget <= 0) {
@@ -254,7 +258,7 @@ class TrainingSessionCoordinator(
                 changedAt = changedAt,
                 controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = nextTarget,
-                ergTargetPowerWatts = nextTarget,
+                ergTargetPowerWatts = nextTarget.takeIf { it > 0 },
                 workoutPowerTargetPercent = nextPercent,
             )
         recordWorkoutTargetAdjustment(changedAt, nextPercent, nextTarget)
@@ -304,7 +308,7 @@ class TrainingSessionCoordinator(
                 changedAt = changedAt,
                 controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = powerWatts,
-                ergTargetPowerWatts = powerWatts,
+                ergTargetPowerWatts = powerWatts.takeIf { it > 0 },
                 ergProtection = ErgProtectionState.inactive(),
             )
         return state
@@ -326,13 +330,16 @@ class TrainingSessionCoordinator(
                     session.ergRequestedTargetPowerWatts
                         ?: session.ergTargetPowerWatts
                 }
-        val commandApplied =
-            if (trainerConnection.currentControl() != null) {
-                trainerConnection.trySetTargetForExecution(0, "0 W pause", pauseAt)
-            } else {
-                trainerConnection.markConnectionInterrupted(pauseAt)
-                false
+        if (trainerConnection.currentControl() != null) {
+            val zeroWattTargetApplied =
+                trainerConnection.trySetZeroWattTargetForExecution("session pause", pauseAt)
+            if (zeroWattTargetApplied) {
+                state = state.copy(changedAt = pauseAt, ergTargetPowerWatts = null)
             }
+            trainerConnection.tryPauseForExecution("session pause", pauseAt)
+        } else {
+            trainerConnection.markConnectionInterrupted(pauseAt)
+        }
         workoutExecution.captureDistanceProgressAtPause(activeState.workout, currentControlTelemetry())
 
         activitySession.pauseRecording()
@@ -351,7 +358,7 @@ class TrainingSessionCoordinator(
                 pauseStartedAt = pauseAt,
                 controlMode = activeState.controlMode,
                 ergRequestedTargetPowerWatts = targetPowerWatts,
-                ergTargetPowerWatts = if (commandApplied) 0 else null,
+                ergTargetPowerWatts = null,
                 ergProtection = ErgProtectionState.inactive(),
                 telemetry = interruptTelemetry(activeState.telemetry),
             )
@@ -404,6 +411,7 @@ class TrainingSessionCoordinator(
             }
 
         trainerConnection.requestControl(trainerControl, reason = " on resume")
+        trainerConnection.startOrResume(trainerControl, "session resume")
         if (freeRide) {
             trainerConnection.setFreeRide(trainerControl, "resume Free Ride")
         } else {
@@ -427,7 +435,7 @@ class TrainingSessionCoordinator(
                 pauseStartedAt = null,
                 controlMode = if (freeRide) TrainingControlMode.FREE_RIDE else TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = targetPowerWatts,
-                ergTargetPowerWatts = targetPowerWatts,
+                ergTargetPowerWatts = targetPowerWatts?.takeIf { it > 0 },
                 ergProtection = ErgProtectionState.inactive(),
                 workout = resumedWorkout ?: progress,
             )
@@ -479,7 +487,7 @@ class TrainingSessionCoordinator(
         if (
             state.phase != TrainingSessionPhase.ACTIVE &&
             state.phase != TrainingSessionPhase.PAUSED &&
-            !(state.phase == TrainingSessionPhase.STOPPED && trainerConnection.hasPendingZeroPowerCommand())
+            !(state.phase == TrainingSessionPhase.STOPPED && trainerConnection.hasPendingStopCommand())
         ) {
             return state
         }
@@ -534,7 +542,10 @@ class TrainingSessionCoordinator(
                     }
                 }
             }
-            if (connection.connected && trainerConnection.hasPendingTargetSynchronization()) {
+            if (
+                connection.connected &&
+                (trainerConnection.hasPendingTargetSynchronization() || trainerConnection.hasPendingStopCommand())
+            ) {
                 synchronizeCurrentControl(now)
             }
             if (state.phase == TrainingSessionPhase.ACTIVE && connection.connected) {
@@ -542,7 +553,7 @@ class TrainingSessionCoordinator(
             }
             state
         } catch (exception: TrainingSessionUnavailableException) {
-            if (trainerConnection.hasPendingTargetSynchronization()) {
+            if (trainerConnection.hasPendingTargetSynchronization() || trainerConnection.hasPendingStopCommand()) {
                 trainerConnection.markConnectionInterrupted(now, exception.message)
             }
             state
@@ -559,12 +570,17 @@ class TrainingSessionCoordinator(
         val stateAtStop = state
         val commandApplied =
             if (trainerConnection.currentControl() != null) {
-                trainerConnection.trySetTargetForExecution(0, "0 W stop", stoppedAt)
+                val zeroWattTargetApplied =
+                    trainerConnection.trySetZeroWattTargetForExecution("session stop", stoppedAt)
+                if (zeroWattTargetApplied) {
+                    state = state.copy(changedAt = stoppedAt, ergTargetPowerWatts = null)
+                }
+                trainerConnection.tryStopForExecution("session stop", stoppedAt)
             } else {
                 trainerConnection.markConnectionInterrupted(stoppedAt)
                 false
             }
-        trainerConnection.markZeroPowerCommandPending(!commandApplied)
+        trainerConnection.markStopCommandPending(!commandApplied)
 
         val completedActivity = activitySession.finish(sessionId, stoppedAt)
 
@@ -574,8 +590,8 @@ class TrainingSessionCoordinator(
                 changedAt = stoppedAt,
                 pauseStartedAt = null,
                 controlMode = TrainingControlMode.ERG,
-                ergRequestedTargetPowerWatts = 0,
-                ergTargetPowerWatts = if (commandApplied) 0 else null,
+                ergRequestedTargetPowerWatts = null,
+                ergTargetPowerWatts = null,
                 workoutPowerTargetPercent = null,
                 ergProtection = ErgProtectionState.inactive(),
                 workout = null,
@@ -588,7 +604,7 @@ class TrainingSessionCoordinator(
                 activitySummary = completedActivity.summary(),
             )
         workoutExecution.clear()
-        trainerConnection.clear(preserveRecovery = trainerConnection.hasPendingZeroPowerCommand())
+        trainerConnection.clear(preserveRecovery = trainerConnection.hasPendingStopCommand())
         return state
     }
 
@@ -738,7 +754,9 @@ class TrainingSessionCoordinator(
                     if (nextFreeRide && commandApplied) {
                         null
                     } else if (!nextFreeRide && state.ergProtection.status == ErgProtectionStatus.INACTIVE && commandApplied) {
-                        nextTarget
+                        nextTarget.takeIf { it > 0 }
+                    } else if (!nextFreeRide && nextTarget <= 0 && protectionActive) {
+                        null
                     } else {
                         state.ergTargetPowerWatts
                     },
@@ -791,28 +809,31 @@ class TrainingSessionCoordinator(
                 targetPercent = state.workoutPowerTargetPercent ?: DEFAULT_WORKOUT_POWER_TARGET_PERCENT,
             )
         val requestedTargetChanged = nextTarget != state.ergRequestedTargetPowerWatts
+        val targetAlreadyApplied =
+            if (nextTarget > 0) {
+                nextTarget == state.ergTargetPowerWatts
+            } else {
+                state.ergTargetPowerWatts == null
+            }
         if (
             state.controlMode == TrainingControlMode.ERG &&
             !requestedTargetChanged &&
-            nextTarget == state.ergTargetPowerWatts &&
+            targetAlreadyApplied &&
             !trainerConnection.hasPendingTargetSynchronization()
         ) {
             return
         }
 
         if (state.ergProtection.status != ErgProtectionStatus.INACTIVE) {
-            val commandApplied =
-                if (trainerConnection.hasPendingTargetSynchronization()) {
-                    trainerConnection.trySetTargetForExecution(0, "reconnected ERG protection", at)
-                } else {
-                    false
-                }
+            if (trainerConnection.hasPendingTargetSynchronization()) {
+                trainerConnection.tryReleaseResistanceForExecution("reconnected ERG protection", at)
+            }
             state =
                 state.copy(
                     changedAt = at,
                     controlMode = TrainingControlMode.ERG,
                     ergRequestedTargetPowerWatts = nextTarget,
-                    ergTargetPowerWatts = if (commandApplied) 0 else state.ergTargetPowerWatts,
+                    ergTargetPowerWatts = null,
                     ergProtection =
                         if (ergProtection.isActive(state) && nextTarget <= 0) {
                             ErgProtectionState.inactive()
@@ -830,7 +851,7 @@ class TrainingSessionCoordinator(
                 changedAt = at,
                 controlMode = TrainingControlMode.ERG,
                 ergRequestedTargetPowerWatts = nextTarget,
-                ergTargetPowerWatts = if (commandApplied) nextTarget else state.ergTargetPowerWatts,
+                ergTargetPowerWatts = if (commandApplied) nextTarget.takeIf { it > 0 } else state.ergTargetPowerWatts,
             )
     }
 
@@ -1129,19 +1150,34 @@ class TrainingSessionCoordinator(
     }
 
     private fun synchronizeCurrentControl(at: Instant) {
-        if (
-            trainerConnection.hasPendingZeroPowerCommand() ||
-            state.phase == TrainingSessionPhase.PAUSED ||
-            state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE
-        ) {
-            val commandApplied = trainerConnection.trySetTargetForExecution(0, "reconnected 0 W hold", at)
+        if (trainerConnection.hasPendingStopCommand()) {
+            trainerConnection.trySetZeroWattTargetForExecution("reconnected session stop", at)
+            val commandApplied = trainerConnection.tryStopForExecution("reconnected session stop", at)
             if (commandApplied) {
-                trainerConnection.markZeroPowerCommandPending(false)
+                trainerConnection.markStopCommandPending(false)
             }
             state =
                 state.copy(
                     changedAt = at,
-                    ergTargetPowerWatts = if (commandApplied) 0 else state.ergTargetPowerWatts,
+                    ergRequestedTargetPowerWatts = null,
+                    ergTargetPowerWatts = null,
+                )
+            return
+        }
+
+        if (state.phase == TrainingSessionPhase.PAUSED) {
+            trainerConnection.trySetZeroWattTargetForExecution("reconnected session pause", at)
+            trainerConnection.tryPauseForExecution("reconnected session pause", at)
+            state = state.copy(changedAt = at, ergTargetPowerWatts = null)
+            return
+        }
+
+        if (state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE || ergProtection.isActive(state)) {
+            val commandApplied = trainerConnection.tryReleaseResistanceForExecution("reconnected ERG protection", at)
+            state =
+                state.copy(
+                    changedAt = at,
+                    ergTargetPowerWatts = null,
                     ergProtection =
                         if (commandApplied && state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE) {
                             ErgProtectionState.bailedOut(at, state.ergProtection.cadenceRpm)
@@ -1151,6 +1187,7 @@ class TrainingSessionCoordinator(
                 )
             return
         }
+
         if (state.controlMode == TrainingControlMode.FREE_RIDE) {
             val commandApplied = trainerConnection.trySetFreeRideForExecution("reconnected Free Ride", at)
             state =
@@ -1162,18 +1199,20 @@ class TrainingSessionCoordinator(
             return
         }
 
-        val targetPowerWatts =
-            if (state.ergProtection.status == ErgProtectionStatus.UNAVAILABLE || ergProtection.isActive(state)) {
-                0
-            } else {
-                state.ergRequestedTargetPowerWatts ?: state.ergTargetPowerWatts ?: 0
-            }
+        val targetPowerWatts = state.ergRequestedTargetPowerWatts ?: state.ergTargetPowerWatts
+        if (targetPowerWatts == null) {
+            trainerConnection.tryReleaseResistanceForExecution("reconnected ERG resistance release", at)
+            state = state.copy(changedAt = at, ergTargetPowerWatts = null)
+            return
+        }
+
         val commandApplied =
             trainerConnection.trySetTargetForExecution(targetPowerWatts, "reconnected ERG target", at)
         state =
             state.copy(
                 changedAt = at,
-                ergTargetPowerWatts = if (commandApplied) targetPowerWatts else state.ergTargetPowerWatts,
+                ergTargetPowerWatts =
+                    if (commandApplied) targetPowerWatts.takeIf { it > 0 } else state.ergTargetPowerWatts,
             )
     }
 

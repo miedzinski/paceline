@@ -249,7 +249,7 @@ class GattDeviceConnectionTest {
     }
 
     @Test
-    fun `exposes optional ERG control and sends FTMS power and free ride procedures`() {
+    fun `exposes FTMS power resistance release stop pause and resume procedures`() {
         // given a GATT client exposing a writable and indicatable FTMS control point:
         val gattClient = fakeGattClient(withPowerControl = true)
         gattClient.onWrite = { characteristic, value ->
@@ -272,17 +272,23 @@ class GattDeviceConnectionTest {
             )
         val powerControl = assertNotNull(connection.capabilities().filterIsInstance<TrainerControl>().single())
 
-        // when the session acquires control, selects Free Ride, and sets a target power:
+        // when the session acquires control and submits its target and trainer commands:
         powerControl.requestControl()
         powerControl.setFreeRide()
         powerControl.setTargetPower(300)
+        powerControl.setTargetPower(0)
+        assertEquals(4, gattClient.writes.size)
+        powerControl.releaseResistance()
+        powerControl.stop()
+        powerControl.pause()
+        powerControl.startOrResume()
 
-        // then the control point is enabled and receives the expected little-endian commands:
+        // then the control point receives the explicit zero-watt ERG target and lifecycle commands:
         assertEquals(
             listOf(FtmsUuid.INDOOR_BIKE_DATA, FtmsUuid.FITNESS_MACHINE_CONTROL_POINT),
             gattClient.enabledNotifications,
         )
-        assertEquals(3, gattClient.writes.size)
+        assertEquals(8, gattClient.writes.size)
         assertEquals(FtmsUuid.FITNESS_MACHINE_CONTROL_POINT, gattClient.writes[0].first)
         assertContentEquals(byteArrayOf(FtmsErgControl.OPCODE_REQUEST_CONTROL.toByte()), gattClient.writes[0].second)
         assertContentEquals(
@@ -292,6 +298,26 @@ class GattDeviceConnectionTest {
         assertContentEquals(
             byteArrayOf(FtmsErgControl.OPCODE_SET_TARGET_POWER.toByte(), 0x2c, 0x01),
             gattClient.writes[2].second,
+        )
+        assertContentEquals(
+            byteArrayOf(FtmsErgControl.OPCODE_SET_TARGET_POWER.toByte(), 0x00, 0x00),
+            gattClient.writes[3].second,
+        )
+        assertContentEquals(
+            byteArrayOf(FtmsErgControl.OPCODE_SET_TARGET_RESISTANCE_LEVEL.toByte(), 0x00, 0x00),
+            gattClient.writes[4].second,
+        )
+        assertContentEquals(
+            byteArrayOf(FtmsErgControl.OPCODE_STOP_OR_PAUSE.toByte(), 0x01),
+            gattClient.writes[5].second,
+        )
+        assertContentEquals(
+            byteArrayOf(FtmsErgControl.OPCODE_STOP_OR_PAUSE.toByte(), 0x02),
+            gattClient.writes[6].second,
+        )
+        assertContentEquals(
+            byteArrayOf(FtmsErgControl.OPCODE_START_OR_RESUME.toByte()),
+            gattClient.writes[7].second,
         )
 
         connection.close()
@@ -370,6 +396,18 @@ class GattDeviceConnectionTest {
         }
         assertFailsWith<IllegalStateException> {
             powerControl.setFreeRide()
+        }
+        assertFailsWith<IllegalStateException> {
+            powerControl.releaseResistance()
+        }
+        assertFailsWith<IllegalStateException> {
+            powerControl.stop()
+        }
+        assertFailsWith<IllegalStateException> {
+            powerControl.pause()
+        }
+        assertFailsWith<IllegalStateException> {
+            powerControl.startOrResume()
         }
         assertEquals(emptyList(), gattClient.writes)
         connection.close()

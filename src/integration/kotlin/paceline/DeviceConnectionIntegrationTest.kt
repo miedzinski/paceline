@@ -250,18 +250,20 @@ class DeviceConnectionIntegrationTest {
                 .returnResult()
                 .responseBody!!
 
-        // then the FTMS control procedures, including neutral Free Ride and the zero-watt stop target, are sent through the WFTNP bridge:
+        // then FTMS control procedures, including neutral Free Ride and the zero-watt stop sequence, reach the WFTNP bridge:
         assertTrue(sessionResponse.contains("\"state\":\"ACTIVE\""))
         assertTrue(sessionResponse.contains("\"controlMode\":\"FREE_RIDE\""))
         assertTrue(targetResponse.contains("\"controlMode\":\"ERG\""))
         assertTrue(targetResponse.contains("\"ergTargetPowerWatts\":300"))
         assertTrue(stopResponse.contains("\"state\":\"STOPPED\""))
-        assertTrue(stopResponse.contains("\"ergTargetPowerWatts\":0"))
-        assertEquals(4, deviceServer.writes.size)
+        assertTrue(stopResponse.contains("\"ergTargetPowerWatts\":null"))
+        assertEquals(6, deviceServer.writes.size)
         assertContentEquals(byteArrayOf(0x00), deviceServer.writes[0].second)
-        assertContentEquals(byteArrayOf(0x04, 0x00, 0x00), deviceServer.writes[1].second)
-        assertContentEquals(byteArrayOf(0x05, 0x2c, 0x01), deviceServer.writes[2].second)
-        assertContentEquals(byteArrayOf(0x05, 0x00, 0x00), deviceServer.writes[3].second)
+        assertContentEquals(byteArrayOf(0x07), deviceServer.writes[1].second)
+        assertContentEquals(byteArrayOf(0x04, 0x00, 0x00), deviceServer.writes[2].second)
+        assertContentEquals(byteArrayOf(0x05, 0x2c, 0x01), deviceServer.writes[3].second)
+        assertContentEquals(byteArrayOf(0x05, 0x00, 0x00), deviceServer.writes[4].second)
+        assertContentEquals(byteArrayOf(0x08, 0x01), deviceServer.writes[5].second)
     }
 
     @Test

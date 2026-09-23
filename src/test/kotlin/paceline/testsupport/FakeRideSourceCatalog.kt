@@ -163,6 +163,14 @@ class FakeRideSourceCatalog(
                     override fun setTargetPower(powerWatts: Int) = raw.setTargetPower(powerWatts)
 
                     override fun setFreeRide() = raw.setFreeRide()
+
+                    override fun releaseResistance() = raw.releaseResistance()
+
+                    override fun stop() = raw.stop()
+
+                    override fun pause() = raw.pause()
+
+                    override fun startOrResume() = raw.startOrResume()
                 }
             rideControls[sourceId] = raw to wrapped
             return wrapped

@@ -57,14 +57,35 @@ class TrainingSessionCoordinatorTest {
         val started = session.start()
         val updated = session.setTargetPower(requireNotNull(started.sessionId), 300)
 
-        // then control is requested once, Free Ride is selected initially, and the target update switches to ERG:
+        // then control is requested, the trainer is started, Free Ride is selected, and the target update switches to ERG:
         assertEquals(TrainingSessionPhase.ACTIVE, started.phase)
         assertEquals(1, powerControl.requestControlCalls)
+        assertEquals(1, powerControl.startOrResumeCalls)
         assertEquals(1, powerControl.freeRideCalls)
         assertEquals(TrainingControlMode.FREE_RIDE, started.controlMode)
         assertEquals(listOf(300), powerControl.targetPowers)
         assertEquals(TrainingControlMode.ERG, updated.controlMode)
         assertEquals(300, updated.ergTargetPowerWatts)
+    }
+
+    @Test
+    fun trainerMustAcceptStartBeforeSessionBecomesActive() {
+        // given a connected trainer that rejects its initial Start/Resume command:
+        val control =
+            FakeTrainerControl().also {
+                it.startOrResumeFailure = IllegalStateException("trainer unavailable")
+            }
+        val session = coordinator(FakeRideSourceCatalog(control), clock)
+
+        // when the session is started:
+        assertFailsWith<TrainingSessionUnavailableException> { session.start() }
+
+        // then no active session or initial riding mode is created:
+        assertEquals(TrainingSessionPhase.NOT_STARTED, session.current().phase)
+        assertEquals(1, control.requestControlCalls)
+        assertEquals(1, control.startOrResumeCalls)
+        assertEquals(0, control.freeRideCalls)
+        assertEquals(emptyList(), control.targetPowers)
     }
 
     @Test
@@ -96,6 +117,7 @@ class TrainingSessionCoordinatorTest {
         assertEquals(RideRoleStatus.OPTIONAL, started.equipment?.power?.status)
         assertEquals(RideRoleStatus.OPTIONAL, started.equipment?.cadence?.status)
         assertEquals(1, control.requestControlCalls)
+        assertEquals(1, control.startOrResumeCalls)
         assertEquals(1, control.freeRideCalls)
     }
 
@@ -527,6 +549,7 @@ class TrainingSessionCoordinatorTest {
         assertEquals(1, beforeDistanceBoundary.workout?.currentStepNumber)
         assertEquals(2, afterDistanceBoundary.workout?.currentStepNumber)
         assertEquals(listOf(200, 150, 0), controlPowerControl.targetPowers)
+        assertEquals(1, controlPowerControl.stopCalls)
         val activity = uploader.uploads.single()
         val controlObservations = activity.cyclingObservations.filter { it.sourceId == "control" }
         val powerObservations = activity.cyclingObservations.filter { it.sourceId == "power" }
@@ -675,7 +698,25 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `stopping a session sends zero watts and marks it stopped`() {
+    fun `a zero ERG target releases resistance without sending zero watts`() {
+        // given an active manual session with a positive ERG target:
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
+        val sessionId = requireNotNull(session.start().sessionId)
+        session.setTargetPower(sessionId, 300)
+
+        // when a zero-watt ERG target is requested:
+        val released = session.setTargetPower(sessionId, 0)
+
+        // then resistance is released without a zero-watt target command:
+        assertEquals(listOf(300), powerControl.targetPowers)
+        assertEquals(listOf(300), powerControl.targetPowerAttempts)
+        assertEquals(1, powerControl.resistanceReleaseCalls)
+        assertEquals(null, released.ergTargetPowerWatts)
+    }
+
+    @Test
+    fun `stopping a session sends the trainer stop command and marks it stopped`() {
         // given an active session with a previously selected ERG target:
         val powerControl = FakeTrainerControl()
         val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
@@ -686,18 +727,21 @@ class TrainingSessionCoordinatorTest {
         // when the active session is stopped:
         val stopped = session.stop(sessionId)
 
-        // then zero watts is sent before the session becomes a terminal stopped state:
+        // then the trainer receives a stop command before the session becomes terminal:
         assertEquals(listOf(300, 0), powerControl.targetPowers)
+        assertEquals(listOf(300, 0), powerControl.targetPowerAttempts)
+        assertEquals(listOf("target:300", "target:0", "stop"), powerControl.powerAndLifecycleCommands)
+        assertEquals(1, powerControl.stopCalls)
         assertEquals(TrainingSessionPhase.STOPPED, stopped.phase)
         assertEquals(sessionId, stopped.sessionId)
         assertEquals(started.startedAt, stopped.startedAt)
-        assertEquals(0, stopped.ergTargetPowerWatts)
+        assertEquals(null, stopped.ergTargetPowerWatts)
         assertEquals(stopped, session.current())
     }
 
     @Test
     fun `stopped sessions reject further target changes`() {
-        // given a session that has sent its zero-watt stop target:
+        // given a session that has sent its trainer stop command:
         val powerControl = FakeTrainerControl()
         val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
@@ -709,6 +753,8 @@ class TrainingSessionCoordinatorTest {
             session.setTargetPower(sessionId, 300)
         }
         assertEquals(listOf(0), powerControl.targetPowers)
+        assertEquals(listOf("target:0", "stop"), powerControl.powerAndLifecycleCommands)
+        assertEquals(1, powerControl.stopCalls)
     }
 
     @Test
@@ -721,7 +767,7 @@ class TrainingSessionCoordinatorTest {
         rideSourceCatalog.powerControl = null
         val stopped = session.stop(sessionId)
 
-        // when the stopped session is discarded before zero watts can be confirmed:
+        // when the stopped session is discarded before the trainer reconnects:
         val discarded = session.discard(sessionId)
 
         // then the recording is cleared without waiting for trainer recovery:
@@ -742,7 +788,7 @@ class TrainingSessionCoordinatorTest {
         rideSourceCatalog.powerControl = null
         val stopped = session.stop(sessionId)
 
-        // when the stopped recording is uploaded before zero watts can be confirmed:
+        // when the stopped recording is uploaded before the trainer reconnects:
         val uploaded = session.upload(sessionId)
 
         // then upload succeeds and clears the stopped session without waiting for recovery:
@@ -753,11 +799,11 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `a failed zero-watt stop target leaves the session active`() {
-        // given an active session whose device rejects its stop target:
+    fun `a rejected trainer stop command leaves the session active`() {
+        // given an active session whose device rejects its stop command:
         val powerControl =
             FakeTrainerControl().also {
-                it.targetPowerFailure = IllegalStateException("trainer unavailable")
+                it.stopFailure = IllegalStateException("trainer unavailable")
             }
         val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
         val sessionId = requireNotNull(session.start().sessionId)
@@ -768,7 +814,9 @@ class TrainingSessionCoordinatorTest {
             session.stop(sessionId)
         }
         assertEquals(TrainingSessionPhase.ACTIVE, session.current().phase)
-        assertEquals(emptyList(), powerControl.targetPowers)
+        assertEquals(1, powerControl.stopCalls)
+        assertEquals(listOf(0), powerControl.targetPowers)
+        assertEquals(listOf("target:0", "stop"), powerControl.powerAndLifecycleCommands)
     }
 
     @Test
@@ -842,6 +890,7 @@ class TrainingSessionCoordinatorTest {
         assertEquals(300, second.ergRequestedTargetPowerWatts)
         assertEquals(300, second.ergTargetPowerWatts)
         assertEquals(listOf(200, 0, 300), powerControl.targetPowers)
+        assertEquals(1, powerControl.stopCalls)
     }
 
     @Test
@@ -901,13 +950,14 @@ class TrainingSessionCoordinatorTest {
         session.stop(sessionId)
         session.upload(sessionId)
 
-        // then the logical workout progressed without a zero-watt reset, and recovery applied the current step target:
+        // then the workout progressed while disconnected, and recovery applied the current step target:
         assertEquals(TrainingSessionPhase.ACTIVE, interrupted.phase)
         assertEquals(2, advancedWhileDisconnected.workout?.currentStepNumber)
         assertEquals(100, advancedWhileDisconnected.ergRequestedTargetPowerWatts)
         assertEquals(300, advancedWhileDisconnected.ergTargetPowerWatts)
         assertEquals(listOf(300), firstPowerControl.targetPowers)
         assertEquals(listOf(100, 0), recoveredPowerControl.targetPowers)
+        assertEquals(1, recoveredPowerControl.stopCalls)
         assertEquals(
             listOf(beforeLoss.receivedAt, afterRecovery.receivedAt),
             uploader
@@ -933,7 +983,7 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `manual pause remains available during loss and applies zero after recovery`() {
+    fun `manual pause remains available during loss and sends pause after recovery`() {
         // given an active workout whose trainer disappears while automatic recovery is pending:
         val firstPowerControl = FakeTrainerControl()
         val recoveredPowerControl = FakeTrainerControl()
@@ -950,17 +1000,19 @@ class TrainingSessionCoordinatorTest {
         Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
             recoveryTime = recoveryTime.plusSeconds(1)
             session.tick(recoveryTime, null)
-            assertEquals(listOf(0), recoveredPowerControl.targetPowers)
+            assertEquals(listOf(0), recoveredPowerControl.targetPowerAttempts)
+            assertEquals(listOf("target:0", "pause"), recoveredPowerControl.powerAndLifecycleCommands)
+            assertEquals(1, recoveredPowerControl.pauseCalls)
         }
 
-        // then the pause action was accepted immediately and the recovered trainer is held at 0 W:
+        // then the pause action was accepted immediately and recovery sends the explicit pause command:
         assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
         assertEquals(TrainingSessionPhase.PAUSED, session.current().phase)
         assertEquals(TrainerConnectionStatus.CONNECTED, session.current().trainerConnection)
     }
 
     @Test
-    fun `manual stop during loss remains terminal until zero is confirmed`() {
+    fun `manual stop during loss remains terminal until stop is confirmed`() {
         // given an active ride whose trainer is disconnected before the stop command can be sent:
         val firstPowerControl = FakeTrainerControl()
         val recoveredPowerControl = FakeTrainerControl()
@@ -977,13 +1029,15 @@ class TrainingSessionCoordinatorTest {
         Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
             recoveryTime = recoveryTime.plusSeconds(1)
             session.tick(recoveryTime, null)
-            assertEquals(listOf(0), recoveredPowerControl.targetPowers)
+            assertEquals(listOf(0), recoveredPowerControl.targetPowerAttempts)
+            assertEquals(listOf("target:0", "stop"), recoveredPowerControl.powerAndLifecycleCommands)
+            assertEquals(1, recoveredPowerControl.stopCalls)
         }
 
-        // then the ride stays stopped and the trainer receives the deferred safety command:
+        // then the ride stays stopped and recovery sends the deferred stop command:
         assertEquals(TrainingSessionPhase.STOPPED, stopped.phase)
         assertEquals(TrainingSessionPhase.STOPPED, session.current().phase)
-        assertEquals(0, session.current().ergTargetPowerWatts)
+        assertEquals(null, session.current().ergTargetPowerWatts)
     }
 
     @Test
@@ -1266,12 +1320,12 @@ class TrainingSessionCoordinatorTest {
         // then recovery reapplies the adjusted target instead of the original prescription:
         assertEquals(101L, adjusted.workoutPowerTargetPercent)
         assertEquals(303, adjusted.ergRequestedTargetPowerWatts)
-        assertEquals(0, adjusted.ergTargetPowerWatts)
+        assertEquals(null, adjusted.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.BAILED_OUT, adjusted.ergProtection.status)
         assertEquals(303, recovered.ergRequestedTargetPowerWatts)
         assertEquals(303, recovered.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
-        assertEquals(listOf(300, 0, 303), powerControl.targetPowers)
+        assertEquals(listOf(300, 303), powerControl.targetPowers)
     }
 
     @Test
@@ -1507,7 +1561,7 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `pausing a session sends zero watts and stops recording until resume`() {
+    fun `pausing a session sends pause and stops recording until resume`() {
         // given an active manual session with a selected ERG target and telemetry:
         val powerControl = FakeTrainerControl()
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
@@ -1532,12 +1586,19 @@ class TrainingSessionCoordinatorTest {
         session.stop(sessionId)
         session.upload(sessionId)
 
-        // then the session is paused at zero watts, resumes its prior target, and excludes paused samples:
+        // then the session pauses, resumes its prior target, and excludes paused samples:
         assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
-        assertEquals(0, paused.ergTargetPowerWatts)
+        assertEquals(null, paused.ergTargetPowerWatts)
         assertEquals(TrainingSessionPhase.ACTIVE, resumed.phase)
         assertEquals(300, resumed.ergTargetPowerWatts)
         assertEquals(listOf(300, 0, 300, 0), powerControl.targetPowers)
+        assertEquals(
+            listOf("target:300", "target:0", "pause", "target:300", "target:0", "stop"),
+            powerControl.powerAndLifecycleCommands,
+        )
+        assertEquals(1, powerControl.pauseCalls)
+        assertEquals(2, powerControl.startOrResumeCalls)
+        assertEquals(1, powerControl.stopCalls)
         assertEquals(
             listOf(beforePause.receivedAt, afterResume.receivedAt),
             uploader.uploads
@@ -1596,6 +1657,8 @@ class TrainingSessionCoordinatorTest {
         // then the workout completes only at the adjusted boundary:
         assertEquals(true, completed.workout?.completed)
         assertEquals(listOf(200, 0, 200), powerControl.targetPowers)
+        assertEquals(1, powerControl.pauseCalls)
+        assertEquals(2, powerControl.startOrResumeCalls)
         assertEquals(1, powerControl.freeRideCalls)
     }
 
@@ -1648,18 +1711,21 @@ class TrainingSessionCoordinatorTest {
         session.pause(sessionId)
         val stopped = session.stop(sessionId)
 
-        // then stopping sends the safe target again and makes the pre-pause recording available:
+        // then stopping sends a trainer stop command and makes the pre-pause recording available:
         assertEquals(TrainingSessionPhase.STOPPED, stopped.phase)
         assertEquals(listOf(0, 0), powerControl.targetPowers)
+        assertEquals(listOf("target:0", "pause", "target:0", "stop"), powerControl.powerAndLifecycleCommands)
+        assertEquals(1, powerControl.pauseCalls)
+        assertEquals(1, powerControl.stopCalls)
         assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
     }
 
     @Test
-    fun `a failed pause target leaves the session active and recording`() {
-        // given an active session whose trainer rejects the pause target:
+    fun `a failed pause command leaves the session active and recording`() {
+        // given an active session whose trainer rejects the pause command:
         val powerControl =
             FakeTrainerControl().also {
-                it.targetPowerFailure = IllegalStateException("trainer unavailable")
+                it.pauseFailure = IllegalStateException("trainer unavailable")
             }
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
@@ -1673,8 +1739,10 @@ class TrainingSessionCoordinatorTest {
 
         // then the state and recording subscription remain active for a retry:
         assertEquals(TrainingSessionPhase.ACTIVE, session.current().phase)
-        assertEquals(emptyList(), powerControl.targetPowers)
-        powerControl.targetPowerFailure = null
+        assertEquals(1, powerControl.pauseCalls)
+        assertEquals(listOf(0), powerControl.targetPowers)
+        assertEquals(listOf("target:0", "pause"), powerControl.powerAndLifecycleCommands)
+        powerControl.pauseFailure = null
         rideSourceCatalog.emitTelemetry(telemetry(distanceMeters = 1_000.0))
         session.stop(sessionId)
         session.upload(sessionId)
@@ -1703,9 +1771,31 @@ class TrainingSessionCoordinatorTest {
 
         // then the session remains paused and no recording subscription is reopened:
         assertEquals(TrainingSessionPhase.PAUSED, session.current().phase)
-        assertEquals(0, session.current().ergTargetPowerWatts)
+        assertEquals(null, session.current().ergTargetPowerWatts)
         assertEquals(listOf(0), powerControl.targetPowers)
+        assertEquals(2, powerControl.startOrResumeCalls)
         assertEquals(2, powerControl.freeRideCalls)
+    }
+
+    @Test
+    fun `a rejected resume command keeps a Free Ride session paused`() {
+        // given a paused Free Ride session whose trainer rejects resume:
+        val powerControl = FakeTrainerControl()
+        val session = coordinator(FakeRideSourceCatalog(powerControl), clock)
+        val sessionId = requireNotNull(session.start().sessionId)
+        session.pause(sessionId)
+        powerControl.startOrResumeFailure = IllegalStateException("trainer unavailable")
+
+        // when the paused session is resumed:
+        assertFailsWith<TrainingSessionUnavailableException> {
+            session.resume(sessionId)
+        }
+
+        // then no target mode is restored and the session remains paused:
+        assertEquals(TrainingSessionPhase.PAUSED, session.current().phase)
+        assertEquals(2, powerControl.startOrResumeCalls)
+        assertEquals(1, powerControl.freeRideCalls)
+        assertEquals(listOf(0), powerControl.targetPowers)
     }
 
     @Test
@@ -1746,11 +1836,12 @@ class TrainingSessionCoordinatorTest {
         val recovered = session.tick(now.plusSeconds(6), recoveredCadence)
 
         // then the applied target is released and restored while the requested target remains visible:
-        assertEquals(listOf(300, 0, 300), powerControl.targetPowers)
+        assertEquals(listOf(300, 300), powerControl.targetPowers)
+        assertEquals(1, powerControl.resistanceReleaseCalls)
         assertEquals(TrainingSessionPhase.ACTIVE, bailedOut.phase)
         assertEquals(TrainingControlMode.ERG, bailedOut.controlMode)
         assertEquals(300, bailedOut.ergRequestedTargetPowerWatts)
-        assertEquals(0, bailedOut.ergTargetPowerWatts)
+        assertEquals(null, bailedOut.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.BAILED_OUT, bailedOut.ergProtection.status)
         assertEquals(TrainingSessionPhase.ACTIVE, recovered.phase)
         assertEquals(TrainingControlMode.ERG, recovered.controlMode)
@@ -1841,13 +1932,14 @@ class TrainingSessionCoordinatorTest {
         session.tick(now.plusSeconds(1), lowCadence)
         val nextStep = session.tick(now.plusSeconds(3), lowCadence)
 
-        // then the workout advances even though the trainer remains at zero watts:
+        // then the workout advances while the trainer resistance remains released:
         assertEquals(TrainingSessionPhase.ACTIVE, nextStep.phase)
         assertEquals(2, nextStep.workout?.currentStepNumber)
         assertEquals(100, nextStep.ergRequestedTargetPowerWatts)
-        assertEquals(0, nextStep.ergTargetPowerWatts)
+        assertEquals(null, nextStep.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.BAILED_OUT, nextStep.ergProtection.status)
-        assertEquals(listOf(300, 0), powerControl.targetPowers)
+        assertEquals(listOf(300), powerControl.targetPowers)
+        assertEquals(1, powerControl.resistanceReleaseCalls)
 
         // when the incomplete ride is stopped:
         mutableClock.currentTime = now.plusSeconds(3)
@@ -1858,8 +1950,8 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `retries a rejected structured workout recovery with the latest step target`() {
-        // given a structured workout that has entered confirmed zero-watt protection:
+    fun `does not retry a rejected workout recovery while the workout keeps progressing`() {
+        // given a structured workout that has confirmed resistance-release protection:
         val powerControl = FakeTrainerControl()
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
@@ -1878,7 +1970,7 @@ class TrainingSessionCoordinatorTest {
         val workout =
             workout(
                 timedStep("Hard", seconds = 3, lowWatts = 300, highWatts = 300),
-                timedStep("Next", seconds = 3, lowWatts = 100, highWatts = 100),
+                timedStep("Next", seconds = 10, lowWatts = 100, highWatts = 100),
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
@@ -1890,37 +1982,30 @@ class TrainingSessionCoordinatorTest {
         session.tick(now.plusSeconds(1), highCadence)
         powerControl.targetPowerFailure = IllegalStateException("temporary trainer rejection")
 
-        // when the first recovery command is rejected, then the retry becomes due after the workout changes step:
-        val retrying = session.tick(now.plusSeconds(2), highCadence)
-        val beforeRetry = session.tick(now.plusMillis(2_500), highCadence)
-        val attemptsBeforeRetry = powerControl.targetPowerAttempts.toList()
+        // when the one recovery command is rejected and the trainer would accept later commands:
+        val failed = session.tick(now.plusSeconds(2), highCadence)
         powerControl.targetPowerFailure = null
-        val recovered = session.tick(now.plusSeconds(3), highCadence)
+        val progressed = session.tick(now.plusSeconds(3), highCadence)
+        val later = session.tick(now.plusSeconds(5), highCadence)
 
-        // then the workout clock continues, and the retry applies the current step's target:
-        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, retrying.ergProtection.status)
-        assertEquals(1, retrying.ergProtection.retryAttempt)
-        assertEquals(now.plusSeconds(3), retrying.ergProtection.nextRetryAt)
-        assertEquals(1, beforeRetry.workout?.currentStepNumber)
-        assertEquals(listOf(300, 0, 300), attemptsBeforeRetry)
-        assertEquals(2, recovered.workout?.currentStepNumber)
-        assertEquals(100, recovered.ergRequestedTargetPowerWatts)
-        assertEquals(100, recovered.ergTargetPowerWatts)
-        assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
-        assertEquals(listOf(300, 0, 300, 100), powerControl.targetPowerAttempts)
-        assertEquals(listOf(300, 0, 100), powerControl.targetPowers)
+        // then the workout progresses, resistance stays released, and no second recovery command is sent:
+        assertEquals(ErgProtectionStatus.RECOVERY_FAILED, failed.ergProtection.status)
+        assertEquals(2, progressed.workout?.currentStepNumber)
+        assertEquals(100, progressed.ergRequestedTargetPowerWatts)
+        assertEquals(null, progressed.ergTargetPowerWatts)
+        assertEquals(ErgProtectionStatus.RECOVERY_FAILED, later.ergProtection.status)
+        assertEquals(listOf(300, 300), powerControl.targetPowerAttempts)
 
-        // when the incomplete workout is stopped:
-        mutableClock.currentTime = now.plusSeconds(3)
+        // when the incomplete workout is stopped and uploaded:
+        mutableClock.currentTime = now.plusSeconds(5)
         session.stop(sessionId)
         session.upload(sessionId)
 
-        // then each failed recovery attempt and the eventual recovery remain in the activity:
+        // then the recording contains one failed recovery event and no recovery completion:
         assertEquals(
             listOf(
                 TrainingActivityEventType.ERG_PROTECTION_STARTED,
                 TrainingActivityEventType.ERG_PROTECTION_FAILED,
-                TrainingActivityEventType.ERG_PROTECTION_ENDED,
             ),
             uploader
                 .uploads
@@ -1931,130 +2016,8 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `requires a new recovery cadence dwell after cadence drops during a retry`() {
-        // given a structured workout whose first recovery attempt is rejected:
-        val powerControl = FakeTrainerControl()
-        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
-        val session =
-            coordinator(
-                rideSourceCatalog = rideSourceCatalog,
-                clock = clock,
-                ergProtectionProperties =
-                    ergProtectionProperties(
-                        lowCadenceDuration = Duration.ofSeconds(1),
-                        recoveryDuration = Duration.ofSeconds(1),
-                    ),
-            )
-        val workout = workout(timedStep("Hard", seconds = 10, lowWatts = 300, highWatts = 300))
-        val sessionId = requireNotNull(session.start(workout).sessionId)
-        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        rideSourceCatalog.emitTelemetry(lowCadence)
-        session.tick(now, lowCadence)
-        session.tick(now.plusSeconds(1), lowCadence)
-        val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
-        rideSourceCatalog.emitTelemetry(highCadence)
-        session.tick(now.plusSeconds(1), highCadence)
-        powerControl.targetPowerFailure = IllegalStateException("temporary trainer rejection")
-        val retrying = session.tick(now.plusSeconds(2), highCadence)
-
-        // when cadence drops before the retry deadline and then rises again:
-        val lowAgain = telemetry(receivedAt = now.plusMillis(2_500), cadenceRpm = 40.0, distanceMeters = 1_002.0)
-        rideSourceCatalog.emitTelemetry(lowAgain)
-        val bailedOut = session.tick(now.plusMillis(2_500), lowAgain)
-        powerControl.targetPowerFailure = null
-        val highAgain = telemetry(receivedAt = now.plusMillis(2_500), cadenceRpm = 70.0, distanceMeters = 1_003.0)
-        rideSourceCatalog.emitTelemetry(highAgain)
-        val rearmed = session.tick(now.plusMillis(2_500), highAgain)
-        val beforeDwell = session.tick(now.plusMillis(3_400), highAgain)
-        val attemptsBeforeRecovery = powerControl.targetPowerAttempts.toList()
-        val recovered = session.tick(now.plusMillis(3_500), highAgain)
-
-        // then the retry is paused, and recovery needs a fresh sustained high-cadence period:
-        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, retrying.ergProtection.status)
-        assertEquals(ErgProtectionStatus.BAILED_OUT, bailedOut.ergProtection.status)
-        assertEquals(ErgProtectionStatus.BAILED_OUT, rearmed.ergProtection.status)
-        assertEquals(listOf(300, 0, 300), attemptsBeforeRecovery)
-        assertEquals(ErgProtectionStatus.BAILED_OUT, beforeDwell.ergProtection.status)
-        assertEquals(attemptsBeforeRecovery, powerControl.targetPowerAttempts.dropLast(1))
-        assertEquals(ErgProtectionStatus.INACTIVE, recovered.ergProtection.status)
-        assertEquals(300, recovered.ergTargetPowerWatts)
-        assertEquals(listOf(300, 0, 300, 300), powerControl.targetPowerAttempts)
-
-        // when the workout is stopped:
-        session.stop(sessionId)
-    }
-
-    @Test
-    fun `backs off and stops structured workout recovery retries without freezing the workout`() {
-        // given a structured workout with a bounded recovery retry policy:
-        val powerControl = FakeTrainerControl()
-        val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
-        val mutableClock = MutableTestClock(now)
-        val session =
-            coordinator(
-                rideSourceCatalog = rideSourceCatalog,
-                clock = mutableClock,
-                ergProtectionProperties =
-                    ergProtectionProperties(
-                        lowCadenceDuration = Duration.ofSeconds(1),
-                        recoveryDuration = Duration.ofSeconds(1),
-                        recoveryRetryInitialDelay = Duration.ofSeconds(1),
-                        recoveryRetryMaxDelay = Duration.ofSeconds(2),
-                        recoveryRetryMaxAttempts = 3,
-                    ),
-            )
-        val workout =
-            workout(
-                timedStep("Hard", seconds = 4, lowWatts = 300, highWatts = 300),
-                timedStep("Next", seconds = 4, lowWatts = 100, highWatts = 100),
-            )
-        val sessionId = requireNotNull(session.start(workout).sessionId)
-        val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
-        rideSourceCatalog.emitTelemetry(lowCadence)
-        session.tick(now, lowCadence)
-        session.tick(now.plusSeconds(1), lowCadence)
-        val highCadence = telemetry(receivedAt = now.plusSeconds(1), cadenceRpm = 70.0, distanceMeters = 1_001.0)
-        rideSourceCatalog.emitTelemetry(highCadence)
-        session.tick(now.plusSeconds(1), highCadence)
-        powerControl.targetPowerFailure = IllegalStateException("persistent trainer rejection")
-
-        // when recovery attempts fail at the first deadline, the exponential deadline, and the final attempt:
-        val firstFailure = session.tick(now.plusSeconds(2), highCadence)
-        val secondFailure = session.tick(now.plusSeconds(3), highCadence)
-        val beforeThirdFailure = session.tick(now.plusSeconds(4), highCadence)
-        val thirdFailure = session.tick(now.plusSeconds(5), highCadence)
-        val attemptsAfterExhaustion = powerControl.targetPowerAttempts.toList()
-        val afterExhaustion = session.tick(now.plusSeconds(6), highCadence)
-
-        // then retries are bounded, and the workout keeps recording while zero watts remain applied:
-        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, firstFailure.ergProtection.status)
-        assertEquals(now.plusSeconds(3), firstFailure.ergProtection.nextRetryAt)
-        assertEquals(ErgProtectionStatus.RECOVERY_RETRYING, secondFailure.ergProtection.status)
-        assertEquals(2, secondFailure.ergProtection.retryAttempt)
-        assertEquals(now.plusSeconds(5), secondFailure.ergProtection.nextRetryAt)
-        assertEquals(2, beforeThirdFailure.workout?.currentStepNumber)
-        assertEquals(2, beforeThirdFailure.ergProtection.retryAttempt)
-        assertEquals(ErgProtectionStatus.RECOVERY_FAILED, thirdFailure.ergProtection.status)
-        assertEquals(3, thirdFailure.ergProtection.retryAttempt)
-        assertEquals(2, afterExhaustion.workout?.currentStepNumber)
-        assertEquals(100, afterExhaustion.ergRequestedTargetPowerWatts)
-        assertEquals(0, afterExhaustion.ergTargetPowerWatts)
-        assertEquals(ErgProtectionStatus.RECOVERY_FAILED, afterExhaustion.ergProtection.status)
-        assertEquals(listOf(300, 0, 300, 300, 100), attemptsAfterExhaustion)
-        assertEquals(attemptsAfterExhaustion, powerControl.targetPowerAttempts)
-
-        // when the active workout is stopped after retries are exhausted:
-        powerControl.targetPowerFailure = null
-        mutableClock.currentTime = now.plusSeconds(6)
-        val stopped = session.stop(sessionId)
-
-        // then the incomplete workout remains exportable:
-        assertEquals(TrainingActivityUploadPhase.AVAILABLE, stopped.activityUpload.phase)
-    }
-
-    @Test
     fun `holds workout progression after a failed protective release`() {
-        // given a timed workout whose trainer rejects the protective zero-watt command:
+        // given a timed workout whose trainer rejects the protective resistance release:
         val powerControl = FakeTrainerControl()
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val mutableClock = MutableTestClock(now)
@@ -2074,7 +2037,7 @@ class TrainingSessionCoordinatorTest {
                 timedStep("Next", seconds = 3, lowWatts = 100, highWatts = 100),
             )
         val sessionId = requireNotNull(session.start(workout).sessionId)
-        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+        powerControl.resistanceReleaseFailure = IllegalStateException("trainer unavailable")
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
         rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
@@ -2092,7 +2055,7 @@ class TrainingSessionCoordinatorTest {
         assertEquals(listOf(300), powerControl.targetPowers)
 
         // when the trainer accepts a stop command:
-        powerControl.targetPowerFailure = null
+        powerControl.resistanceReleaseFailure = null
         mutableClock.currentTime = now.plusSeconds(3)
         val stopped = session.stop(sessionId)
 
@@ -2101,8 +2064,8 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `reconnection resolves unavailable ERG protection with a confirmed zero target`() {
-        // given a session whose protective zero command failed and left the trainer state unknown:
+    fun `reconnection resolves unavailable ERG protection after confirming resistance release`() {
+        // given a session whose resistance release failed and left the trainer state unknown:
         val powerControl = FakeTrainerControl()
         val recoveredPowerControl = FakeTrainerControl()
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
@@ -2123,13 +2086,13 @@ class TrainingSessionCoordinatorTest {
                     .start(workout(timedStep("Hard", 10, 300, 300)))
                     .sessionId,
             )
-        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+        powerControl.resistanceReleaseFailure = IllegalStateException("trainer unavailable")
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
         rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
         session.tick(now.plusSeconds(1), lowCadence)
         rideSourceCatalog.powerControl = null
-        powerControl.targetPowerFailure = null
+        powerControl.resistanceReleaseFailure = null
         rideSourceCatalog.reconnectPowerControlResult = recoveredPowerControl
 
         // when the connection is recovered while ERG protection is still unavailable:
@@ -2138,13 +2101,13 @@ class TrainingSessionCoordinatorTest {
         Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted {
             recoveryTime = recoveryTime.plusSeconds(1)
             session.tick(recoveryTime, null)
-            assertEquals(listOf(0), recoveredPowerControl.targetPowers)
+            assertEquals(1, recoveredPowerControl.resistanceReleaseCalls)
         }
 
-        // then the trainer has confirmed the safe target and protection is no longer unknown:
+        // then the trainer has confirmed released resistance and protection is no longer unknown:
         assertEquals(TrainingSessionPhase.ACTIVE, session.current().phase)
         assertEquals(ErgProtectionStatus.BAILED_OUT, session.current().ergProtection.status)
-        assertEquals(0, session.current().ergTargetPowerWatts)
+        assertEquals(null, session.current().ergTargetPowerWatts)
         assertEquals(sessionId, session.current().sessionId)
     }
 
@@ -2182,13 +2145,14 @@ class TrainingSessionCoordinatorTest {
         // when the protected workout advances into the open step:
         val openStep = session.tick(now.plusSeconds(3), lowCadence)
 
-        // then no stale protection overlay remains after resistance is no longer requested:
+        // then no stale protection overlay remains after resistance is released for the open step:
         assertEquals(2, openStep.workout?.currentStepNumber)
         assertEquals(TrainingControlMode.FREE_RIDE, openStep.controlMode)
         assertEquals(null, openStep.ergRequestedTargetPowerWatts)
         assertEquals(null, openStep.ergTargetPowerWatts)
         assertEquals(ErgProtectionStatus.INACTIVE, openStep.ergProtection.status)
-        assertEquals(listOf(300, 0), powerControl.targetPowers)
+        assertEquals(listOf(300), powerControl.targetPowers)
+        assertEquals(1, powerControl.resistanceReleaseCalls)
         assertEquals(1, powerControl.freeRideCalls)
 
         mutableClock.currentTime = now.plusSeconds(3)
@@ -2196,8 +2160,8 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `records a failed protective target without claiming the target was applied`() {
-        // given a manual session whose trainer starts rejecting target writes after a target is active:
+    fun `records a failed resistance release without claiming it was applied`() {
+        // given a manual session whose trainer rejects resistance release after a target is active:
         val powerControl = FakeTrainerControl()
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
         val uploader = FakeActivityUploader()
@@ -2210,12 +2174,12 @@ class TrainingSessionCoordinatorTest {
             )
         val sessionId = requireNotNull(session.start().sessionId)
         session.setTargetPower(sessionId, 300)
-        powerControl.targetPowerFailure = IllegalStateException("trainer unavailable")
+        powerControl.resistanceReleaseFailure = IllegalStateException("trainer unavailable")
         val lowCadence = telemetry(receivedAt = now, cadenceRpm = 40.0, distanceMeters = 1_000.0)
         rideSourceCatalog.emitTelemetry(lowCadence)
         session.tick(now, lowCadence)
 
-        // when the low cadence dwell completes and the protective zero-watt command fails:
+        // when the low cadence dwell completes and the protective resistance release fails:
         val unavailable = session.tick(now.plusSeconds(3), lowCadence)
 
         // then the session exposes the protection failure and does not retain a stale applied target:
@@ -2224,8 +2188,7 @@ class TrainingSessionCoordinatorTest {
         assertEquals(null, unavailable.ergTargetPowerWatts)
         assertEquals(listOf(300), powerControl.targetPowers)
 
-        // when the target write is restored, the incomplete recording can still be stopped and uploaded:
-        powerControl.targetPowerFailure = null
+        // when the incomplete recording is stopped while the release command remains unavailable:
         val stopped = session.stop(sessionId)
         session.upload(sessionId)
 
@@ -2341,16 +2304,10 @@ class TrainingSessionCoordinatorTest {
     private fun ergProtectionProperties(
         lowCadenceDuration: Duration = Duration.ofSeconds(2),
         recoveryDuration: Duration = Duration.ofSeconds(2),
-        recoveryRetryInitialDelay: Duration = Duration.ofSeconds(1),
-        recoveryRetryMaxDelay: Duration = Duration.ofSeconds(8),
-        recoveryRetryMaxAttempts: Int = 5,
     ): ErgProtectionProperties =
         ErgProtectionProperties(
             lowCadenceDuration = lowCadenceDuration,
             recoveryDuration = recoveryDuration,
             targetChangeGracePeriod = Duration.ZERO,
-            recoveryRetryInitialDelay = recoveryRetryInitialDelay,
-            recoveryRetryMaxDelay = recoveryRetryMaxDelay,
-            recoveryRetryMaxAttempts = recoveryRetryMaxAttempts,
         )
 }

@@ -43,8 +43,6 @@ function createNotStartedSession(): TrainingSessionResponse {
             changedAt: null,
             cadenceRpm: null,
             error: null,
-            retryAttempt: null,
-            nextRetryAt: null,
         },
         trainerConnection: "NOT_ACTIVE",
         trainerConnectionRetryAttempt: null,

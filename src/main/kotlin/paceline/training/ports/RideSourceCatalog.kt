@@ -28,6 +28,14 @@ interface TrainerControl {
     fun setTargetPower(powerWatts: Int)
 
     fun setFreeRide()
+
+    fun releaseResistance()
+
+    fun stop()
+
+    fun pause()
+
+    fun startOrResume()
 }
 
 interface TrainerControlConnection {

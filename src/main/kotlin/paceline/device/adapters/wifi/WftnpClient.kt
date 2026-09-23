@@ -12,6 +12,10 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -52,12 +56,19 @@ class WftnpClient(
         val sequence: Int,
     )
 
+    private data class NotificationListenerRegistration(
+        val id: Int,
+        val listener: (WftnpNotification) -> Unit,
+        val executor: ExecutorService,
+    )
+
     private val started = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
     private val sequence = AtomicInteger(0)
     private val requestLock = Any()
     private val pending = ConcurrentHashMap<RequestKey, CompletableFuture<WftnpFrame>>()
-    private val notificationListeners = CopyOnWriteArrayList<(WftnpNotification) -> Unit>()
+    private val notificationListenerSequence = AtomicInteger(0)
+    private val notificationListeners = CopyOnWriteArrayList<NotificationListenerRegistration>()
 
     @Volatile
     private var readerThread: Thread? = null
@@ -82,8 +93,21 @@ class WftnpClient(
 
     fun addNotificationListener(listener: (WftnpNotification) -> Unit): AutoCloseable {
         check(!closed.get()) { "WFTNP client is closed" }
-        notificationListeners += listener
-        return AutoCloseable { notificationListeners -= listener }
+        val listenerId = notificationListenerSequence.incrementAndGet()
+        val registration =
+            NotificationListenerRegistration(
+                id = listenerId,
+                listener = listener,
+                executor =
+                    Executors.newSingleThreadExecutor { task ->
+                        Thread(task, "wftnp-notification-$listenerId").apply { isDaemon = true }
+                    },
+            )
+        notificationListeners += registration
+        return AutoCloseable {
+            notificationListeners -= registration
+            registration.executor.shutdownNow()
+        }
     }
 
     fun discoverServices(): List<UUID> {
@@ -151,6 +175,8 @@ class WftnpClient(
         }
 
         started.set(false)
+        notificationListeners.forEach { registration -> registration.executor.shutdownNow() }
+        notificationListeners.clear()
         closeQuietly(input)
         closeQuietly(output)
         failPending(WftnpProtocolException("WFTNP client closed"))
@@ -175,7 +201,7 @@ class WftnpClient(
                 output.write(
                     WftnpFrameCodec.encode(
                         WftnpFrame(
-                            version = WftnpFrameCodec.VERSION,
+                            version = 1,
                             messageType = messageType,
                             sequence = requestKey.sequence,
                             responseCode = 0,
@@ -196,9 +222,9 @@ class WftnpClient(
                     } catch (exception: InterruptedException) {
                         Thread.currentThread().interrupt()
                         throw WftnpProtocolException("Interrupted waiting for WFTNP response", exception)
-                    } catch (exception: java.util.concurrent.ExecutionException) {
-                        val cause = exception.cause
-                        if (cause is RuntimeException) {
+                    } catch (exception: ExecutionException) {
+                        val cause = exception.cause ?: exception
+                        if (cause is WftnpProtocolException) {
                             throw cause
                         }
                         throw WftnpProtocolException("WFTNP request failed", cause)
@@ -236,11 +262,17 @@ class WftnpClient(
                             characteristic = uuidFromWftnpBytes(frame.data),
                             value = frame.data.copyOfRange(16, frame.data.size),
                         )
-                    notificationListeners.forEach { listener ->
+                    notificationListeners.forEach { registration ->
                         try {
-                            listener(notification)
-                        } catch (_: Exception) {
-                            // A consumer must not stop the protocol reader for every other listener.
+                            registration.executor.execute {
+                                try {
+                                    registration.listener(notification)
+                                } catch (_: Exception) {
+                                    // A consumer must not stop the protocol reader for every other listener.
+                                }
+                            }
+                        } catch (_: RejectedExecutionException) {
+                            // The listener was closed before this notification could be submitted.
                         }
                     }
                 } else {

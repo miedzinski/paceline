@@ -9,7 +9,6 @@ import java.time.Instant
 enum class ErgProtectionStatus {
     INACTIVE,
     BAILED_OUT,
-    RECOVERY_RETRYING,
     RECOVERY_FAILED,
     UNAVAILABLE,
 }
@@ -19,8 +18,6 @@ data class ErgProtectionState(
     val changedAt: Instant? = null,
     val cadenceRpm: Double? = null,
     val error: String? = null,
-    val retryAttempt: Int? = null,
-    val nextRetryAt: Instant? = null,
 ) {
     companion object {
         fun inactive(): ErgProtectionState = ErgProtectionState(status = ErgProtectionStatus.INACTIVE)
@@ -35,26 +32,9 @@ data class ErgProtectionState(
                 cadenceRpm = cadenceRpm,
             )
 
-        fun recoveryRetrying(
-            changedAt: Instant,
-            cadenceRpm: Double,
-            retryAttempt: Int,
-            nextRetryAt: Instant,
-            error: String?,
-        ): ErgProtectionState =
-            ErgProtectionState(
-                status = ErgProtectionStatus.RECOVERY_RETRYING,
-                changedAt = changedAt,
-                cadenceRpm = cadenceRpm,
-                error = error,
-                retryAttempt = retryAttempt,
-                nextRetryAt = nextRetryAt,
-            )
-
         fun recoveryFailed(
             changedAt: Instant,
             cadenceRpm: Double,
-            retryAttempt: Int,
             error: String?,
         ): ErgProtectionState =
             ErgProtectionState(
@@ -62,7 +42,6 @@ data class ErgProtectionState(
                 changedAt = changedAt,
                 cadenceRpm = cadenceRpm,
                 error = error,
-                retryAttempt = retryAttempt,
             )
 
         fun unavailable(

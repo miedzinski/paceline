@@ -38,7 +38,7 @@ class TrainerControlCoordinator(
     private var connectionRecovery: CompletionStage<TrainerControlConnection?>? = null
     private var targetSynchronizationPending = false
     private var targetSynchronizationAt: Instant? = null
-    private var pendingZeroPowerCommand = false
+    private var pendingStopCommand = false
     private var lastTelemetryReceivedAt: Instant? = null
     private var telemetryObserved = false
     private var connectionError: String? = null
@@ -82,7 +82,7 @@ class TrainerControlCoordinator(
         connectionRecovery = null
         targetSynchronizationPending = false
         targetSynchronizationAt = null
-        pendingZeroPowerCommand = false
+        pendingStopCommand = false
         lastTelemetryReceivedAt = null
         telemetryObserved = false
         connectionError = null
@@ -102,11 +102,11 @@ class TrainerControlCoordinator(
     }
 
     @Synchronized
-    fun hasPendingZeroPowerCommand(): Boolean = pendingZeroPowerCommand
+    fun hasPendingStopCommand(): Boolean = pendingStopCommand
 
     @Synchronized
-    fun markZeroPowerCommandPending(pending: Boolean) {
-        pendingZeroPowerCommand = pending
+    fun markStopCommandPending(pending: Boolean) {
+        pendingStopCommand = pending
     }
 
     @Synchronized
@@ -241,35 +241,15 @@ class TrainerControlCoordinator(
         powerWatts: Int,
         description: String,
     ) {
-        logger.debug(
-            "ERG target command: sessionId={} targetPowerWatts={} reason={}",
-            sessionId,
-            powerWatts,
-            description,
-        )
-        try {
-            trainerControl.setTargetPower(powerWatts)
-            logger.debug(
-                "ERG target command accepted: sessionId={} targetPowerWatts={} reason={}",
-                sessionId,
-                powerWatts,
-                description,
-            )
-            recordTargetSynchronizationIfPending(powerWatts)
-        } catch (exception: Exception) {
-            logger.warn(
-                "ERG target command rejected: sessionId={} targetPowerWatts={} reason={} error={}",
-                sessionId,
-                powerWatts,
-                description,
-                exception.message,
-                exception,
-            )
-            throw TrainingSessionUnavailableException(
-                "The connected device rejected the $description target",
-                exception,
-            )
+        if (powerWatts == 0) {
+            releaseResistance(trainerControl, "$description resistance release")
+            return
         }
+        executeTrainerCommand(
+            action = "ERG target",
+            description = description,
+            synchronizedTargetPowerWatts = powerWatts,
+        ) { trainerControl.setTargetPower(powerWatts) }
     }
 
     @Synchronized
@@ -277,24 +257,154 @@ class TrainerControlCoordinator(
         trainerControl: TrainerControl,
         description: String,
     ) {
+        executeTrainerCommand(
+            action = "Free Ride",
+            description = description,
+            synchronizedTargetPowerWatts = null,
+        ) { trainerControl.setFreeRide() }
+    }
+
+    @Synchronized
+    fun releaseResistance(
+        trainerControl: TrainerControl,
+        description: String,
+    ) {
+        executeTrainerCommand(
+            action = "Resistance release",
+            description = description,
+            synchronizedTargetPowerWatts = null,
+        ) { trainerControl.releaseResistance() }
+    }
+
+    @Synchronized
+    fun stop(
+        trainerControl: TrainerControl,
+        description: String,
+    ) {
+        executeTrainerCommand(
+            action = "Trainer stop",
+            description = description,
+            synchronizedTargetPowerWatts = null,
+        ) { trainerControl.stop() }
+    }
+
+    @Synchronized
+    fun pause(
+        trainerControl: TrainerControl,
+        description: String,
+    ) {
+        executeTrainerCommand(
+            action = "Trainer pause",
+            description = description,
+            synchronizedTargetPowerWatts = null,
+        ) { trainerControl.pause() }
+    }
+
+    @Synchronized
+    fun startOrResume(
+        trainerControl: TrainerControl,
+        description: String,
+    ) {
+        executeTrainerCommand(
+            action = "Trainer start or resume",
+            description = description,
+            synchronizedTargetPowerWatts = null,
+            recordSynchronization = false,
+        ) { trainerControl.startOrResume() }
+    }
+
+    @Synchronized
+    fun trySetTargetForExecution(
+        powerWatts: Int,
+        description: String,
+        at: Instant,
+    ): Boolean =
+        tryCommandForExecution(at) { trainerControl ->
+            setTarget(trainerControl, powerWatts, description)
+        }
+
+    @Synchronized
+    fun trySetZeroWattTargetForExecution(
+        description: String,
+        at: Instant,
+    ): Boolean =
+        tryCommandForExecution(at) { trainerControl ->
+            executeTrainerCommand(
+                action = "ERG target",
+                description = "$description zero-watt target",
+                synchronizedTargetPowerWatts = 0,
+            ) { trainerControl.setTargetPower(0) }
+        }
+
+    @Synchronized
+    fun trySetFreeRideForExecution(
+        description: String,
+        at: Instant,
+    ): Boolean =
+        tryCommandForExecution(at) { trainerControl ->
+            setFreeRide(trainerControl, description)
+        }
+
+    @Synchronized
+    fun tryReleaseResistanceForExecution(
+        description: String,
+        at: Instant,
+    ): Boolean =
+        tryCommandForExecution(at) { trainerControl ->
+            releaseResistance(trainerControl, description)
+        }
+
+    @Synchronized
+    fun tryStopForExecution(
+        description: String,
+        at: Instant,
+    ): Boolean =
+        tryCommandForExecution(at) { trainerControl ->
+            stop(trainerControl, description)
+        }
+
+    @Synchronized
+    fun tryPauseForExecution(
+        description: String,
+        at: Instant,
+    ): Boolean =
+        tryCommandForExecution(at) { trainerControl ->
+            pause(trainerControl, description)
+        }
+
+    private fun executeTrainerCommand(
+        action: String,
+        description: String,
+        synchronizedTargetPowerWatts: Int?,
+        recordSynchronization: Boolean = true,
+        command: () -> Unit,
+    ) {
         logger.debug(
-            "Free Ride command: sessionId={} reason={}",
+            "{} command: sessionId={} reason={} targetPowerWatts={}",
+            action,
             sessionId,
             description,
+            synchronizedTargetPowerWatts,
         )
         try {
-            trainerControl.setFreeRide()
+            command()
             logger.debug(
-                "Free Ride command accepted: sessionId={} reason={}",
+                "{} command accepted: sessionId={} reason={} targetPowerWatts={}",
+                action,
                 sessionId,
                 description,
+                synchronizedTargetPowerWatts,
             )
-            recordTargetSynchronizationIfPending(null)
+            if (recordSynchronization) {
+                recordTargetSynchronizationIfPending(synchronizedTargetPowerWatts)
+            }
         } catch (exception: Exception) {
             logger.warn(
-                "Free Ride command rejected: sessionId={} reason={} error={}",
+                "{} command rejected: sessionId={} reason={} targetPowerWatts={} error={}",
+                action,
                 sessionId,
                 description,
+                synchronizedTargetPowerWatts,
                 exception.message,
                 exception,
             )
@@ -305,11 +415,9 @@ class TrainerControlCoordinator(
         }
     }
 
-    @Synchronized
-    fun trySetTargetForExecution(
-        powerWatts: Int,
-        description: String,
+    private fun tryCommandForExecution(
         at: Instant,
+        command: (TrainerControl) -> Unit,
     ): Boolean {
         if (activeTrainerControl == null) {
             return false
@@ -320,33 +428,7 @@ class TrainerControlCoordinator(
             return false
         }
         return try {
-            setTarget(trainerControl, powerWatts, description)
-            true
-        } catch (exception: TrainingSessionUnavailableException) {
-            if (runCatching { selectedTrainer?.control() }.getOrNull() == null) {
-                markConnectionInterrupted(at)
-                false
-            } else {
-                throw exception
-            }
-        }
-    }
-
-    @Synchronized
-    fun trySetFreeRideForExecution(
-        description: String,
-        at: Instant,
-    ): Boolean {
-        if (activeTrainerControl == null) {
-            return false
-        }
-        val trainerControl = currentControl()
-        if (trainerControl == null) {
-            markConnectionInterrupted(at)
-            return false
-        }
-        return try {
-            setFreeRide(trainerControl, description)
+            command(trainerControl)
             true
         } catch (exception: TrainingSessionUnavailableException) {
             if (runCatching { selectedTrainer?.control() }.getOrNull() == null) {
@@ -370,7 +452,7 @@ class TrainerControlCoordinator(
             connectionRecovery = null
             targetSynchronizationPending = false
             targetSynchronizationAt = null
-            pendingZeroPowerCommand = false
+            pendingStopCommand = false
             lastTelemetryReceivedAt = null
             telemetryObserved = false
             connectionError = null
