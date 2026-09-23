@@ -111,21 +111,22 @@ function workoutRemainingLabel(
     return remaining === null ? null : `${formatClockDuration(remaining)} left`;
 }
 
-function currentStepText(
-    workout: TrainingWorkoutResponse | null,
+function currentStepDetails(
     steps: WorkoutDefinition["steps"],
     currentIndex: number,
     profile: AthleteProfile | null | undefined,
 ): string | null {
-    const liveText = workout?.stepText?.trim();
-    if (liveText) {
-        return liveText;
-    }
-
     const step = steps[currentIndex];
-    return step === undefined
-        ? null
-        : (stepLabel(step) ?? stepSummary(step, profile));
+    return step === undefined ? null : stepSummary(step, profile);
+}
+
+function currentStepDescription(
+    workout: TrainingWorkoutResponse | null,
+    steps: WorkoutDefinition["steps"],
+    currentIndex: number,
+): string | null {
+    const liveText = workout?.stepText?.trim();
+    return liveText || steps[currentIndex]?.text?.trim() || null;
 }
 
 function nextStepText(
@@ -165,11 +166,15 @@ export function WorkoutProgressTile({
     );
     const stepWeights = steps.map((step) => stepDuration(step) ?? 1);
     const progressPercent = workoutProgressPercent(workout, stepWeights, now);
-    const activeText = currentStepText(
-        workout,
+    const activeDetails = currentStepDetails(
         steps,
         currentIndex,
         athleteProfile,
+    );
+    const activeDescription = currentStepDescription(
+        workout,
+        steps,
+        currentIndex,
     );
     const upcomingText = nextStepText(steps, currentIndex, athleteProfile);
     const hasUpcomingStep =
@@ -241,12 +246,12 @@ export function WorkoutProgressTile({
 
                     <div className="mt-4 flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                            <p className="truncate text-sm font-bold text-white/90">
+                            <p className="text-sm leading-snug font-bold break-words text-white/90">
                                 {paused
                                     ? "Workout paused"
                                     : workout?.completed
                                       ? "Workout complete"
-                                      : (activeText ??
+                                      : (activeDetails ??
                                         activeStepTarget(
                                             workout,
                                             steps,
@@ -255,13 +260,10 @@ export function WorkoutProgressTile({
                             </p>
                             {!paused &&
                             workout !== null &&
-                            !workout.completed ? (
-                                <p className="mt-1 truncate text-xs font-semibold text-white/60">
-                                    {activeStepTarget(
-                                        workout,
-                                        steps,
-                                        athleteProfile,
-                                    )}
+                            !workout.completed &&
+                            activeDescription !== null ? (
+                                <p className="mt-1 text-xs leading-relaxed font-semibold break-words text-white/60">
+                                    {activeDescription}
                                 </p>
                             ) : null}
                         </div>
