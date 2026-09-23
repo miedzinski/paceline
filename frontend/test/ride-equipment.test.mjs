@@ -396,8 +396,19 @@ test("uses the backend-filtered session telemetry for live metrics", () => {
     // when the active ride selects its live telemetry:
     // then it uses the sparse backend snapshot and does not reconstruct raw source values:
     assert.deepEqual(
-        liveSessionTelemetry("CONNECTED", filteredTelemetry),
+        liveSessionTelemetry("ACTIVE", "CONNECTED", filteredTelemetry),
         filteredTelemetry.cycling,
     );
-    assert.equal(liveSessionTelemetry("INTERRUPTED", filteredTelemetry), null);
+    assert.deepEqual(
+        liveSessionTelemetry("PAUSED", "CONNECTED", filteredTelemetry),
+        filteredTelemetry.cycling,
+    );
+    assert.equal(
+        liveSessionTelemetry("PAUSED", "INTERRUPTED", filteredTelemetry),
+        null,
+    );
+    assert.equal(
+        liveSessionTelemetry("STOPPED", "CONNECTED", filteredTelemetry),
+        null,
+    );
 });

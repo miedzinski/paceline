@@ -290,6 +290,75 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
+    fun `pause response preserves fresh cycling telemetry without a projection gap`() {
+        // given an active telemetry-capable session with a fresh trainer reading:
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                powerControl = FakeTrainerControl(),
+                telemetryCapabilityAvailable = true,
+            )
+        val session = coordinator(rideSourceCatalog, clock)
+        val sessionId = requireNotNull(session.start().sessionId)
+        val latest = telemetry(receivedAt = now, distanceMeters = 1_000.0)
+        rideSourceCatalog.emitTelemetry(latest)
+        session.current()
+
+        // when the session is paused:
+        val paused = session.pause(sessionId)
+
+        // then the immediate pause response keeps the fresh power and cadence projection:
+        assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
+        assertEquals(latest, paused.telemetry?.cycling?.sample)
+        assertEquals(TelemetryAvailability.CURRENT, paused.telemetry?.cycling?.availability)
+    }
+
+    @Test
+    fun `keeps selected live telemetry current while a session is paused`() {
+        // given a paused session with selected cycling and heart-rate sources:
+        val control = FakeTrainerControl()
+        val rideSourceCatalog =
+            FakeRideSourceCatalog(
+                powerControl = control,
+                telemetryCapabilityAvailable = true,
+                availableHeartRateSources = listOf(heartRateSource("strap")),
+            )
+        val mutableClock = MutableTestClock(now)
+        val session = coordinator(rideSourceCatalog, mutableClock)
+        val started = session.start(equipment = RideEquipmentSelection(heartRateSourceId = "strap"))
+        val sessionId = requireNotNull(started.sessionId)
+        session.pause(sessionId)
+
+        // when both sources publish new readings during the pause:
+        val receivedAt = now.plusSeconds(1)
+        mutableClock.currentTime = receivedAt
+        val cycling = telemetry(receivedAt = receivedAt, distanceMeters = 1_001.0)
+        val heartRate = HeartRateTelemetry(heartRateBpm = 153, receivedAt = receivedAt)
+        rideSourceCatalog.emitTelemetry(cycling)
+        rideSourceCatalog.emitHeartRate("strap", heartRate)
+        val paused = session.current()
+
+        // then fresh readings remain visible without resuming or sending further control commands:
+        assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
+        assertEquals(cycling, paused.telemetry?.cycling?.sample)
+        assertEquals(heartRate, paused.telemetry?.heartRate?.sample)
+        assertEquals(TelemetryAvailability.CURRENT, paused.telemetry?.cycling?.availability)
+        assertEquals(TelemetryAvailability.CURRENT, paused.telemetry?.heartRate?.availability)
+        assertEquals(listOf("target:0", "pause"), control.powerAndLifecycleCommands)
+
+        // when the sources stop sending and the freshness window expires during the pause:
+        mutableClock.currentTime = receivedAt.plusSeconds(20)
+        val stale = session.current()
+
+        // then old values are withheld and the connection is not treated as a workout resume:
+        assertEquals(TelemetryAvailability.INTERRUPTED, stale.telemetry?.cycling?.availability)
+        assertNull(stale.telemetry?.cycling?.sample)
+        assertEquals(TelemetryAvailability.INTERRUPTED, stale.telemetry?.heartRate?.availability)
+        assertNull(stale.telemetry?.heartRate?.sample)
+        assertEquals(TrainingSessionPhase.PAUSED, stale.phase)
+        assertEquals(listOf("target:0", "pause"), control.powerAndLifecycleCommands)
+    }
+
+    @Test
     fun `marks a selected heart-rate stream interrupted after its freshness window`() {
         // given a selected heart-rate source with a two-second freshness window:
         val mutableClock = MutableTestClock(now)
@@ -1561,7 +1630,7 @@ class TrainingSessionCoordinatorTest {
     }
 
     @Test
-    fun `pausing a session sends pause and stops recording until resume`() {
+    fun `pausing a session sends trainer commands and records telemetry until resume`() {
         // given an active manual session with a selected ERG target and telemetry:
         val powerControl = FakeTrainerControl()
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl)
@@ -1574,7 +1643,7 @@ class TrainingSessionCoordinatorTest {
         val beforePause = telemetry(receivedAt = now.plusSeconds(1), distanceMeters = 1_000.0)
         rideSourceCatalog.emitTelemetry(beforePause)
 
-        // when the session is paused, a notification arrives, then the session resumes and records again:
+        // when the session is paused, telemetry arrives, then the session resumes and records again:
         mutableClock.currentTime = now.plusSeconds(2)
         val paused = session.pause(sessionId)
         val duringPause = telemetry(receivedAt = now.plusSeconds(3), distanceMeters = 1_001.0)
@@ -1586,7 +1655,7 @@ class TrainingSessionCoordinatorTest {
         session.stop(sessionId)
         session.upload(sessionId)
 
-        // then the session pauses, resumes its prior target, and excludes paused samples:
+        // then the session pauses, resumes its prior target, and retains every observed sample:
         assertEquals(TrainingSessionPhase.PAUSED, paused.phase)
         assertEquals(null, paused.ergTargetPowerWatts)
         assertEquals(TrainingSessionPhase.ACTIVE, resumed.phase)
@@ -1600,14 +1669,14 @@ class TrainingSessionCoordinatorTest {
         assertEquals(2, powerControl.startOrResumeCalls)
         assertEquals(1, powerControl.stopCalls)
         assertEquals(
-            listOf(beforePause.receivedAt, afterResume.receivedAt),
+            listOf(beforePause.receivedAt, duringPause.receivedAt, afterResume.receivedAt),
             uploader.uploads
                 .single()
                 .samples
                 .map { it.receivedAt },
         )
         assertEquals(
-            listOf(beforePause.receivedAt, afterResume.receivedAt),
+            listOf(beforePause.receivedAt, duringPause.receivedAt, afterResume.receivedAt),
             uploader.uploads
                 .single()
                 .cyclingObservations

@@ -24,6 +24,30 @@ export function phaseHasPulse(phase: string): boolean {
     return ["DISCOVERING", "CONNECTING"].includes(phase);
 }
 
+export function shouldShowConnectionBanner({
+    hasTrainer,
+    telemetryAvailable,
+    status,
+    paused,
+    postRideOpen,
+}: {
+    hasTrainer: boolean;
+    telemetryAvailable: boolean;
+    status: string;
+    paused: boolean;
+    postRideOpen: boolean;
+}): boolean {
+    if (postRideOpen) {
+        return false;
+    }
+
+    if (hasTrainer && telemetryAvailable && status === "CONNECTED") {
+        return false;
+    }
+
+    return !(paused && hasTrainer && status === "CONNECTED");
+}
+
 export function formatTimestamp(timestamp: string): string {
     const date = new Date(timestamp);
     if (Number.isNaN(date.getTime())) {

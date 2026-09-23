@@ -1,3 +1,4 @@
+import { shouldShowConnectionBanner } from "@/lib/connection";
 import { ChevronRight, CircleAlert, WifiOff } from "lucide-react";
 import type { TrainingSessionResponse } from "@/types";
 import { cn } from "@/lib/utils";
@@ -186,6 +187,8 @@ export function ConnectionBanner({
     status,
     retryAttempt,
     error,
+    paused,
+    postRideOpen,
     onOpenEquipment,
 }: {
     hasTrainer: boolean;
@@ -194,9 +197,19 @@ export function ConnectionBanner({
     status: TrainingSessionResponse["trainerConnection"];
     retryAttempt: number | null;
     error: string | null;
+    paused: boolean;
+    postRideOpen: boolean;
     onOpenEquipment: () => void;
 }) {
-    if (hasTrainer && telemetryAvailable && status === "CONNECTED") {
+    if (
+        !shouldShowConnectionBanner({
+            hasTrainer,
+            telemetryAvailable,
+            status,
+            paused,
+            postRideOpen,
+        })
+    ) {
         return null;
     }
 

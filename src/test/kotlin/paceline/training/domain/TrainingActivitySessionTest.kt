@@ -18,11 +18,12 @@ class TrainingActivitySessionTest {
     private val start = Instant.parse("2026-09-16T12:00:00Z")
 
     @Test
-    fun `owns recording subscriptions across pause and resume`() {
+    fun `records telemetry throughout pause without notifying active observers`() {
         // given an activity session with an active trainer telemetry subscription:
         val rideSourceCatalog = FakeRideSourceCatalog(powerControl = FakeTrainerControl())
         val activitySession = TrainingActivitySession()
         val sessionId = UUID.randomUUID()
+        var activeObserverNotifications = 0
         activitySession.start(
             sessionId = sessionId,
             startedAt = start,
@@ -31,6 +32,7 @@ class TrainingActivitySessionTest {
             onTelemetry = {},
             onHeartRate = { _, _, _ -> },
             equipment = rideSourceCatalog.selectedRideEquipment(defaultSelection()),
+            onSourceTelemetry = { _, _ -> activeObserverNotifications += 1 },
         )
 
         // when telemetry arrives before pause, during pause, and after resume:
@@ -40,12 +42,13 @@ class TrainingActivitySessionTest {
         activitySession.resumeRecording(sessionId)
         rideSourceCatalog.emitTelemetry(telemetry(start.plusSeconds(3)))
 
-        // then only samples from recording intervals belong to the finalized activity:
+        // then all observed samples are recorded, while runtime observers receive only active samples:
         val activity = activitySession.finish(sessionId, start.plusSeconds(4))
         assertEquals(
-            listOf(start.plusSeconds(1), start.plusSeconds(3)),
+            listOf(start.plusSeconds(1), start.plusSeconds(2), start.plusSeconds(3)),
             activity.samples.map { it.receivedAt },
         )
+        assertEquals(2, activeObserverNotifications)
     }
 
     @Test
@@ -144,7 +147,7 @@ class TrainingActivitySessionTest {
     }
 
     @Test
-    fun `does not accept heart-rate notifications while paused`() {
+    fun `records heart-rate notifications received while paused`() {
         // given an activity session whose selected heart-rate callback records accepted samples:
         val rideSourceCatalog =
             FakeRideSourceCatalog(
@@ -172,9 +175,9 @@ class TrainingActivitySessionTest {
         activitySession.resumeRecording(sessionId)
         rideSourceCatalog.emitHeartRate("strap", heartRate(150))
 
-        // then only notifications received while recording is active belong to the activity:
+        // then selected heart-rate notifications received before, during, and after pause are retained:
         val activity = activitySession.finish(sessionId, start.plusSeconds(151))
-        assertEquals(listOf(140, 150), activity.samples.mapNotNull { it.heartRateBpm })
+        assertEquals(listOf(140, 145, 150), activity.samples.mapNotNull { it.heartRateBpm })
     }
 
     @Test

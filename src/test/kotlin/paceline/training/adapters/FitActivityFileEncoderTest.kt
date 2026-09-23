@@ -424,8 +424,8 @@ class FitActivityFileEncoderTest {
     }
 
     @Test
-    fun `activity file exports pause and resume markers without synthetic samples`() {
-        // given a ride with a pause gap and no telemetry during that interval:
+    fun `activity file includes pause samples and excludes paused time from timer totals`() {
+        // given a ride with one paused interval and a real telemetry sample during that interval:
         val start = Instant.parse("2026-09-14T12:00:00Z")
         val activity =
             RecordedTrainingActivity(
@@ -438,6 +438,7 @@ class FitActivityFileEncoderTest {
                 samples =
                     listOf(
                         sample(start.toString(), 1_000.0, 200),
+                        sample(start.plusSeconds(2).toString(), 1_000.5, 160),
                         sample(start.plusSeconds(4).toString(), 1_001.0, 205),
                     ),
                 events =
@@ -457,17 +458,67 @@ class FitActivityFileEncoderTest {
         val messages = decode(encoder.encode(activity))
         val events = messages.filter { it.name == "event" }
         val records = messages.filter { it.name == "record" }
+        val lap = messages.single { it.name == "lap" }
+        val session = messages.single { it.name == "session" }
+        val activityMessage = messages.single { it.name == "activity" }
 
-        // then the pause lifecycle is exported as markers and the gap remains a gap:
-        assertEquals(2, records.size)
+        // then real pause samples remain present, elapsed time includes the pause, and timer time excludes it:
+        assertEquals(3, records.size)
         assertEquals(
-            listOf(EventType.START, EventType.MARKER, EventType.MARKER, EventType.STOP_ALL),
+            listOf(200, 160, 205),
+            records.map { it.getFieldIntegerValue(RecordMesg.PowerFieldNum) },
+        )
+        assertEquals(
+            listOf(EventType.START, EventType.STOP, EventType.START, EventType.STOP_ALL),
             events.map { EventType.getByValue(it.getFieldShortValue(EventMesg.EventTypeFieldNum)) },
         )
         assertEquals(
-            listOf(Event.TIMER, Event.USER_MARKER, Event.USER_MARKER, Event.TIMER),
+            listOf(Event.TIMER, Event.TIMER, Event.TIMER, Event.TIMER),
             events.map { Event.getByValue(it.getFieldShortValue(EventMesg.EventFieldNum)) },
         )
+        assertEquals(4.0f, session.getFieldFloatValue(com.garmin.fit.SessionMesg.TotalElapsedTimeFieldNum))
+        assertEquals(2.0f, session.getFieldFloatValue(com.garmin.fit.SessionMesg.TotalTimerTimeFieldNum))
+        assertEquals(188, session.getFieldIntegerValue(com.garmin.fit.SessionMesg.AvgPowerFieldNum))
+        assertEquals(4.0f, lap.getFieldFloatValue(LapMesg.TotalElapsedTimeFieldNum))
+        assertEquals(2.0f, lap.getFieldFloatValue(LapMesg.TotalTimerTimeFieldNum))
+        assertEquals(2.0f, activityMessage.getFieldFloatValue(ActivityMesg.TotalTimerTimeFieldNum))
+    }
+
+    @Test
+    fun `activity stopped while paused excludes the remaining pause from timer totals`() {
+        // given a ride stopped before it resumed from a manual pause:
+        val start = Instant.parse("2026-09-14T12:00:00Z")
+        val activity =
+            RecordedTrainingActivity(
+                sessionId = UUID.randomUUID(),
+                startedAt = start,
+                stoppedAt = start.plusSeconds(4),
+                name = "Stopped while paused",
+                workoutSource = null,
+                workoutCompleted = false,
+                samples =
+                    listOf(
+                        sample(start.toString(), 1_000.0, 200),
+                        sample(start.plusSeconds(2).toString(), 1_000.5, 160),
+                    ),
+                events =
+                    listOf(
+                        TrainingActivityEvent(
+                            type = TrainingActivityEventType.TRAINING_PAUSED,
+                            occurredAt = start.plusSeconds(1),
+                        ),
+                    ),
+            )
+
+        // when the activity is encoded as FIT:
+        val messages = decode(encoder.encode(activity))
+        val session = messages.single { it.name == "session" }
+        val records = messages.filter { it.name == "record" }
+
+        // then the paused sample is kept and timer time ends at the pause:
+        assertEquals(2, records.size)
+        assertEquals(4.0f, session.getFieldFloatValue(com.garmin.fit.SessionMesg.TotalElapsedTimeFieldNum))
+        assertEquals(1.0f, session.getFieldFloatValue(com.garmin.fit.SessionMesg.TotalTimerTimeFieldNum))
     }
 
     private fun decode(file: ActivityFile): List<Mesg> {

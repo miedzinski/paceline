@@ -360,7 +360,7 @@ class TrainingSessionCoordinator(
                 ergRequestedTargetPowerWatts = targetPowerWatts,
                 ergTargetPowerWatts = null,
                 ergProtection = ErgProtectionState.inactive(),
-                telemetry = interruptTelemetry(activeState.telemetry),
+                telemetry = activeState.telemetry,
             )
         return state
     }
@@ -1129,7 +1129,9 @@ class TrainingSessionCoordinator(
         if (sessionId != null) {
             activitySession.rebindAfterTrainerRecovery(
                 sessionId = sessionId,
-                active = state.phase == TrainingSessionPhase.ACTIVE,
+                recording =
+                    state.phase == TrainingSessionPhase.ACTIVE ||
+                        state.phase == TrainingSessionPhase.PAUSED,
             )
         }
         state =
@@ -1222,8 +1224,9 @@ class TrainingSessionCoordinator(
         telemetry: HeartRateTelemetry,
     ) {
         synchronized(this) {
+            val phase = state.phase
             if (
-                state.phase != TrainingSessionPhase.ACTIVE ||
+                (phase != TrainingSessionPhase.ACTIVE && phase != TrainingSessionPhase.PAUSED) ||
                 state.sessionId != sessionId ||
                 activitySession.selectedHeartRateSourceId() != sourceId
             ) {
@@ -1232,12 +1235,13 @@ class TrainingSessionCoordinator(
             if (!activitySession.recordHeartRate(sessionId, sourceId, telemetry)) {
                 return
             }
+            val observedAt = clock.instant()
             observeHeartRateTelemetry(telemetry)
             val currentTelemetry = state.telemetry ?: TrainingSessionTelemetry()
             state =
                 state.copy(
-                    changedAt = clock.instant(),
-                    telemetry = currentTelemetry.copy(heartRate = heartRateProjection(clock.instant())),
+                    changedAt = observedAt,
+                    telemetry = currentTelemetry.copy(heartRate = heartRateProjection(observedAt)),
                 )
         }
     }
@@ -1245,7 +1249,9 @@ class TrainingSessionCoordinator(
     private fun refreshTelemetry(at: Instant = clock.instant()) {
         val latest =
             when (state.phase) {
-                TrainingSessionPhase.ACTIVE -> {
+                TrainingSessionPhase.ACTIVE,
+                TrainingSessionPhase.PAUSED,
+                -> {
                     TrainingSessionTelemetry(
                         cycling = cyclingProjection(currentExecutionTelemetry(currentControlTelemetry(), at), at),
                         heartRate = heartRateProjection(at),
@@ -1351,18 +1357,6 @@ class TrainingSessionCoordinator(
             TelemetryProjection.unavailable()
         }
     }
-
-    private fun interruptTelemetry(telemetry: TrainingSessionTelemetry?): TrainingSessionTelemetry? =
-        telemetry?.let {
-            TrainingSessionTelemetry(
-                cycling = interruptedOrUnavailable(it.cycling),
-                heartRate = interruptedOrUnavailable(it.heartRate),
-            )
-        }
-
-    private fun <T> interruptedOrUnavailable(projection: TelemetryProjection<T>): TelemetryProjection<T> =
-        projection.lastReceivedAt?.let(TelemetryProjection.Companion::interrupted)
-            ?: TelemetryProjection.unavailable()
 
     private companion object {
         const val DEFAULT_WORKOUT_POWER_TARGET_PERCENT = 100L

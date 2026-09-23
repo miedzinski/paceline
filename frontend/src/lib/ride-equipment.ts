@@ -8,6 +8,7 @@ import type {
     RideReadinessReason,
     TelemetryProjection,
     TrainerConnectionStatus,
+    TrainingSessionState,
     TrainingSessionTelemetry,
 } from "@/types";
 
@@ -176,10 +177,13 @@ export function equipmentPillLabel(
 }
 
 export function liveSessionTelemetry(
+    sessionState: TrainingSessionState,
     trainerConnection: TrainerConnectionStatus,
     telemetry: TrainingSessionTelemetry | null,
 ): TelemetryProjection<CyclingTelemetry> | null {
-    return trainerConnection === "CONNECTED"
+    const sessionIsLive =
+        sessionState === "ACTIVE" || sessionState === "PAUSED";
+    return sessionIsLive && trainerConnection === "CONNECTED"
         ? (telemetry?.cycling ?? null)
         : null;
 }

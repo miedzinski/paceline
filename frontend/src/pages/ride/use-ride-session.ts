@@ -127,10 +127,11 @@ export function useRideSession() {
     >(null);
     const sessionRefreshGeneration = useRef(0);
     const automaticStartKey = useRef<string | null>(null);
-    const liveTelemetry =
-        session.state === "ACTIVE"
-            ? liveSessionTelemetry(session.trainerConnection, session.telemetry)
-            : null;
+    const liveTelemetry = liveSessionTelemetry(
+        session.state,
+        session.trainerConnection,
+        session.telemetry,
+    );
     const cyclingProjection =
         liveTelemetry ??
         (session.state === "STOPPED"

@@ -16,7 +16,8 @@ class TrainingActivitySession {
     private var activeEquipment: SelectedRideEquipment? = null
     private val telemetryRegistrations = mutableListOf<AutoCloseable>()
     private var heartRateRegistration: AutoCloseable? = null
-    private var recordingActive = false
+    private var recordingOpen = false
+    private var recordingPaused = false
     private var telemetryObserver: ((CyclingTelemetry) -> Unit)? = null
     private var sourceTelemetryObserver: ((String, CyclingTelemetry) -> Unit)? = null
     private var heartRateObserver: ((UUID, String, HeartRateTelemetry) -> Unit)? = null
@@ -55,7 +56,8 @@ class TrainingActivitySession {
         sourceTelemetryObserver = onSourceTelemetry
         heartRateObserver = onHeartRate
         completedActivity = null
-        recordingActive = true
+        recordingOpen = true
+        recordingPaused = false
         registerTelemetry(sessionId)
         registerHeartRate(sessionId)
     }
@@ -68,8 +70,7 @@ class TrainingActivitySession {
 
     @Synchronized
     fun pauseRecording() {
-        closeRecordingListeners()
-        recordingActive = false
+        recordingPaused = true
     }
 
     @Synchronized
@@ -80,20 +81,22 @@ class TrainingActivitySession {
     @Synchronized
     fun resumeRecording(sessionId: UUID) {
         check(activeSessionId == sessionId) { "No recording exists for session $sessionId" }
-        recordingActive = true
-        registerTelemetry(sessionId)
-        registerHeartRate(sessionId)
+        recordingPaused = false
     }
 
     @Synchronized
     fun rebindAfterTrainerRecovery(
         sessionId: UUID,
-        active: Boolean,
+        recording: Boolean,
     ) {
         closeRecordingListeners()
-        recordingActive = active
-        if (active) {
-            resumeRecording(sessionId)
+        recordingOpen = recording
+        if (recording) {
+            check(activeSessionId == sessionId) { "No recording exists for session $sessionId" }
+            registerTelemetry(sessionId)
+            registerHeartRate(sessionId)
+        } else {
+            recordingPaused = false
         }
     }
 
@@ -126,7 +129,7 @@ class TrainingActivitySession {
         sessionId: UUID,
         observation: RecordedCyclingObservation,
     ): Boolean {
-        if (!recordingActive || activeSessionId != sessionId) {
+        if (!recordingOpen || activeSessionId != sessionId) {
             return false
         }
         activityRecorder.recordCyclingObservation(sessionId, observation)
@@ -138,7 +141,7 @@ class TrainingActivitySession {
         sessionId: UUID,
         observation: RecordedHeartRateObservation,
     ): Boolean {
-        if (!recordingActive || activeSessionId != sessionId) {
+        if (!recordingOpen || activeSessionId != sessionId) {
             return false
         }
         if (activeEquipment?.heartRate?.sourceId != observation.sourceId) {
@@ -197,7 +200,8 @@ class TrainingActivitySession {
         stoppedAt: Instant,
     ): RecordedTrainingActivity {
         closeRecordingListeners()
-        recordingActive = false
+        recordingOpen = false
+        recordingPaused = false
         val activity = activityRecorder.finish(sessionId, stoppedAt)
         completedActivity = activity
         activeSessionId = null
@@ -240,30 +244,33 @@ class TrainingActivitySession {
         sourceId: String,
         telemetry: CyclingTelemetry,
     ) {
-        val observers =
+        val context =
             synchronized(this) {
-                if (!recordingActive || activeSessionId != sessionId) {
+                if (!recordingOpen || activeSessionId != sessionId) {
                     null
                 } else {
-                    sourceTelemetryObserver to telemetryObserver
+                    TelemetryContext(
+                        selection = requireNotNull(activeEquipment).selection,
+                        notifyObservers = !recordingPaused,
+                        sourceObserver = sourceTelemetryObserver,
+                        telemetryObserver = telemetryObserver,
+                    )
                 }
-            }
-        if (observers == null) {
-            return
+            } ?: return
+        if (context.notifyObservers) {
+            context.sourceObserver?.invoke(sourceId, telemetry) ?: context.telemetryObserver?.invoke(telemetry)
         }
-        val (sourceObserver, genericObserver) = observers
-        sourceObserver?.invoke(sourceId, telemetry) ?: genericObserver?.invoke(telemetry)
-        val equipment = synchronized(this) { activeEquipment }
         val observation =
             RecordedCyclingObservation.fromSelected(
                 telemetry,
                 sourceId,
-                requireNotNull(equipment).selection,
+                context.selection,
             )
         recordCyclingObservation(sessionId, observation)
     }
 
     private fun registerHeartRate(sessionId: UUID) {
+        heartRateRegistration?.close()
         val source = activeEquipment?.heartRate
         heartRateRegistration =
             source?.let { selectedSource ->
@@ -271,7 +278,7 @@ class TrainingActivitySession {
                     val observer =
                         synchronized(this) {
                             if (
-                                !recordingActive ||
+                                !recordingOpen ||
                                 activeSessionId != sessionId ||
                                 selectedHeartRateSourceId() != selectedSource.sourceId
                             ) {
@@ -304,4 +311,11 @@ class TrainingActivitySession {
         val stepName = step.text?.trim()?.takeIf(String::isNotBlank) ?: "Step $stepNumber"
         return "Step $stepNumber/$totalSteps: $stepName"
     }
+
+    private data class TelemetryContext(
+        val selection: RideEquipmentSelection,
+        val notifyObservers: Boolean,
+        val sourceObserver: ((String, CyclingTelemetry) -> Unit)?,
+        val telemetryObserver: ((CyclingTelemetry) -> Unit)?,
+    )
 }

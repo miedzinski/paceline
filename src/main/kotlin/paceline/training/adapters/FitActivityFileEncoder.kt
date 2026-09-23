@@ -75,7 +75,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             activity.writeTimeline(fileEncoder, firstDistance)
             fileEncoder.write(activity.timerEvent(EventType.STOP_ALL, activity.stoppedAt))
             segments.forEachIndexed { index, segment ->
-                fileEncoder.write(segment.lapMessage(index, workoutStepIndices[index]))
+                fileEncoder.write(segment.lapMessage(index, workoutStepIndices[index], activity))
             }
             fileEncoder.write(activity.sessionMessage(segments.size, firstDistance))
             fileEncoder.write(activity.activityMessage())
@@ -159,6 +159,12 @@ class FitActivityFileEncoder : ActivityFileEncoder {
         EventMesg().apply {
             timestamp = occurredAt.toFitDateTime()
             val isWorkoutAdjustment = type == TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED
+            val timerEventType =
+                when (type) {
+                    TrainingActivityEventType.TRAINING_PAUSED -> EventType.STOP
+                    TrainingActivityEventType.TRAINING_RESUMED -> EventType.START
+                    else -> null
+                }
             val isTrainerConnectionEvent =
                 type in
                     setOf(
@@ -166,33 +172,34 @@ class FitActivityFileEncoder : ActivityFileEncoder {
                         TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
                         TrainingActivityEventType.TRAINER_RECONNECTED,
                         TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
-                        TrainingActivityEventType.TRAINING_PAUSED,
-                        TrainingActivityEventType.TRAINING_RESUMED,
                     )
             event =
-                if (isWorkoutAdjustment || isTrainerConnectionEvent) {
-                    Event.USER_MARKER
-                } else {
-                    Event.CAD_LOW_ALERT
+                when {
+                    timerEventType != null -> Event.TIMER
+                    isWorkoutAdjustment || isTrainerConnectionEvent -> Event.USER_MARKER
+                    else -> Event.CAD_LOW_ALERT
                 }
             eventType =
-                when (type) {
-                    TrainingActivityEventType.ERG_PROTECTION_STARTED -> EventType.START
+                timerEventType
+                    ?: when (type) {
+                        TrainingActivityEventType.ERG_PROTECTION_STARTED -> EventType.START
 
-                    TrainingActivityEventType.ERG_PROTECTION_ENDED -> EventType.STOP
+                        TrainingActivityEventType.ERG_PROTECTION_ENDED -> EventType.STOP
 
-                    TrainingActivityEventType.ERG_PROTECTION_FAILED -> EventType.MARKER
+                        TrainingActivityEventType.ERG_PROTECTION_FAILED -> EventType.MARKER
 
-                    TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED -> EventType.MARKER
+                        TrainingActivityEventType.WORKOUT_TARGET_ADJUSTED -> EventType.MARKER
 
-                    TrainingActivityEventType.TRAINER_CONNECTION_INTERRUPTED,
-                    TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
-                    TrainingActivityEventType.TRAINER_RECONNECTED,
-                    TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
-                    TrainingActivityEventType.TRAINING_PAUSED,
-                    TrainingActivityEventType.TRAINING_RESUMED,
-                    -> EventType.MARKER
-                }
+                        TrainingActivityEventType.TRAINER_CONNECTION_INTERRUPTED,
+                        TrainingActivityEventType.TRAINER_RECONNECT_ATTEMPTED,
+                        TrainingActivityEventType.TRAINER_RECONNECTED,
+                        TrainingActivityEventType.TRAINER_TARGET_SYNCHRONIZED,
+                        -> EventType.MARKER
+
+                        TrainingActivityEventType.TRAINING_PAUSED,
+                        TrainingActivityEventType.TRAINING_RESUMED,
+                        -> error("Pause and resume events must map to FIT timer events")
+                    }
             if (isWorkoutAdjustment) {
                 targetPowerWatts
                     ?.coerceIn(FIT_UINT16_RANGE)
@@ -204,7 +211,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
                 (targetPowerWatts ?: retryAttempt)
                     ?.coerceIn(FIT_UINT16_RANGE)
                     ?.let { data16 = it }
-            } else {
+            } else if (timerEventType == null) {
                 (cadenceRpm?.roundToInt() ?: retryAttempt)
                     ?.coerceIn(FIT_UINT16_RANGE)
                     ?.let { data16 = it }
@@ -219,8 +226,8 @@ class FitActivityFileEncoder : ActivityFileEncoder {
             messageIndex = 0
             timestamp = stoppedAt.toFitDateTime()
             startTime = startedAt.toFitDateTime()
-            totalElapsedTime = durationSeconds().toFloat()
-            totalTimerTime = durationSeconds().toFloat()
+            totalElapsedTime = elapsedDurationSeconds(startedAt, stoppedAt).toFloat()
+            totalTimerTime = timerDurationSeconds(startedAt, stoppedAt).toFloat()
             boundedExportSamples().relativeDistance(firstDistance)?.toFloat()?.let { totalDistance = it }
             sport = Sport.CYCLING
             subSport = SubSport.INDOOR_CYCLING
@@ -242,7 +249,7 @@ class FitActivityFileEncoder : ActivityFileEncoder {
                     .totalSeconds
         return ActivityMesg().apply {
             timestamp = stoppedAt.toFitDateTime()
-            totalTimerTime = durationSeconds().toFloat()
+            totalTimerTime = timerDurationSeconds(startedAt, stoppedAt).toFloat()
             numSessions = 1
             type = Activity.MANUAL
             this.localTimestamp = localTimestamp
@@ -338,13 +345,14 @@ class FitActivityFileEncoder : ActivityFileEncoder {
     private fun RecordedTrainingActivitySegment.lapMessage(
         index: Int,
         workoutStepIndex: Int?,
+        activity: RecordedTrainingActivity,
     ): LapMesg =
         LapMesg().apply {
             messageIndex = index
             timestamp = stoppedAt.toFitDateTime()
             startTime = startedAt.toFitDateTime()
-            totalElapsedTime = durationSeconds().toFloat()
-            totalTimerTime = durationSeconds().toFloat()
+            totalElapsedTime = elapsedDurationSeconds(startedAt, stoppedAt).toFloat()
+            totalTimerTime = activity.timerDurationSeconds(startedAt, stoppedAt).toFloat()
             distanceMeters()?.toFloat()?.let { totalDistance = it }
             intensity = workoutStep?.intensity.toFitIntensity()
             lapTrigger = workoutStep?.completion.toLapTrigger()
@@ -392,11 +400,60 @@ class FitActivityFileEncoder : ActivityFileEncoder {
         mapNotNull { it.powerWatts?.takeIf { power -> power in FIT_UINT16_RANGE } }
             .maxOrNull()
 
-    private fun RecordedTrainingActivity.durationSeconds(): Double =
-        max(0.0, Duration.between(startedAt, stoppedAt).toMillis() / MILLIS_PER_SECOND.toDouble())
+    private fun RecordedTrainingActivity.timerDurationSeconds(
+        from: Instant,
+        through: Instant,
+    ): Double {
+        val elapsedSeconds = elapsedDurationSeconds(from, through)
+        val pausedSeconds =
+            pauseIntervals().sumOf { interval ->
+                val overlapStart = maxOf(startedAt, from, interval.startedAt)
+                val overlapEnd = minOf(stoppedAt, through, interval.stoppedAt)
+                if (overlapEnd.isAfter(overlapStart)) {
+                    Duration.between(overlapStart, overlapEnd).toMillis() / MILLIS_PER_SECOND.toDouble()
+                } else {
+                    0.0
+                }
+            }
+        return max(0.0, elapsedSeconds - pausedSeconds)
+    }
 
-    private fun RecordedTrainingActivitySegment.durationSeconds(): Double =
-        max(0.0, Duration.between(startedAt, stoppedAt).toMillis() / MILLIS_PER_SECOND.toDouble())
+    private fun RecordedTrainingActivity.pauseIntervals(): List<PauseInterval> {
+        val intervals = mutableListOf<PauseInterval>()
+        var pausedAt: Instant? = null
+        events.sortedBy(TrainingActivityEvent::occurredAt).forEach { event ->
+            when (event.type) {
+                TrainingActivityEventType.TRAINING_PAUSED -> {
+                    if (pausedAt == null) {
+                        pausedAt = event.occurredAt
+                    }
+                }
+
+                TrainingActivityEventType.TRAINING_RESUMED -> {
+                    pausedAt?.let { start ->
+                        intervals += PauseInterval(start, event.occurredAt)
+                    }
+                    pausedAt = null
+                }
+
+                else -> {
+                    Unit
+                }
+            }
+        }
+        pausedAt?.let { start -> intervals += PauseInterval(start, stoppedAt) }
+        return intervals
+    }
+
+    private data class PauseInterval(
+        val startedAt: Instant,
+        val stoppedAt: Instant,
+    )
+
+    private fun elapsedDurationSeconds(
+        startedAt: Instant,
+        stoppedAt: Instant,
+    ): Double = max(0.0, Duration.between(startedAt, stoppedAt).toMillis() / MILLIS_PER_SECOND.toDouble())
 
     private fun TrainingTelemetrySample.fractionalSecond(): Double =
         floor(receivedAt.nano / NANOSECONDS_PER_SECOND.toDouble() * TIME128_HZ) / TIME128_HZ

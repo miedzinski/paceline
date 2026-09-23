@@ -101,6 +101,8 @@ export function ActiveRideView({ ride }: { ride: RideSessionModel }) {
                     status={session.trainerConnection}
                     retryAttempt={session.trainerConnectionRetryAttempt}
                     error={session.trainerConnectionError}
+                    paused={isPaused}
+                    postRideOpen={postRideOpen}
                     onOpenEquipment={openEquipment}
                 />
 
